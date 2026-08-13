@@ -886,12 +886,13 @@ pub fn try_create(slug: &str, timeouts: Timeouts) -> Option<Result<Box<dyn Provi
     })))
 }
 
-/// Look up a single model's metadata in the models.dev catalog, only if the
-/// catalog has already been downloaded. Never triggers a fetch — callers
-/// (e.g. `Model::from_spec`) must tolerate `None` and fall through, since
-/// the catalog may still be warming in the background.
+/// Look up a single model's metadata in the models.dev catalog, warming the
+/// shared catalog if needed. The catalog load prefers the on-disk cache and
+/// only fetches models.dev once on a cold cache, so catalog-backed models
+/// resolve at startup. Falls through to `None` if the slug is not in the
+/// (now-warmed) catalog.
 pub fn model_meta_if_available(slug: &str, model_id: &str) -> Option<CatalogMetaView> {
-    let data = catalog_provider_if_available(slug)?;
+    let data = catalog_provider(slug)?;
     let meta = data.models.get(model_id)?;
     Some(CatalogMetaView {
         context: meta.context,
