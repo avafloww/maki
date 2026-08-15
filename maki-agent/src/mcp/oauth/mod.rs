@@ -18,6 +18,7 @@ use tracing::{info, warn};
 
 use self::callback::{CallbackResult, CallbackServer};
 use self::discovery::parse_www_authenticate;
+use super::config::OauthClientConfig;
 use super::error::McpError;
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(600);
@@ -50,6 +51,7 @@ pub async fn authenticate(
     www_authenticate: Option<&str>,
     storage: &StateDir,
     interaction: Interaction,
+    static_client: Option<OauthClientConfig>,
 ) -> Result<McpAuthData, McpError> {
     let wrap = |e: OAuthError| McpError::OAuthFailed {
         server: server_name.into(),
@@ -101,12 +103,26 @@ pub async fn authenticate(
         )));
     }
 
-    let callback = CallbackServer::bind()
-        .await
-        .map_err(|e| wrap(OAuthError::Other(e)))?;
+    let callback = CallbackServer::bind(
+        static_client.as_ref().and_then(|c| c.callback_port),
+        static_client
+            .as_ref()
+            .and_then(|c| c.callback_path.as_deref()),
+        static_client
+            .as_ref()
+            .and_then(|c| c.callback_hostname.as_deref()),
+    )
+    .await
+    .map_err(|e| wrap(OAuthError::Other(e)))?;
     let redirect_uri = callback.redirect_uri();
 
-    let reg = if let Some(existing) = load_mcp_auth(storage, server_name, server_url)
+    let reg = if let Some(c) = static_client {
+        registration::ClientRegistration {
+            client_id: c.client_id,
+            client_secret: c.client_secret,
+            client_secret_expires_at: None,
+        }
+    } else if let Some(existing) = load_mcp_auth(storage, server_name, server_url)
         && existing.redirect_uri.as_deref() == Some(&redirect_uri)
     {
         registration::ClientRegistration {
@@ -160,7 +176,7 @@ pub async fn authenticate(
                 warn!(server = server_name, error = %e, "failed to open browser");
             }
 
-            eprintln!("Waiting for callback on 127.0.0.1:{}...", callback.port);
+            eprintln!("Waiting for callback on {redirect_uri}...");
             eprintln!("If this machine has no browser, log in on another device and paste");
             eprintln!("the full redirect URL ({redirect_uri}?...) here:");
 
@@ -207,6 +223,7 @@ pub async fn authenticate(
         client_secret: reg.client_secret,
         client_secret_expires_at: reg.client_secret_expires_at,
         redirect_uri: Some(redirect_uri),
+        token_endpoint: Some(auth_server.token_endpoint.clone()),
     };
 
     save_mcp_auth(storage, server_name, &data)
@@ -237,11 +254,21 @@ pub async fn silent_refresh(
     let client = build_http_client(SILENT_REFRESH_HTTP_TIMEOUT)
         .map_err(|e| OAuthError::Other(e.to_string()))?;
 
-    let auth_server = discover_auth_server_for(&client, server_url, None).await?;
+    // Trust the endpoint pinned at interactive auth over fresh discovery: a
+    // later-compromised server must not redirect the refresh token (and any
+    // static client secret) elsewhere. Pre-pin records fall back to discovery.
+    let token_endpoint = match existing.token_endpoint.clone() {
+        Some(pinned) => pinned,
+        None => {
+            discover_auth_server_for(&client, server_url, None)
+                .await?
+                .token_endpoint
+        }
+    };
 
     let new_tokens = token::refresh_token(
         &client,
-        &auth_server.token_endpoint,
+        &token_endpoint,
         &tokens.refresh,
         &existing.client_id,
         existing.client_secret.as_deref(),

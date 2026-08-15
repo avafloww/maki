@@ -57,8 +57,8 @@ use maki_agent::{
     AgentEvent, Envelope, ImageSource, McpConfigErrors, McpPromptInfo, McpSnapshotReader,
     SharedMessages, SubagentInfo,
 };
-use maki_config::UiConfig;
-use maki_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader, WinView};
+use maki_config::{ModelPolicy, UiConfig};
+use maki_lua::{BuiltinAction, EventHandle, HintReader, KeymapReader, LuaCommandReader, WinView};
 use maki_providers::{Model, ThinkingConfig, add_cost};
 use maki_storage::StateDir;
 use maki_storage::input_history::InputHistory;
@@ -180,6 +180,7 @@ pub struct App {
     pub(crate) shell: shell::ShellState,
     pub(crate) ui_config: UiConfig,
     pub(crate) permissions: Arc<PermissionManager>,
+    pub(crate) model_policy: Arc<ModelPolicy>,
     pub(crate) lua_event_handle: EventHandle,
     pub(super) keymap_reader: KeymapReader,
     pub(super) hint_reader: HintReader,
@@ -206,9 +207,10 @@ impl App {
         permissions: Arc<PermissionManager>,
         custom_commands: Arc<[maki_agent::command::CustomCommand]>,
         lua_event_handle: EventHandle,
+        model_policy: Arc<ModelPolicy>,
     ) -> Self {
         scrollbar::set_enabled(ui_config.scrollbar);
-        let state = SessionState::from_session(session, model, &storage);
+        let state = SessionState::from_session(session, model, &storage, &model_policy);
         let typewriter = ui_config.typewriter_ms_per_char;
         let flash = ui_config.flash_duration();
         let input_box = InputBox::new(
@@ -270,6 +272,7 @@ impl App {
             shell: shell::ShellState::default(),
             ui_config,
             permissions,
+            model_policy: Arc::clone(&model_policy),
             lua_event_handle,
             keymap_reader,
             hint_reader,
@@ -277,8 +280,12 @@ impl App {
             restoring: Arc::new(AtomicBool::new(false)),
             subagent_answers: HashMap::new(),
         };
-        app.model_picker
-            .set_recents(maki_storage::model::read_recents(&app.storage));
+        app.model_picker.set_recents(
+            maki_storage::model::read_recents(&app.storage)
+                .into_iter()
+                .filter(|spec| model_policy.allows(spec))
+                .collect(),
+        );
         app
     }
 
@@ -300,7 +307,10 @@ impl App {
     }
 
     pub(crate) fn record_recent_model(&mut self, spec: &str) {
-        let recents = maki_storage::model::push_recent(&self.storage, spec);
+        let recents = maki_storage::model::push_recent(&self.storage, spec)
+            .into_iter()
+            .filter(|spec| self.model_policy.allows(spec))
+            .collect();
         self.model_picker.set_recents(recents);
     }
 
@@ -485,20 +495,16 @@ impl App {
             });
         }
         if key::HELP.matches(key) {
-            self.help_modal.toggle();
-            return Some(vec![]);
+            return Some(self.run_builtin(BuiltinAction::Help));
         }
         if key::TASKS.matches(key) {
-            self.open_tasks();
-            return Some(vec![]);
+            return Some(self.run_builtin(BuiltinAction::Tasks));
         }
         if key::PREV_CHAT.matches(key) {
-            self.active_chat = self.active_chat.saturating_sub(1);
-            return Some(vec![]);
+            return Some(self.run_builtin(BuiltinAction::PrevChat));
         }
         if key::NEXT_CHAT.matches(key) {
-            self.active_chat = (self.active_chat + 1).min(self.chats.len() - 1);
-            return Some(vec![]);
+            return Some(self.run_builtin(BuiltinAction::NextChat));
         }
         if key::SCROLL_HALF_UP.matches(key) {
             let half = self.chats[self.active_chat].half_page();
@@ -703,15 +709,62 @@ impl App {
             });
         }
 
-        if key::PLAN_TOGGLE.matches(key)
-            && self.state.mode == Mode::Plan
-            && self.state.plan.is_ready()
-        {
-            self.plan_form.toggle();
-            return Some(vec![]);
+        if key::PLAN_TOGGLE.matches(key) && self.plan_toggle_ready() {
+            return Some(self.run_builtin(BuiltinAction::PlanToggle));
         }
 
         None
+    }
+
+    fn plan_toggle_ready(&self) -> bool {
+        self.state.mode == Mode::Plan && self.state.plan.is_ready()
+    }
+
+    /// Single implementation behind both the default keybindings and
+    /// `maki.ui.action`, so a Lua rebind can never drift from the
+    /// original key's behavior.
+    pub(crate) fn run_builtin(&mut self, action: BuiltinAction) -> Vec<Action> {
+        match action {
+            BuiltinAction::FilePicker => {
+                self.file_picker.open(&self.state.session.cwd);
+            }
+            BuiltinAction::Search => {
+                let top = self.chats[self.active_chat].scroll_top();
+                let auto = self.chats[self.active_chat].auto_scroll();
+                self.search_modal.open(top, auto);
+            }
+            BuiltinAction::Tasks => {
+                if self.task_picker.is_open() {
+                    self.task_picker.close();
+                } else {
+                    self.open_tasks();
+                }
+            }
+            BuiltinAction::Help => self.help_modal.toggle(),
+            BuiltinAction::PlanToggle => {
+                if self.plan_toggle_ready() {
+                    self.plan_form.toggle();
+                }
+            }
+            BuiltinAction::PlanEditor => {
+                return match self.state.plan.path() {
+                    Some(p) => vec![Action::OpenEditor(p.to_path_buf())],
+                    None => {
+                        self.flash(FLASH_NO_PLAN.into());
+                        vec![]
+                    }
+                };
+            }
+            BuiltinAction::EditInput => return vec![Action::EditInputInEditor],
+            BuiltinAction::PopQueue => {
+                self.queue.remove(0);
+            }
+            BuiltinAction::PrevChat => self.active_chat = self.active_chat.saturating_sub(1),
+            BuiltinAction::NextChat => {
+                self.active_chat = (self.active_chat + 1).min(self.chats.len() - 1);
+            }
+        }
+        vec![]
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Vec<Action> {
@@ -771,25 +824,17 @@ impl App {
 
     fn handle_main_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {
         if key::EDIT_INPUT.matches(key) {
-            return vec![Action::EditInputInEditor];
+            return self.run_builtin(BuiltinAction::EditInput);
         }
         if is_ctrl(&key) {
             if key::POP_QUEUE.matches(key) {
-                self.queue.remove(0);
+                return self.run_builtin(BuiltinAction::PopQueue);
             } else if key::OPEN_EDITOR.matches(key) {
-                return match self.state.plan.path() {
-                    Some(p) => vec![Action::OpenEditor(p.to_path_buf())],
-                    None => {
-                        self.flash(FLASH_NO_PLAN.into());
-                        vec![]
-                    }
-                };
+                return self.run_builtin(BuiltinAction::PlanEditor);
             } else if key::SEARCH.matches(key) {
-                let top = self.chats[self.active_chat].scroll_top();
-                let auto = self.chats[self.active_chat].auto_scroll();
-                self.search_modal.open(top, auto);
+                return self.run_builtin(BuiltinAction::Search);
             } else if key::FILE_PICKER.matches(key) {
-                self.file_picker.open(&self.state.session.cwd);
+                return self.run_builtin(BuiltinAction::FilePicker);
             } else if key.code == KeyCode::Char('v') && self.image_paste_rx.is_empty() {
                 self.start_image_paste();
             } else if let InputAction::PaletteSync(val) = self.input_box.handle_key(key) {
@@ -1474,10 +1519,18 @@ impl App {
         self.overlays().iter().any(|o| o.is_open())
     }
 
-    /// True when the agent is parked on user input: a permission prompt or an
-    /// auth retry. Drives the `needs_input` session status.
+    /// True when the agent is parked on user input. Drives the `needs_input`
+    /// session status.
     pub(crate) fn awaiting_input(&self) -> bool {
-        self.permission_prompt.is_open() || self.pending_input != PendingInput::None
+        self.permission_prompt.is_open()
+            || self.pending_input != PendingInput::None
+            || self.float_mgr.needs_input()
+    }
+
+    /// True while `recoverable_queue` holds user text captured at an agent
+    /// error; a background run would wipe it (`start_run` clears the queue).
+    pub(crate) fn holds_recovery_text(&self) -> bool {
+        !self.recoverable_queue.is_empty()
     }
 
     pub fn has_modal_overlay(&self) -> bool {

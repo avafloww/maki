@@ -3,6 +3,7 @@ use std::io::{self, IsTerminal, Read};
 use std::path::Path;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use color_eyre::Result;
 use color_eyre::eyre::Context;
@@ -253,6 +254,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
             prompt_slots,
             fast,
             workflow: stack.config.always_workflow,
+            model_policy: Arc::new(stack.config.provider.model_policy.clone()),
         })
         .context("run sdk mode")?;
         return Ok(());
@@ -272,6 +274,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
             stack.plugin_host.event_handle(),
             fast,
             stack.config.always_workflow,
+            Arc::new(stack.config.provider.model_policy.clone()),
         )
         .context("run print mode")?;
         return Ok(());
@@ -301,7 +304,13 @@ pub fn run(mut cli: Cli) -> Result<()> {
             }
         }
         let focused_tab = &tabs[focused];
-        let model = if focused_tab.messages().is_empty() {
+        let model = if focused_tab.messages().is_empty()
+            || !stack
+                .config
+                .provider
+                .model_policy
+                .allows(&focused_tab.model)
+        {
             stack.model.clone()
         } else {
             Model::from_spec(&focused_tab.model).unwrap_or_else(|_| stack.model.clone())
@@ -330,6 +339,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
                 hint_reader: stack.plugin_host.hint_reader(),
                 ui_action_rx: stack.plugin_host.ui_action_rx(),
                 lua_event_handle: stack.plugin_host.event_handle(),
+                model_policy: Arc::new(stack.config.provider.model_policy.clone()),
             },
             initial_prompt.take(),
         )
@@ -340,8 +350,16 @@ pub fn run(mut cli: Cli) -> Result<()> {
                 if let Some(session_id) = session_id {
                     eprintln!("Resume session:\n\n  maki -s {session_id}");
                 }
+                let started = Instant::now();
+                drop(stack);
+                let stack_ms = started.elapsed().as_millis() as u64;
+                teardown.join();
+                tracing::info!(
+                    stack_ms,
+                    teardown_ms = started.elapsed().as_millis() as u64 - stack_ms,
+                    "plugin host and teardown joined"
+                );
                 if code != 0 {
-                    teardown.join();
                     std::process::exit(code);
                 }
                 return Ok(());
@@ -350,7 +368,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
                 tabs: reloaded,
                 focused: f,
             } => {
-                let started = std::time::Instant::now();
+                let started = Instant::now();
                 let last_good = (stack.config.clone(), stack.model.clone());
                 // Shut the old host down first so nothing can repopulate
                 // the registry after the clear: its senders disconnect, the

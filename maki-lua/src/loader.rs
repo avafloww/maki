@@ -103,6 +103,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         name: "lib",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/lib"),
     },
+    BundledPlugin {
+        name: "list",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/list"),
+    },
 ];
 
 pub(crate) fn lib_dir() -> &'static Dir<'static> {
@@ -127,8 +131,9 @@ impl Drop for PluginHost {
         let Some(handle) = self.inner.join.take() else {
             return;
         };
-        self.inner.shutdown.store(true, Ordering::Release);
-        let _ = self.inner.tx.send(Request::Shutdown);
+        // Start the shutdown first, or the join below waits for all
+        // queued bulk work to drain.
+        self.begin_shutdown();
         let (done_tx, done_rx) = flume::bounded(1);
         std::thread::spawn(move || {
             let _ = done_tx.send(handle.join().is_err());

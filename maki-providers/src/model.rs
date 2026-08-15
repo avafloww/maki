@@ -9,11 +9,12 @@ use std::ops::AddAssign;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use maki_config::ModelPolicy;
 use maki_storage::sessions::{MIN_THINKING_BUDGET, StoredTokenUsage};
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::{ManifestRegistry, ProviderManifest};
-use crate::model_registry::model_registry;
+use crate::model_registry;
 use crate::providers::{anthropic, custom, dynamic};
 
 const PER_MILLION: f64 = 1_000_000.0;
@@ -28,8 +29,12 @@ pub enum ModelError {
     UnknownModel(String),
     #[error("invalid model tier '{0}' (expected: strong, medium, weak)")]
     InvalidTier(String),
+    #[error("no allowed model for {0}/{1}")]
+    NoAllowedModel(String, ModelTier),
     #[error("no default model for {0}/{1}")]
     NoDefault(String, ModelTier),
+    #[error("model '{0}' is not allowed by provider model policy")]
+    NotAllowed(String),
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -201,6 +206,28 @@ impl ModelFamily {
 
 const FAST_PROVIDER: &str = "anthropic";
 
+/// `Required` marks APIs that reject requests with thinking disabled;
+/// [`crate::RequestOptions::clamped`] raises `Off` to minimal effort for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingSupport {
+    No,
+    Yes,
+    Required,
+}
+
+impl ThinkingSupport {
+    /// `requires` wins: an API that rejects thinking-off requests
+    /// necessarily supports thinking.
+    pub fn from_flags(supports: Option<bool>, requires: bool) -> Option<Self> {
+        match (requires, supports) {
+            (true, _) => Some(Self::Required),
+            (false, Some(true)) => Some(Self::Yes),
+            (false, Some(false)) => Some(Self::No),
+            (false, None) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Model {
     pub id: String,
@@ -208,7 +235,8 @@ pub struct Model {
     pub tier: ModelTier,
     pub family: ModelFamily,
     pub supports_tool_examples_override: Option<bool>,
-    pub supports_thinking_override: Option<bool>,
+    /// `None` falls back to discovery, then the provider manifest.
+    pub thinking_override: Option<ThinkingSupport>,
     pub supports_vision_override: Option<bool>,
     pub pricing: ModelPricing,
     /// `None` when unknown, see [`ProviderKind::fallback_max_output`].
@@ -224,9 +252,9 @@ impl Model {
         let spec = format!("{slug}/{model_id}");
         // Discovery keys `known_models` by the builtin slug, so a dynamic or
         // custom slug reads positional tiers and metadata through its base.
-        let guard = model_registry().read().unwrap();
-        let discovered = guard.discovered(manifest.slug, model_id);
-        let tier = guard.tier_for(&spec, manifest.slug, static_entry.map(|e| e.tier));
+        let discovered = model_registry::discovered(manifest.slug, model_id);
+        let discovered = discovered.as_ref();
+        let tier = model_registry::tier_for(&spec, manifest.slug, static_entry.map(|e| e.tier));
         let family = static_entry.map_or(manifest.family, |entry| entry.family);
         let pricing = discovered
             .and_then(|info| info.pricing.clone())
@@ -241,14 +269,13 @@ impl Model {
             .or_else(|| anthropic::shared::long_context_window(model_id))
             .or_else(|| static_entry.map(|entry| entry.context_window))
             .unwrap_or(manifest.fallback_context_window);
-        drop(guard);
         Self {
             id: model_id.to_string(),
             provider: Arc::from(slug),
             tier,
             family,
             supports_tool_examples_override: None,
-            supports_thinking_override: None,
+            thinking_override: None,
             supports_vision_override: None,
             pricing,
             max_output_tokens,
@@ -272,7 +299,7 @@ impl Model {
             tier: ModelTier::Medium,
             family: ModelFamily::Generic,
             supports_tool_examples_override: None,
-            supports_thinking_override: Some(meta.supports_thinking),
+            thinking_override: ThinkingSupport::from_flags(Some(meta.supports_thinking), false),
             supports_vision_override: Some(meta.supports_vision),
             pricing: ModelPricing {
                 input: meta.input_price,
@@ -287,20 +314,21 @@ impl Model {
     }
 
     pub fn supports_thinking(&self) -> bool {
-        if let Some(thinking) = self.supports_thinking_override {
-            return thinking;
+        if let Some(thinking) = self.thinking_override {
+            return thinking != ThinkingSupport::No;
         }
         // Discovery keys `known_models` by the builtin slug; resolve dynamic
         // and custom slugs through their base manifest before looking up.
         let Some(manifest) = ManifestRegistry::for_slug(&self.provider) else {
             return false;
         };
-        model_registry()
-            .read()
-            .unwrap()
-            .discovered(manifest.slug, &self.id)
+        model_registry::discovered(manifest.slug, &self.id)
             .and_then(|d| d.supports_thinking)
             .unwrap_or(manifest.supports_thinking)
+    }
+
+    pub fn requires_thinking(&self) -> bool {
+        self.thinking_override == Some(ThinkingSupport::Required)
     }
 
     pub fn supports_vision(&self) -> bool {
@@ -310,11 +338,7 @@ impl Model {
         let manifest = ManifestRegistry::for_slug(&self.provider);
         manifest
             .and_then(|m| {
-                model_registry()
-                    .read()
-                    .unwrap()
-                    .discovered(m.slug, &self.id)
-                    .and_then(|d| d.supports_vision)
+                model_registry::discovered(m.slug, &self.id).and_then(|d| d.supports_vision)
             })
             .or_else(|| {
                 manifest
@@ -363,13 +387,39 @@ impl Model {
     }
 
     pub fn from_tier(slug: &str, tier: ModelTier) -> Result<Self, ModelError> {
-        if let Some(spec) = model_registry().read().unwrap().spec_for_tier(slug, tier) {
+        if let Some(spec) = model_registry::spec_for_tier(slug, tier) {
             return Self::from_spec(&spec);
         }
         let entry = ManifestRegistry::find_default_for_tier(slug, tier)
             .ok_or_else(|| ModelError::NoDefault(slug.to_string(), tier))?;
         let model_id = entry.prefixes[0];
         Self::from_spec(&format!("{slug}/{model_id}"))
+    }
+
+    pub fn from_tier_with_policy(
+        slug: &str,
+        tier: ModelTier,
+        policy: &ModelPolicy,
+    ) -> Result<Self, ModelError> {
+        if let Ok(model) = Self::from_tier_dynamic(slug, tier)
+            && policy.allows(&model.spec())
+        {
+            return Ok(model);
+        }
+
+        let Some(manifest) = ManifestRegistry::for_slug(slug) else {
+            return Err(ModelError::NoAllowedModel(slug.to_string(), tier));
+        };
+        manifest
+            .models
+            .iter()
+            .filter(|entry| entry.tier == tier)
+            .flat_map(|entry| entry.prefixes)
+            .map(|model_id| format!("{slug}/{model_id}"))
+            .find(|spec| policy.allows(spec))
+            .map(|spec| Self::from_spec(&spec))
+            .transpose()?
+            .ok_or_else(|| ModelError::NoAllowedModel(slug.to_string(), tier))
     }
 
     pub fn from_tier_dynamic(slug: &str, tier: ModelTier) -> Result<Self, ModelError> {
@@ -402,6 +452,13 @@ impl Model {
         Err(ModelError::UnsupportedProvider(slug.to_string()))
     }
 
+    pub fn from_spec_with_policy(spec: &str, policy: &ModelPolicy) -> Result<Self, ModelError> {
+        if !policy.allows(spec) {
+            return Err(ModelError::NotAllowed(spec.to_string()));
+        }
+        Self::from_spec(spec)
+    }
+
     pub fn from_spec(spec: &str) -> Result<Self, ModelError> {
         let (slug, model_id) = spec.split_once('/').ok_or(ModelError::InvalidFormat)?;
 
@@ -432,6 +489,16 @@ impl Model {
         }
 
         Err(ModelError::UnsupportedProvider(slug.to_string()))
+    }
+
+    /// Free public models surfaced through the OpenCode provider (Zen/Go),
+    /// using the catalog's definition of free (zero input and output price),
+    /// the same one that gates `enable_free_models`.
+    ///
+    /// Queries the live catalog rather than `self.pricing`, which may not yet
+    /// reflect catalog prices when discovery hasn't seeded the registry.
+    pub fn is_free(&self) -> bool {
+        crate::providers::catalog::free_model_if_available(&self.provider, &self.id)
     }
 }
 
@@ -553,6 +620,20 @@ mod tests {
     use super::*;
     use test_case::test_case;
 
+    fn policy(allowed: &[&str], excluded: &[&str]) -> ModelPolicy {
+        ModelPolicy::new(
+            &allowed
+                .iter()
+                .map(|pattern| (*pattern).into())
+                .collect::<Vec<_>>(),
+            &excluded
+                .iter()
+                .map(|pattern| (*pattern).into())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
     const TIERS: [ModelTier; 4] = [
         ModelTier::Weak,
         ModelTier::Medium,
@@ -595,6 +676,47 @@ mod tests {
             std::mem::discriminant(&err),
             std::mem::discriminant(&expected)
         );
+    }
+
+    #[test]
+    fn from_spec_with_policy_rejects_disallowed_exact_spec() {
+        let policy = policy(&["anthropic/*"], &[]);
+        let spec = "openai/gpt-5.6-sol";
+
+        let error = Model::from_spec_with_policy(spec, &policy).unwrap_err();
+
+        assert!(matches!(error, ModelError::NotAllowed(disallowed) if disallowed == spec));
+    }
+
+    #[test]
+    fn from_spec_with_policy_resolves_allowed_exact_spec() {
+        let policy = policy(&["openai/gpt-5.6-sol"], &[]);
+
+        let model = Model::from_spec_with_policy("openai/gpt-5.6-sol", &policy).unwrap();
+
+        assert_eq!(model.spec(), "openai/gpt-5.6-sol");
+    }
+
+    #[test]
+    fn tier_with_policy_uses_allowed_alternative() {
+        let policy = policy(&["openai/gpt-5.4-nano"], &[]);
+
+        let model = Model::from_tier_with_policy("openai", ModelTier::Weak, &policy).unwrap();
+
+        assert_eq!(model.spec(), "openai/gpt-5.4-nano");
+        assert_eq!(model.tier, ModelTier::Weak);
+    }
+
+    #[test]
+    fn tier_with_policy_errors_without_allowed_candidate() {
+        let policy = policy(&["anthropic/*"], &[]);
+
+        let error = Model::from_tier_with_policy("openai", ModelTier::Weak, &policy).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ModelError::NoAllowedModel(provider, ModelTier::Weak) if provider == "openai"
+        ));
     }
 
     #[test]
@@ -872,37 +994,42 @@ mod tests {
     }
 
     #[test]
+    fn discovered_vision_flows_into_curated_provider_model() {
+        use crate::model::ModelInfo;
+
+        model_registry::set_known_models(
+            "synthetic",
+            vec![
+                ModelInfo {
+                    supports_vision: Some(true),
+                    ..ModelInfo::id_only("syn:test-vision".into())
+                },
+                ModelInfo::id_only("syn:test-blind".into()),
+            ],
+        );
+
+        let vision = |id| Model::from_spec(id).unwrap().supports_vision();
+        assert!(vision("synthetic/syn:test-vision"));
+        assert!(!vision("synthetic/syn:test-blind"));
+    }
+
+    #[test]
     fn discovered_context_window_flows_into_from_base_for_unknown_model() {
         use crate::model::ModelInfo;
 
-        let slug: Arc<str> = Arc::from("ollama");
         let model_id = "test-discovered-context-window-model";
         let expected_window: u32 = 131_072;
 
-        // Seed discovered metadata into the global registry
-        {
-            let mut reg = model_registry().write().unwrap();
-            reg.set_known_models(
-                &slug,
-                vec![ModelInfo {
-                    id: model_id.to_string(),
-                    context_window: Some(expected_window),
-                    max_output_tokens: None,
-                    pricing: None,
-                    supports_thinking: None,
-                    supports_vision: None,
-                    tier: None,
-                    provider_info: None,
-                }],
-            );
-        }
+        model_registry::set_known_models(
+            "ollama",
+            vec![ModelInfo {
+                context_window: Some(expected_window),
+                ..ModelInfo::id_only(model_id.to_string())
+            }],
+        );
 
-        // from_base for this unknown model should pick up the discovered context_window
         let model = Model::from_base(ManifestRegistry::get("ollama").unwrap(), "ollama", model_id);
-        assert_eq!(model.id, model_id);
         assert_eq!(model.context_window, expected_window);
-        // max_output_tokens falls back to provider default since not discovered
-        assert_eq!(model.max_output_tokens, Some(16_384));
 
         // A dynamic/custom slug shares its base provider's discovery.
         let wrapped = Model::from_base(

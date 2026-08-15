@@ -13,7 +13,7 @@ use maki_agent::{
     McpSnapshotReader, ToolDoneEvent, ToolOutput, ToolStartEvent, TurnCompleteEvent,
 };
 use maki_config::{PermissionsConfig, UiConfig};
-use maki_lua::{HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader};
+use maki_lua::{BuiltinAction, HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader};
 use maki_providers::{ContentBlock, Effort, Message, Role, TokenUsage};
 use maki_storage::sessions::{StoredMode, StoredThinking};
 use ratatui::layout::Rect;
@@ -62,6 +62,7 @@ fn build_app_with_lua(
         )),
         Arc::from([]),
         maki_lua::EventHandle::disconnected_for_test(),
+        Arc::new(maki_config::ModelPolicy::default()),
     )
 }
 
@@ -2532,6 +2533,7 @@ fn mcp_toggle_dispatches_action() {
                 status: McpServerStatus::Running,
                 config_path: PathBuf::from("/tmp/config.toml"),
                 url: None,
+                oauth: None,
             }],
             prompts: vec![],
             pids: vec![],
@@ -3402,7 +3404,7 @@ fn thinking_explicit_args() {
 #[test]
 fn thinking_unsupported_model_flashes_error() {
     let mut app = test_app();
-    app.state.model.supports_thinking_override = Some(false);
+    app.state.model.thinking_override = Some(maki_providers::ThinkingSupport::No);
 
     app.execute_command(cmd("/thinking"));
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
@@ -3416,7 +3418,12 @@ fn thinking_restored_from_session_meta() {
     let mut session = AppSession::new("test-model", "/tmp/test");
     session.meta.thinking = Some(StoredThinking::Budget { tokens: 4096 });
 
-    let state = SessionState::from_session(session, &test_model(), &storage);
+    let state = SessionState::from_session(
+        session,
+        &test_model(),
+        &storage,
+        &maki_config::ModelPolicy::default(),
+    );
     assert_eq!(state.thinking, ThinkingConfig::Budget(4096));
 }
 
@@ -3501,7 +3508,12 @@ fn fast_restored_from_session_meta() {
     let mut session = AppSession::new("anthropic/claude-opus-4-8", "/tmp/test");
     session.meta.fast = true;
 
-    let state = SessionState::from_session(session, &test_model(), &storage);
+    let state = SessionState::from_session(
+        session,
+        &test_model(),
+        &storage,
+        &maki_config::ModelPolicy::default(),
+    );
     assert!(state.fast);
 }
 
@@ -3514,7 +3526,12 @@ fn fast_normalized_off_when_restored_onto_ineligible_model() {
     let mut session = AppSession::new("anthropic/claude-sonnet-4-5", "/tmp/test");
     session.meta.fast = true;
 
-    let state = SessionState::from_session(session, &test_model(), &storage);
+    let state = SessionState::from_session(
+        session,
+        &test_model(),
+        &storage,
+        &maki_config::ModelPolicy::default(),
+    );
     assert!(!state.fast);
 }
 
@@ -3597,6 +3614,25 @@ fn open_split_window(app: &mut App, dir: maki_lua::Split) {
     let (event_tx, _event_rx) = flume::bounded::<maki_lua::WinEvent>(8);
     let (_cmd_tx, cmd_rx) = flume::bounded::<maki_lua::WinCommand>(8);
     app.float_mgr.open(buf, config, true, event_tx, cmd_rx);
+}
+
+#[test]
+fn attention_float_marks_app_as_awaiting_input_until_close() {
+    let mut app = test_app();
+    let buf = Arc::new(maki_agent::SharedBuf::new());
+    let config = maki_lua::FloatConfig {
+        needs_input: true,
+        ..maki_lua::FloatConfig::default()
+    };
+    let (event_tx, _event_rx) = flume::bounded::<maki_lua::WinEvent>(8);
+    let (cmd_tx, cmd_rx) = flume::bounded::<maki_lua::WinCommand>(8);
+
+    app.float_mgr.open(buf, config, true, event_tx, cmd_rx);
+    assert!(app.awaiting_input());
+
+    cmd_tx.send(maki_lua::WinCommand::Close).unwrap();
+    app.float_mgr.tick();
+    assert!(!app.awaiting_input());
 }
 
 #[test]
@@ -4161,4 +4197,11 @@ fn turn_end_keeps_only_the_subagents_that_finished() {
         .map(|sa| sa.tool_use_id.as_str())
         .collect();
     assert_eq!(ids, [FINISHED_TASK_ID]);
+}
+
+#[test]
+fn run_builtin_file_picker_opens_modal() {
+    let mut app = test_app();
+    assert!(app.run_builtin(BuiltinAction::FilePicker).is_empty());
+    assert!(app.file_picker.is_open());
 }

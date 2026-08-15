@@ -1,6 +1,6 @@
 +++
 title = "Lua API"
-weight = 11
+weight = 10
 [extra]
 group = "Reference"
 +++
@@ -859,7 +859,9 @@ loop runs to completion, calling tools as needed. Conversation history is
 kept across calls, so you can have a multi-turn conversation.
 
 The returned table has fields: `text` (string), `duration_ms` (integer),
-`input_tokens` (integer), `output_tokens` (integer).
+`input_tokens` (integer), `output_tokens` (integer). `text` is an empty
+string when the subagent produced no text block (e.g. it only called
+tools).
 
 **Parameters:**
 
@@ -2587,7 +2589,7 @@ local id = maki.session.current()
 maki.session.focus({id})
 ```
 
-Switches the UI to the session with {id}. The session must be live.
+Switches the UI to the session with {id}.
 
 **Parameters:**
 
@@ -4147,6 +4149,38 @@ maki.ui.flash("Copied to clipboard!")
 
 ---
 
+### `maki.ui.action()` {#maki-ui-action}
+
+```lua
+maki.ui.action({name})
+```
+
+Runs a built-in UI action by name, exactly as its default keybinding
+would. Handy when a default key never reaches maki because tmux or
+your terminal grabs it first: bind a new key with `maki.keymap.set`
+and call this from it.
+
+Valid names: `"file_picker"`, `"search"`, `"tasks"`, `"help"`,
+`"plan_toggle"`, `"plan_editor"`, `"edit_input"`, `"pop_queue"`,
+`"prev_chat"`, `"next_chat"`.
+
+**Parameters:**
+
+- `{name}` (`string`) Action name, e.g. `"file_picker"`.
+
+**Returns:** (`boolean|nil`, `string|nil`) `true` on success, or nil and an error message for an unknown name.
+
+**Example:**
+
+```lua
+-- Open the built-in file picker with Ctrl+Q instead of Ctrl+S:
+maki.keymap.set("n", "<C-q>", function()
+  maki.ui.action("file_picker")
+end)
+```
+
+---
+
 ### `maki.ui.open_editor()` {#maki-ui-open_editor}
 
 ```lua
@@ -4205,6 +4239,7 @@ and close the window when you are done.
   - `order` (`integer`) paint order among split windows at the same edge. Default 50.
   - `focus` (`boolean`) whether the window takes keyboard focus on open. Default true.
   - `visible` (`boolean`) whether the window is initially visible. Default true.
+  - `needs_input` (`boolean`) whether the window means the session needs user input. Default false.
 
 **Returns:** ([`Win`](#maki-ui-Win)) Window handle.
 
@@ -4325,6 +4360,7 @@ Updates the window layout on the fly. Only the fields you include in
   - `reserved_top` (`integer`) rows reserved at the top of the content area.
   - `split` (`string`) edge docking, "above", "below", "left", "right", "panel", or "".
   - `order` (`integer`) paint order among split windows.
+  - `needs_input` (`boolean`) whether the window means the session needs user input.
 
 **Example:**
 
@@ -4832,7 +4868,7 @@ return M
 ### `require("maki.dir_listing")`
 
 ```lua
--- Shared directory listing for index and read plugins.
+-- Shared directory listing for index and list plugins.
 -- Lists entries, filters instruction files, sorts dirs before files, and
 -- renders the listing so every caller shows a directory the same way.
 function M.list(path, ctx)

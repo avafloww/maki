@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use arc_swap::ArcSwap;
 use maki_agent::SharedBuf;
 use mlua::RegistryKey;
+use strum::{EnumString, VariantNames};
 
 pub(crate) const NO_UI_ERR: &str = "no interactive UI attached";
 const UI_DROPPED_ERR: &str = "ui event loop dropped the request";
@@ -303,6 +304,7 @@ pub struct FloatConfig {
     pub split: Split,
     pub order: u16,
     pub visible: bool,
+    pub needs_input: bool,
 }
 
 impl Default for FloatConfig {
@@ -324,6 +326,7 @@ impl Default for FloatConfig {
             split: Split::None,
             order: 50,
             visible: true,
+            needs_input: false,
         }
     }
 }
@@ -354,7 +357,8 @@ impl FloatConfig {
             reserved_top,
             split,
             order,
-            visible
+            visible,
+            needs_input
         );
     }
 }
@@ -377,6 +381,7 @@ pub struct FloatConfigPatch {
     pub split: Option<Split>,
     pub order: Option<u16>,
     pub visible: Option<bool>,
+    pub needs_input: Option<bool>,
 }
 
 pub enum WinEvent {
@@ -416,6 +421,23 @@ pub struct WinView {
     pub auto_scroll: bool,
 }
 
+/// Lua sees these through `maki.ui.action` as the snake_case variant
+/// names, so renaming a variant breaks user configs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, VariantNames)]
+#[strum(serialize_all = "snake_case")]
+pub enum BuiltinAction {
+    FilePicker,
+    Search,
+    Tasks,
+    Help,
+    PlanToggle,
+    PlanEditor,
+    EditInput,
+    PopQueue,
+    PrevChat,
+    NextChat,
+}
+
 pub enum UiAction {
     OpenWin {
         buf: Arc<SharedBuf>,
@@ -439,6 +461,7 @@ pub enum UiAction {
     WinRestView {
         scroll_top: u16,
     },
+    Builtin(BuiltinAction),
 }
 
 /// Hand an action to the UI event loop. A full or closed channel means the
@@ -510,6 +533,16 @@ mod tests {
             .filter(|c| c.plugin.as_ref() == "plugA")
             .collect();
         assert_eq!(plug_a_cmds.len(), 2);
+    }
+
+    #[test]
+    fn builtin_action_names_are_snake_case() {
+        for name in BuiltinAction::VARIANTS {
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "lua-facing action name '{name}' is not snake_case"
+            );
+        }
     }
 
     #[test]

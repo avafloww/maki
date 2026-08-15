@@ -15,6 +15,7 @@ use maki_agent::{
     CancelToken, CancelTrigger, Envelope, EventSender, History, Instructions, McpCommand,
     PromptRole, SessionMailbox, SharedMessages, ToolOutputLines,
 };
+use maki_config::ModelPolicy;
 use maki_lua::EventHandle;
 use maki_providers::{AgentError, Message, Model, TokenUsage};
 use maki_storage::id::SessionRef;
@@ -48,6 +49,7 @@ pub(super) struct AgentLoop {
     timeouts: maki_providers::Timeouts,
     lua_handle: EventHandle,
     subagent_cancels: Arc<CancelMap<String>>,
+    model_policy: Arc<ModelPolicy>,
 }
 
 impl AgentLoop {
@@ -71,6 +73,7 @@ impl AgentLoop {
         timeouts: maki_providers::Timeouts,
         lua_handle: EventHandle,
         subagent_cancels: Arc<CancelMap<String>>,
+        model_policy: Arc<ModelPolicy>,
     ) -> Self {
         let mcp = mcp_handle.map(|h| McpSession::new(h, &initial_history));
         Self {
@@ -96,6 +99,7 @@ impl AgentLoop {
             timeouts,
             lua_handle,
             subagent_cancels,
+            model_policy,
         }
     }
 
@@ -162,9 +166,20 @@ impl AgentLoop {
 
     async fn do_compact(&mut self, event_tx: &EventSender) -> Result<(), AgentError> {
         let slot = self.model_slot.load();
-        let (provider, model) =
-            agent::resolve_compaction_model(&slot.provider, &slot.model, self.timeouts);
-        agent::compact(&*provider, &model, &mut self.history, event_tx).await
+        let (provider, model) = agent::resolve_compaction_model(
+            &slot.provider,
+            &slot.model,
+            self.timeouts,
+            &self.model_policy,
+        );
+        agent::compact(
+            &*provider,
+            &model,
+            &mut self.history,
+            event_tx,
+            &self.config,
+        )
+        .await
     }
 
     async fn do_agent_run(
@@ -239,6 +254,7 @@ impl AgentLoop {
                 subagent_cancels: Arc::clone(&self.subagent_cancels),
                 registry: Arc::clone(maki_agent::tools::ToolRegistry::global_arc()),
                 audience: ToolAudience::MAIN,
+                model_policy: Arc::clone(&self.model_policy),
             },
             AgentRunParams {
                 history: &mut self.history,
@@ -344,6 +360,7 @@ fn spawn_oauth_for_needs_auth(handle: &McpHandle) {
         let server_name = info.name.clone();
         let server_url = server_url.clone();
         let www_auth = url.clone();
+        let oauth = info.oauth.clone();
         smol::spawn(async move {
             let storage = match maki_storage::StateDir::resolve() {
                 Ok(s) => s,
@@ -358,6 +375,7 @@ fn spawn_oauth_for_needs_auth(handle: &McpHandle) {
                 www_auth.as_deref(),
                 &storage,
                 maki_agent::mcp::oauth::Interaction::Background,
+                oauth,
             )
             .await
             {

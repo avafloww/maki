@@ -9,7 +9,7 @@ use maki_providers::{
     ContentBlock, Message, Model, RequestOptions, Role, StopReason, StreamResponse, TokenUsage,
 };
 
-use super::compaction::{self, CONTINUE_AFTER_COMPACT};
+use super::compaction;
 use super::history::{History, sanitize_cancelled_history};
 use super::instructions::LoadedInstructions;
 use super::streaming::stream_with_retry;
@@ -22,7 +22,7 @@ use crate::{
     AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, EventSender, ExtractedCommand,
     InterruptSource, SessionMailbox, TurnCompleteEvent,
 };
-use maki_config::ToolOutputLines;
+use maki_config::{ModelPolicy, ToolOutputLines};
 use maki_storage::id::SessionRef;
 
 const MAX_REAUTH_ATTEMPTS: u32 = 2;
@@ -32,11 +32,11 @@ pub fn resolve_compaction_model(
     provider: &Arc<dyn Provider>,
     model: &Model,
     timeouts: maki_providers::Timeouts,
+    model_policy: &ModelPolicy,
 ) -> (Arc<dyn Provider>, Model) {
-    if let Some(spec) = maki_providers::model_registry::model_registry()
-        .read()
-        .unwrap()
-        .spec_for_tier_any(maki_providers::ModelTier::Compaction)
+    if let Some(spec) =
+        maki_providers::model_registry::spec_for_tier_any(maki_providers::ModelTier::Compaction)
+        && model_policy.allows(&spec)
         && let Ok(mut m) = Model::from_spec(&spec)
         && let Ok(p) = maki_providers::provider::from_model(&mut m, timeouts)
     {
@@ -65,6 +65,7 @@ pub struct AgentParams {
     pub subagent_cancels: Arc<CancelMap<String>>,
     pub registry: Arc<crate::tools::ToolRegistry>,
     pub audience: ToolAudience,
+    pub model_policy: Arc<ModelPolicy>,
 }
 
 pub struct AgentRunParams<'h> {
@@ -109,6 +110,7 @@ pub struct Agent<'h> {
     audience: ToolAudience,
     workflow: bool,
     local_tools: LocalTools,
+    model_policy: Arc<ModelPolicy>,
 }
 
 impl<'h> Agent<'h> {
@@ -148,6 +150,7 @@ impl<'h> Agent<'h> {
             audience: params.audience,
             workflow: false,
             local_tools: LocalTools::default(),
+            model_policy: params.model_policy,
         }
     }
 
@@ -457,6 +460,7 @@ impl<'h> Agent<'h> {
             audience: self.audience,
             local_tools: Arc::clone(&self.local_tools),
             live_sink: None,
+            model_policy: Arc::clone(&self.model_policy),
         }
     }
 
@@ -480,20 +484,27 @@ impl<'h> Agent<'h> {
     }
 
     async fn do_compact(&mut self) -> Result<(), AgentError> {
-        let (compact_provider, compact_model) =
-            resolve_compaction_model(&self.provider, &self.model, self.timeouts);
+        let (compact_provider, compact_model) = resolve_compaction_model(
+            &self.provider,
+            &self.model,
+            self.timeouts,
+            &self.model_policy,
+        );
         self.total_usage += compaction::compact_history(
             &*compact_provider,
             &compact_model,
             self.history,
             &self.event_tx,
             &self.cancel,
+            &self.config,
         )
         .await?;
         self.rollback_len = self.history.len();
         self.event_tx.send(AgentEvent::CompactionDone)?;
         self.history
-            .push(Message::synthetic(CONTINUE_AFTER_COMPACT.into()));
+            .push(Message::synthetic(compaction::continue_message(
+                &self.config,
+            )));
         Ok(())
     }
 
@@ -676,6 +687,7 @@ mod tests {
                 subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
                 registry: Arc::new(crate::tools::ToolRegistry::new()),
                 audience: ToolAudience::MAIN,
+                model_policy: Arc::new(ModelPolicy::default()),
             },
             AgentRunParams {
                 history,
@@ -1002,6 +1014,27 @@ mod tests {
     }
 
     #[test]
+    fn do_compact_appends_post_instructions_to_continue_message() {
+        smol::block_on(async {
+            const POST: &str = "Re-read plan.md";
+            let mut history = History::new(vec![Message::user("go".into())]);
+            let (mut agent, _event_rx) = make_agent(
+                MockProvider::new(vec![text_response(StopReason::EndTurn)]),
+                &mut history,
+            );
+            agent.config.post_compaction_instructions = Some(POST.into());
+            agent.do_compact().await.unwrap();
+            drop(agent);
+
+            let last = history.as_slice().last().unwrap();
+            assert!(matches!(
+                &last.content[0],
+                ContentBlock::Text { text } if text.ends_with(POST) && text != POST
+            ));
+        });
+    }
+
+    #[test]
     fn cancel_token_aborts_during_api_call() {
         smol::block_on(async {
             struct HangingProvider;
@@ -1056,6 +1089,7 @@ mod tests {
                     subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
                     registry: Arc::new(crate::tools::ToolRegistry::new()),
                     audience: ToolAudience::MAIN,
+                    model_policy: Arc::new(ModelPolicy::default()),
                 },
                 AgentRunParams {
                     history: &mut history,
