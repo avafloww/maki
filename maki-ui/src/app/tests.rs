@@ -4258,6 +4258,18 @@ fn submit_in_subagent_chat_with_images_is_rejected() {
 }
 
 #[test]
+fn typing_in_subagent_chat_edits_input_and_submits_to_subagent() {
+    let (mut app, input_rx) = app_with_subagent_input_tx(TASK_ID);
+    // Typing reaches the shared input box on a focused subagent tab.
+    app.update(Msg::Key(key(KeyCode::Char('h'))));
+    app.update(Msg::Key(key(KeyCode::Char('i'))));
+    assert_eq!(app.input_box.buffer.value(), "hi");
+    // Enter submits to the subagent's driver queue, not the main agent.
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert_eq!(input_rx.try_recv().unwrap(), "hi");
+}
+
+#[test]
 fn subagent_completion_queues_reply_to_main() {
     let (mut app, _input_rx) = app_with_subagent_input_tx(TASK_ID);
     // Terminal completion flushes the subagent's history; the driver surfaces

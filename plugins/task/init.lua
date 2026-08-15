@@ -486,9 +486,9 @@ end
 
 maki.api.register_tool({
   name = "task_spawn",
-  description = "Start a background subagent and return its task_id immediately. The main agent stays unblocked. Poll with task_get, queue messages with task_send, and finish with task_despawn.",
+  description = "Start a background subagent and return its task_id immediately. The main agent stays unblocked. Poll with task_get, queue messages with task_send, and finish with task_despawn. Also callable from a code_execution script as a Python async function.",
   kind = "execute",
-  audiences = { "main", "workflow" },
+  audiences = { "main", "interpreter", "workflow" },
   examples = {},
   schema = spawn_schema,
   handler = spawn_handler,
@@ -498,9 +498,9 @@ maki.api.register_tool({
 
 maki.api.register_tool({
   name = "task_get",
-  description = 'Poll a background subagent. Returns { status = "running" | "done" | "closed", result?, error? }. Does not block the main agent.',
+  description = 'Poll a background subagent. Returns { status = "running" | "done" | "closed", result?, error? }. Does not block the main agent. Also callable from a code_execution script as a Python async function.',
   kind = "execute",
-  audiences = { "main", "workflow" },
+  audiences = { "main", "interpreter", "workflow" },
   examples = {},
   schema = get_schema,
   handler = get_handler,
@@ -512,9 +512,9 @@ maki.api.register_tool({
 
 maki.api.register_tool({
   name = "task_send",
-  description = "Queue a message to a background subagent. A done subagent processes it as a new turn. Returns { queued = true } immediately.",
+  description = "Queue a message to a background subagent. A done subagent processes it as a new turn. Returns { queued = true } immediately. Also callable from a code_execution script as a Python async function.",
   kind = "execute",
-  audiences = { "main", "workflow" },
+  audiences = { "main", "interpreter", "workflow" },
   examples = {},
   schema = send_schema,
   handler = send_handler,
@@ -526,9 +526,9 @@ maki.api.register_tool({
 
 maki.api.register_tool({
   name = "task_despawn",
-  description = "Cancel a background subagent, flush its chat transcript, and release its concurrency slot. Returns { ok = true }.",
+  description = "Cancel a background subagent, flush its chat transcript, and release its concurrency slot. Returns { ok = true }. Also callable from a code_execution script as a Python async function.",
   kind = "execute",
-  audiences = { "main", "workflow" },
+  audiences = { "main", "interpreter", "workflow" },
   examples = {},
   schema = despawn_schema,
   handler = despawn_handler,

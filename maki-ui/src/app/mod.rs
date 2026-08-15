@@ -849,10 +849,10 @@ impl App {
         }
 
         if !self.is_main_chat() {
-            return match key.code {
-                KeyCode::Tab if !self.is_bash_input() => self.toggle_mode(),
+            match key.code {
+                KeyCode::Tab if !self.is_bash_input() => return self.toggle_mode(),
                 KeyCode::Esc if !self.chats[self.active_chat].is_finished() => {
-                    if let Some(t) = self.last_esc.take()
+                    return if let Some(t) = self.last_esc.take()
                         && t.elapsed() < self.status_bar.flash_duration
                     {
                         self.handle_subagent_cancel()
@@ -860,10 +860,11 @@ impl App {
                         self.last_esc = Some(Instant::now());
                         self.status_bar.flash(FLASH_CANCEL.into());
                         vec![]
-                    }
+                    };
                 }
-                _ => vec![],
-            };
+                _ => {}
+            }
+            return self.handle_subagent_chat_key(key);
         }
 
         self.handle_main_chat_key(key)
@@ -965,6 +966,16 @@ impl App {
                 }
             }
             InputAction::ContinueLine | InputAction::None => vec![],
+        }
+    }
+
+    /// Typing path for a focused subagent tab: characters go into the shared
+    /// input box, and Enter submits to that subagent's driver queue. Tab toggles
+    /// mode and Esc cancels the subagent, both handled in `handle_key`.
+    fn handle_subagent_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        match self.input_box.handle_key(key) {
+            InputAction::Submit(sub) if !sub.is_empty() => self.submit_or_queue(sub.into()),
+            _ => vec![],
         }
     }
 

@@ -82,8 +82,11 @@ impl App {
                 + panel_h
                 + self.input_box.height(inner.width).min(max_bottom)
         } else {
+            // Subagent tab: float panels (if any), a separator, then the input
+            // box so the user can send a message to that subagent.
             let panel_h: u16 = self.float_mgr.panel_reqs().iter().map(|(_, h)| *h).sum();
-            if panel_h > 0 { panel_h + 1 } else { 1 }
+            let sep: u16 = if panel_h > 0 { 1 } else { 0 };
+            panel_h + sep + self.input_box.height(inner.width).min(max_bottom)
         };
 
         // The `below` split lives outside `inner` (drawn by render_splits), so
@@ -180,10 +183,22 @@ impl App {
                     self.float_mgr.view_panel(frame, idx, rect);
                 }
             }
-            let sep = Block::default()
-                .borders(Borders::TOP)
-                .border_style(self.separator_style());
-            frame.render_widget(sep, sep_area);
+            if panel_h > 0 {
+                let sep = Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(self.separator_style());
+                frame.render_widget(sep, sep_area);
+            }
+            if layout.input_area.height > 0 {
+                self.input_box.view(
+                    frame,
+                    layout.input_area,
+                    false,
+                    self.separator_style(),
+                    !self.any_overlay_open(),
+                    None,
+                );
+            }
         } else if self.plan_form_active() {
             self.plan_form.view(frame, layout.bottom_area);
         } else if layout.bottom_area.height > 0 {
