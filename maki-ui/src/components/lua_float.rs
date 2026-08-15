@@ -636,7 +636,7 @@ impl Overlay for FloatManager {
     }
 
     fn close(&mut self) {
-        self.close_all();
+        self.remove_windows(|w| w.config.split != Split::Panel);
     }
 }
 
@@ -1960,6 +1960,36 @@ mod tests {
         cmd_tx.send(WinCommand::SetVisible(true)).unwrap();
         mgr.tick();
         assert_eq!(mgr.panel_reqs().len(), 1);
+    }
+
+    #[test]
+    fn overlay_close_preserves_panel_window() {
+        let mut mgr = FloatManager::new();
+
+        let (tx_panel, rx_panel, _, _cmd_tx_panel) = make_channels();
+        let panel_cfg = FloatConfig {
+            split: Split::Panel,
+            height: Dimension::Abs(5),
+            ..FloatConfig::default()
+        };
+        mgr.open(make_buf(&["panel"]), panel_cfg, false, tx_panel, rx_panel);
+
+        let (tx_modal, rx_modal, _, _cmd_tx_modal) = make_channels();
+        mgr.open(make_buf(&["modal"]), make_config(), true, tx_modal, rx_modal);
+        assert_eq!(mgr.focused_id, Some(1));
+
+        mgr.close();
+
+        assert_eq!(mgr.windows.len(), 1, "panel window must survive overlay close");
+        assert_eq!(mgr.panel_reqs().len(), 1, "panel dock stays rendered");
+        assert!(
+            mgr.windows[0].config.split == Split::Panel,
+            "the surviving window is the panel dock"
+        );
+        assert_eq!(
+            mgr.focused_id, None,
+            "focus must settle to None after the transient closes"
+        );
     }
 
     #[test]

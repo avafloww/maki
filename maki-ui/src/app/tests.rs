@@ -3712,6 +3712,46 @@ fn closing_split_restores_layout() {
 }
 
 #[test]
+fn cancel_preserves_panel_window_and_closes_transient() {
+    let mut app = test_app();
+
+    let panel_buf = Arc::new(maki_agent::SharedBuf::new());
+    let panel_config = maki_lua::FloatConfig {
+        split: maki_lua::Split::Panel,
+        height: maki_lua::Dimension::Abs(SPLIT_EXTENT),
+        ..maki_lua::FloatConfig::default()
+    };
+    let (panel_tx, _panel_rx) = flume::bounded::<maki_lua::WinEvent>(8);
+    let (_panel_cmd_tx, panel_cmd_rx) = flume::bounded::<maki_lua::WinCommand>(8);
+    app.float_mgr
+        .open(panel_buf, panel_config, false, panel_tx, panel_cmd_rx);
+    assert_eq!(app.float_mgr.panel_reqs().len(), 1, "panel dock is open");
+
+    let modal_buf = Arc::new(maki_agent::SharedBuf::new());
+    let modal_config = maki_lua::FloatConfig {
+        needs_input: true,
+        ..maki_lua::FloatConfig::default()
+    };
+    let (modal_tx, _modal_rx) = flume::bounded::<maki_lua::WinEvent>(8);
+    let (_modal_cmd_tx, modal_cmd_rx) = flume::bounded::<maki_lua::WinCommand>(8);
+    app.float_mgr
+        .open(modal_buf, modal_config, true, modal_tx, modal_cmd_rx);
+    assert!(app.float_mgr.is_open(), "transient float is focused");
+
+    app.handle_cancel();
+
+    assert_eq!(
+        app.float_mgr.panel_reqs().len(),
+        1,
+        "panel dock survives cancel and stays visible",
+    );
+    assert!(
+        !app.float_mgr.is_open(),
+        "transient focused float is closed by cancel",
+    );
+}
+
+#[test]
 fn permission_prompt_takes_bottom_precedence_over_below_split() {
     let mut app = test_app();
     open_split_window(&mut app, maki_lua::Split::Below);
