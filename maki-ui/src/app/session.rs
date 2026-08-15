@@ -116,7 +116,7 @@ impl App {
         let state = &self.state;
         let draft = self.input_box.buffer.value();
         SessionMeta {
-            mode: Some(state.mode.into()),
+            mode: Some(state.mode.clone().into()),
             plan_path: state.plan.path().map(|p| p.to_string_lossy().into_owned()),
             plan_written: state.plan.is_ready(),
             session_rules: rules_to_stored(&self.permissions.session_rules_snapshot()),

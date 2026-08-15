@@ -593,6 +593,13 @@ impl<'t> EventLoop<'t> {
 
     fn handle_ui_action(&mut self, action: UiAction) {
         match action {
+            UiAction::SetMode { id } => {
+                self.focused_app().set_mode_id(id);
+            }
+            UiAction::GetMode { reply_tx } => {
+                let id = self.focused_app().state.mode.id_key();
+                let _ = reply_tx.try_send(id);
+            }
             UiAction::Flash(msg) => {
                 self.focused_app().flash(msg);
             }

@@ -14,7 +14,7 @@ pub fn env_vars() -> Vars {
         .set("{date}", date)
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Vars(Vec<(&'static str, String)>);
 
 impl Vars {
@@ -24,6 +24,17 @@ impl Vars {
 
     pub fn set(mut self, key: &'static str, val: impl Into<String>) -> Self {
         self.0.push((key, val.into()));
+        self
+    }
+
+    /// Appends (or overwrites) a single var on an existing set.
+    pub fn with_custom(mut self, key: &'static str, val: impl Into<String>) -> Self {
+        let val = val.into();
+        if let Some(entry) = self.0.iter_mut().find(|(k, _)| *k == key) {
+            entry.1 = val;
+        } else {
+            self.0.push((key, val));
+        }
         self
     }
 

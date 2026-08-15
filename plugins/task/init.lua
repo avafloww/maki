@@ -34,6 +34,7 @@ local description = [[Launch an autonomous subagent to perform tasks independent
 Subagent types (set via `subagent_type`):
 - `research` (default): Read-only tools. For codebase exploration or gathering context.
 - `general`: Full tool access. For delegating implementation work.
+- `plan_reviewer`: Read-only audit of a finished plan. Only available in plan mode. Evaluates shape, test-to-acceptance-criteria coverage, and severity of risks, and answers with VERDICT: pass|fail.
 
 Notes:
 1. Launch multiple tasks concurrently when possible.
@@ -41,6 +42,24 @@ Notes:
 3. Each invocation starts fresh - inline any needed context into the prompt.
 4. Tell it to return concise summaries with file:line refs, not full file contents.
 ]]
+
+-- Read-only plan-reviewer directive: shape audit, test-to-AC coverage, and a
+-- severity-guided verdict. The mode gate keeps this spawnable only in plan.
+local PLAN_REVIEWER_PROMPT =
+  [[You are a meticulous plan reviewer acting only as an auditor. You may READ and GREP, but you must never modify any file.
+
+Review the supplied plan for:
+1. Shape: does it include a concrete Goal, numbered Implementation Plan, Acceptance Criteria (AC.n), a Test Strategy mapping each AC to a named test, Review Strategy, Documentation Strategy, and Risks & Blockers?
+2. Coverage: does every AC map to at least one named test, and every implementation step trace to an outcome?
+3. Risk: are risks and blockers concretely identified, not hand-waved?
+
+Report issues by severity:
+- critical: plan cannot be implemented as written
+- high: likely to fail without changes
+- medium: should be improved
+- low: polish
+
+Finish with a single line "VERDICT: pass" or "VERDICT: fail".]]
 
 local opts = maki.api.register_options({
   max_concurrent = { default = 8, min = 1, desc = "Max concurrently running subagents." },
@@ -65,7 +84,7 @@ local schema = {
     },
     subagent_type = {
       type = "string",
-      description = 'Subagent type: "research" (read-only, default) or "general" (can modify files)',
+      description = 'Subagent type: "research" (read-only, default), "general" (can modify files), or "plan_reviewer" (read-only plan audit, plan mode only)',
     },
     model_tier = {
       type = "string",
@@ -105,10 +124,21 @@ local function bounded_errors(errors)
   return table.concat(out, "\n")
 end
 
+local function current_mode()
+  local mode, err = maki.api.mode.get()
+  if err then
+    return nil
+  end
+  return mode
+end
+
 local function handler(input, ctx)
   local subagent_type = input.subagent_type or "research"
-  if subagent_type ~= "research" and subagent_type ~= "general" then
+  if subagent_type ~= "research" and subagent_type ~= "general" and subagent_type ~= "plan_reviewer" then
     return { llm_output = "unknown subagent type: " .. subagent_type, is_error = true }
+  end
+  if subagent_type == "plan_reviewer" and current_mode() ~= "plan" then
+    return { llm_output = "plan_reviewer is only available in plan mode", is_error = true }
   end
 
   -- Compile early: a bad schema costs zero tokens.
@@ -132,12 +162,18 @@ local function handler(input, ctx)
     return { llm_output = model_err, is_error = true }
   end
 
-  local audience = subagent_type == "research" and "research_sub" or "general_sub"
-  local prompt_id = subagent_type == "research" and "research" or "general"
-  local system, system_err = maki.agent.system_prompt(ctx, {
-    prompt_id = prompt_id,
-    instructions = true,
-  })
+  local audience = subagent_type == "general" and "general_sub" or "research_sub"
+  local system
+  local system_err
+  if subagent_type == "plan_reviewer" then
+    system = PLAN_REVIEWER_PROMPT
+  else
+    local prompt_id = subagent_type == "research" and "research" or "general"
+    system, system_err = maki.agent.system_prompt(ctx, {
+      prompt_id = prompt_id,
+      instructions = true,
+    })
+  end
   if system_err then
     return { llm_output = system_err, is_error = true }
   end

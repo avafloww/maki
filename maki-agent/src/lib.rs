@@ -9,9 +9,11 @@ pub mod mailbox;
 pub mod mcp;
 pub use mcp::config::{McpConfigError, McpConfigErrors, McpServerInfo, McpServerStatus};
 pub use mcp::protocol::PromptRole;
+pub mod modes;
 pub use mcp::{
     McpCommand, McpHandle, McpPromptArg, McpPromptInfo, McpSession, McpSnapshot, McpSnapshotReader,
 };
+pub use modes::{ModeDef, ModeDefSpec, ModeError, ModeId, ModeRegistry};
 pub(crate) mod task_set;
 pub use agent::{
     Agent, AgentParams, AgentRunParams, History, HistorySnapshot, Instructions, LoadedInstructions,
@@ -48,13 +50,22 @@ pub enum AgentMode {
     #[default]
     Build,
     Plan(PathBuf),
+    Custom(ModeId),
 }
 
 impl AgentMode {
     pub fn plan_path(&self) -> Option<&Path> {
         match self {
             Self::Plan(p) => Some(p),
-            Self::Build => None,
+            Self::Build | Self::Custom(_) => None,
+        }
+    }
+
+    pub fn id(&self) -> ModeId {
+        match self {
+            Self::Build => ModeId::Build,
+            Self::Plan(_) => ModeId::Plan,
+            Self::Custom(id) => id.clone(),
         }
     }
 }

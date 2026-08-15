@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use maki_providers::model::Model;
 
 use crate::AgentMode;
+use crate::ModeRegistry;
 use crate::command::find_project_ancestor_dirs;
 use crate::template::Vars;
 
@@ -53,6 +54,7 @@ pub fn is_instruction_file(name: &str) -> bool {
 
 pub fn build_system_prompt(
     vars: &Vars,
+    modes: &ModeRegistry,
     mode: &AgentMode,
     instructions: &str,
     slots: &crate::prompt::ResolvedSlots,
@@ -65,9 +67,14 @@ pub fn build_system_prompt(
     let instructions = format!("{env}{instructions}");
     let mut out = crate::prompt::assemble(crate::prompt::PromptId::System, slots, &instructions);
 
-    if let Some(plan_path) = mode.plan_path() {
-        let plan_vars = Vars::new().set("{plan_path}", plan_path.display().to_string());
-        out.push_str(&plan_vars.apply(crate::prompt::PLAN_PROMPT));
+    let def = modes.current(mode);
+    if let Some(snippet) = def.system_prompt {
+        let plan_path = mode
+            .plan_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let vars = vars.clone().with_custom("{plan_path}", plan_path);
+        out.push_str(&vars.apply(&snippet));
     }
 
     out
@@ -227,11 +234,67 @@ mod tests {
         let vars = Vars::new().set("{cwd}", "/tmp").set("{platform}", "linux");
         let slots = crate::prompt::ResolvedSlots::default();
         let model = Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap();
-        let prompt = build_system_prompt(&vars, mode, "", &slots, &model);
+        let modes = crate::ModeRegistry::builtin();
+        let prompt = build_system_prompt(&vars, &modes, mode, "", &slots, &model);
         assert_eq!(prompt.contains("Plan Mode"), expect_plan);
         if expect_plan {
             assert!(prompt.contains(PLAN_PATH));
         }
+    }
+
+    #[test_case(&AgentMode::Build, "[BUILD]", false ; "build_label")]
+    #[test_case(&AgentMode::Plan(PathBuf::from("plan.md")), "[PLAN]", true ; "plan_label")]
+    fn mode_label_from_registry(mode: &AgentMode, label: &str, expect_prompt: bool) {
+        let def = crate::ModeRegistry::builtin().current(mode);
+        assert_eq!(def.label.as_ref(), label);
+        assert_eq!(def.system_prompt.is_some(), expect_prompt);
+    }
+
+    #[test]
+    fn overridden_plan_replaces_prompt_text() {
+        let modes = crate::ModeRegistry::builtin();
+        modes
+            .define(crate::ModeDefSpec {
+                name: "plan".into(),
+                system_prompt: Some("Polytoken directive for {plan_path}".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let vars = Vars::new().set("{cwd}", "/tmp");
+        let slots = crate::prompt::ResolvedSlots::default();
+        let prompt = build_system_prompt(
+            &vars,
+            &modes,
+            &AgentMode::Plan(PathBuf::from("plan.md")),
+            "",
+            &slots,
+            &Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap(),
+        );
+        assert!(prompt.contains("Polytoken directive for plan.md"));
+        assert!(!prompt.contains("Plan Mode"));
+    }
+
+    #[test]
+    fn custom_mode_prompt_lands_in_system() {
+        let modes = crate::ModeRegistry::builtin();
+        modes
+            .define(crate::ModeDefSpec {
+                name: "audit".into(),
+                system_prompt: Some("AUDIT_DIRECTIVE".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let vars = Vars::new().set("{cwd}", "/tmp");
+        let slots = crate::prompt::ResolvedSlots::default();
+        let prompt = build_system_prompt(
+            &vars,
+            &modes,
+            &AgentMode::Custom(crate::ModeId::Custom("audit".into())),
+            "",
+            &slots,
+            &Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap(),
+        );
+        assert!(prompt.contains("AUDIT_DIRECTIVE"));
     }
 
     #[test]
@@ -251,6 +314,7 @@ mod tests {
         );
         let prompt = build_system_prompt(
             &vars,
+            &crate::ModeRegistry::builtin(),
             &AgentMode::Plan(PathBuf::from("plan.md")),
             &format!("\n{INSTR}"),
             &slots,

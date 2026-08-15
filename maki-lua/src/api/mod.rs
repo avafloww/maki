@@ -10,6 +10,7 @@ pub(crate) mod interpreter;
 pub(crate) mod json;
 pub(crate) mod keymap;
 pub(crate) mod log;
+pub(crate) mod mode;
 pub(crate) mod net;
 pub(crate) mod options;
 pub(crate) mod session;
@@ -45,6 +46,8 @@ pub(crate) fn create_maki_global(
     let api = tool::create_api_table(lua, pending, Arc::clone(&plugin), opts)?;
     autocmd::add_autocmd_methods(&api, lua, Arc::clone(&plugin))?;
     slot::add_slot_methods(&api, lua, Arc::clone(&plugin))?;
+    let mode_table = mode::create_mode_table(lua, ui_action_tx.clone())?;
+    api.set("mode", mode_table)?;
     maki.set("api", api)?;
     maki.set("env", env::create_env_table(lua, permissions)?)?;
     maki.set("fs", fs::create_fs_table(lua, permissions)?)?;

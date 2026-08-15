@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -50,6 +51,25 @@ enum TurnOutcome {
     Done(Option<StopReason>),
 }
 
+/// Keep only the tool definitions in `all` whose `name` is in `allowed`.
+/// Used for mode-scoped toolsets (`ModeDef.tools`).
+fn filter_tools(all: &Value, allowed: &[String]) -> Value {
+    let Some(arr) = all.as_array() else {
+        return all.clone();
+    };
+    let wanted: HashSet<&str> = allowed.iter().map(String::as_str).collect();
+    Value::Array(
+        arr.iter()
+            .filter(|def| {
+                def.get("name")
+                    .and_then(|n| n.as_str())
+                    .is_some_and(|n| wanted.contains(n))
+            })
+            .cloned()
+            .collect(),
+    )
+}
+
 #[derive(Clone)]
 pub struct AgentParams {
     pub provider: Arc<dyn Provider>,
@@ -62,6 +82,7 @@ pub struct AgentParams {
     pub timeouts: maki_providers::Timeouts,
     pub file_tracker: Arc<FileReadTracker>,
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
+    pub modes: Arc<crate::ModeRegistry>,
     pub subagent_cancels: Arc<CancelMap<String>>,
     pub registry: Arc<crate::tools::ToolRegistry>,
     pub audience: ToolAudience,
@@ -105,6 +126,7 @@ pub struct Agent<'h> {
     timeouts: maki_providers::Timeouts,
     file_tracker: Arc<FileReadTracker>,
     prompt_slots: Arc<crate::prompt::ResolvedSlots>,
+    modes: Arc<crate::ModeRegistry>,
     subagent_cancels: Arc<crate::cancel::CancelMap<String>>,
     registry: Arc<crate::tools::ToolRegistry>,
     audience: ToolAudience,
@@ -145,6 +167,7 @@ impl<'h> Agent<'h> {
             mailbox: params.mailbox,
             file_tracker: params.file_tracker,
             prompt_slots: params.prompt_slots,
+            modes: params.modes,
             subagent_cancels: params.subagent_cancels,
             registry: params.registry,
             audience: params.audience,
@@ -257,13 +280,18 @@ impl<'h> Agent<'h> {
     /// every turn so `tool_search` loads and late-connecting servers take
     /// effect on the next request.
     fn request_tools(&self) -> Cow<'_, Value> {
+        let def = self.modes.current(&self.mode);
+        let base = match &def.tools {
+            Some(names) => Cow::Owned(filter_tools(&self.tools, names)),
+            None => Cow::Borrowed(&self.tools),
+        };
         match &self.mcp {
             Some(mcp) => {
-                let mut tools = self.tools.clone();
+                let mut tools = base.into_owned();
                 mcp.extend_tools(&mut tools);
                 Cow::Owned(tools)
             }
-            None => Cow::Borrowed(&self.tools),
+            None => base,
         }
     }
 
@@ -453,6 +481,7 @@ impl<'h> Agent<'h> {
             timeouts: self.timeouts,
             file_tracker: Arc::clone(&self.file_tracker),
             prompt_slots: Arc::clone(&self.prompt_slots),
+            modes: Arc::clone(&self.modes),
             opts: self.opts,
             subagent_cancels: Arc::clone(&self.subagent_cancels),
             registry: Arc::clone(&self.registry),
@@ -684,6 +713,7 @@ mod tests {
                 timeouts: maki_providers::Timeouts::default(),
                 file_tracker: FileReadTracker::fresh(),
                 prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
+                modes: crate::ModeRegistry::builtin().into(),
                 subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
                 registry: Arc::new(crate::tools::ToolRegistry::new()),
                 audience: ToolAudience::MAIN,
@@ -1086,6 +1116,7 @@ mod tests {
                     timeouts: maki_providers::Timeouts::default(),
                     file_tracker: FileReadTracker::fresh(),
                     prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
+                    modes: crate::ModeRegistry::builtin().into(),
                     subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
                     registry: Arc::new(crate::tools::ToolRegistry::new()),
                     audience: ToolAudience::MAIN,
@@ -1193,5 +1224,68 @@ mod tests {
             .expect("valid session id");
         agent.session_id = Some(session.clone());
         assert_eq!(agent.tool_context().session_id, Some(session));
+    }
+
+    #[test]
+    fn filter_tools_keeps_only_allowed_names() {
+        let all = serde_json::json!([
+            {"name": "read", "description": "r"},
+            {"name": "write", "description": "w"},
+            {"name": "grep", "description": "g"},
+        ]);
+        let filtered = filter_tools(&all, &["read".to_owned(), "grep".to_owned()]);
+        let names: Vec<&str> = filtered
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|d| d["name"].as_str())
+            .collect();
+        assert_eq!(names, ["read", "grep"]);
+    }
+
+    #[test]
+    fn filter_tools_non_array_passes_through() {
+        let all = serde_json::json!({"name": "read"});
+        assert_eq!(filter_tools(&all, &["write".to_owned()]), all);
+    }
+
+    #[test]
+    fn mode_tools_swaps_requested_toolset() {
+        let modes = crate::ModeRegistry::builtin();
+        modes
+            .define(crate::ModeDefSpec {
+                name: "audit".into(),
+                tools: Some(vec!["read".into(), "grep".into()]),
+                ..Default::default()
+            })
+            .unwrap();
+        let all = serde_json::json!([
+            {"name": "read"},
+            {"name": "write"},
+            {"name": "grep"},
+            {"name": "task"},
+        ]);
+        let def = modes.current(&AgentMode::Custom(crate::ModeId::Custom("audit".into())));
+        let tools = def
+            .tools
+            .as_ref()
+            .map(|names| filter_tools(&all, names))
+            .unwrap_or_else(|| all.clone());
+        let names: Vec<&str> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|d| d["name"].as_str())
+            .collect();
+        assert_eq!(names, ["read", "grep"]);
+    }
+
+    #[test]
+    fn build_mode_inherits_full_toolset() {
+        let modes = crate::ModeRegistry::builtin();
+        let def = modes.current(&AgentMode::Build);
+        assert!(def.tools.is_none(), "build inherits the default toolset");
+        assert_eq!(modes.restrict_write_to(&AgentMode::Build), None);
+        assert_eq!(modes.current(&AgentMode::Build).id, crate::ModeId::Build);
     }
 }

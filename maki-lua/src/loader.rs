@@ -96,6 +96,14 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/thinking"),
     },
     BundledPlugin {
+        name: "mode_plan_override",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/mode_plan_override"),
+    },
+    BundledPlugin {
+        name: "plan_submit_tool",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/plan_submit_tool"),
+    },
+    BundledPlugin {
         name: "code_execution",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/code_execution"),
     },
@@ -159,7 +167,8 @@ impl PluginHost {
     /// interpreter with full debug info. Applied at VM creation, so
     /// every chunk gets it, init.lua files included.
     pub fn with_jit(registry: Arc<ToolRegistry>, jit: bool) -> Result<Self, PluginError> {
-        let lua = runtime::spawn(registry, *BUNDLED_DIRS, jit)?;
+        let modes = Arc::new(maki_agent::ModeRegistry::builtin());
+        let lua = runtime::spawn(registry, modes, *BUNDLED_DIRS, jit)?;
         Ok(Self { inner: lua })
     }
 
@@ -421,7 +430,13 @@ impl PluginHost {
         EventHandle {
             tx: self.inner.tx.clone(),
             prio_tx: self.inner.prio_tx.clone(),
+            modes: Arc::clone(&self.inner.modes),
         }
+    }
+
+    /// Shared mode registry (built-ins plus whatever plugins defined).
+    pub fn mode_registry(&self) -> Arc<maki_agent::ModeRegistry> {
+        Arc::clone(&self.inner.modes)
     }
 
     pub fn command_reader(&self) -> LuaCommandReader {
@@ -446,6 +461,9 @@ pub struct EventHandle {
     tx: flume::Sender<Request>,
     /// User-initiated requests bypass queued bulk work (session restores).
     prio_tx: flume::Sender<Request>,
+    /// Shared mode registry; `None`-less so plugins and the Rust agent see
+    /// the same definitions. Test handles use an empty builtin set.
+    modes: Arc<maki_agent::ModeRegistry>,
 }
 
 impl EventHandle {
@@ -453,7 +471,12 @@ impl EventHandle {
         Self {
             tx,
             prio_tx: flume::unbounded().0,
+            modes: Arc::new(maki_agent::ModeRegistry::builtin()),
         }
+    }
+
+    pub fn mode_registry(&self) -> Arc<maki_agent::ModeRegistry> {
+        Arc::clone(&self.modes)
     }
 
     #[doc(hidden)]
@@ -478,6 +501,7 @@ impl EventHandle {
         Self {
             tx: shared.clone(),
             prio_tx: shared,
+            modes: Arc::new(maki_agent::ModeRegistry::builtin()),
         }
     }
 
@@ -681,7 +705,11 @@ mod tests {
     fn run_command_sends_correct_request() {
         let (prio_tx, prio_rx) = flume::bounded(8);
         let (tx, _rx) = flume::bounded(8);
-        let handle = EventHandle { tx, prio_tx };
+        let handle = EventHandle {
+            tx,
+            prio_tx,
+            modes: Arc::new(maki_agent::ModeRegistry::builtin()),
+        };
         handle.run_command(Arc::from("myplugin"), Arc::from("/greet"), "world".into());
         let req = prio_rx.try_recv().unwrap();
         match req {

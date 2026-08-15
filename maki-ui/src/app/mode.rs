@@ -1,20 +1,22 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::agent::QueuedMessage;
 use crate::components::Status;
 use crate::theme;
-use maki_agent::{AgentInput, AgentMode};
+use maki_agent::{AgentInput, AgentMode, ModeDef, ModeId, ModeRegistry};
 use maki_storage::StateDir;
 use maki_storage::plans;
 use ratatui::style::{Color, Modifier, Style};
 
 use super::App;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Mode {
     Build,
     Plan,
+    Custom(Arc<str>),
 }
 
 pub(crate) enum PlanTrigger {
@@ -23,10 +25,48 @@ pub(crate) enum PlanTrigger {
 }
 
 impl Mode {
+    pub(crate) fn def(&self, registry: &ModeRegistry) -> ModeDef {
+        match self {
+            Self::Build => registry
+                .get(&ModeId::Build)
+                .unwrap_or_else(|| maki_agent::ModeDef::default_for(ModeId::Build)),
+            Self::Plan => registry
+                .get(&ModeId::Plan)
+                .unwrap_or_else(|| maki_agent::ModeDef::default_for(ModeId::Plan)),
+            Self::Custom(name) => registry
+                .get(&ModeId::Custom(Arc::clone(name)))
+                .unwrap_or_else(|| maki_agent::ModeDef::default_for(ModeId::Build)),
+        }
+    }
+
+    pub(crate) fn label(&self, registry: &ModeRegistry) -> Cow<'static, str> {
+        match self {
+            Self::Build => "[BUILD]".into(),
+            Self::Plan => "[PLAN]".into(),
+            Self::Custom(name) => {
+                let label = self.def(registry).label;
+                if label.is_empty() {
+                    format!("[{}]", name.to_ascii_uppercase()).into()
+                } else {
+                    Cow::Owned(label.to_string())
+                }
+            }
+        }
+    }
+
     pub(crate) fn color(&self) -> Color {
         match self {
             Self::Build => theme::current().mode_build,
             Self::Plan => theme::current().mode_plan,
+            Self::Custom(_) => theme::current().mode_custom,
+        }
+    }
+
+    pub(crate) fn id_key(&self) -> String {
+        match self {
+            Self::Build => "build".to_owned(),
+            Self::Plan => "plan".to_owned(),
+            Self::Custom(name) => name.to_string(),
         }
     }
 }
@@ -99,16 +139,48 @@ impl App {
         self.state.mode = Mode::Plan;
     }
 
+    /// Cycles to the next registered mode; the default two-mode case keeps
+    /// Tab toggling build<->plan.
     pub(super) fn toggle_mode(&mut self) -> Vec<super::Action> {
-        match self.state.mode {
-            Mode::Build => self.enter_plan(),
-            Mode::Plan => self.state.mode = Mode::Build,
+        let registry = self.lua_event_handle.mode_registry();
+        let modes = registry.list();
+        if modes.is_empty() {
+            return vec![];
+        }
+        let current = self.state.mode.id_key();
+        let idx = modes.iter().position(|d| d.id.key() == current);
+        let next = match idx {
+            Some(i) => &modes[(i + 1) % modes.len()],
+            None => &modes[0],
         };
+        self.set_mode_id(next.id.key().to_owned());
         vec![]
     }
 
+    /// Applies a mode switch, guarding plan-mode invariants (plan path).
+    pub(crate) fn set_mode_id(&mut self, id: String) {
+        match id.as_str() {
+            "build" => {
+                self.state.mode = Mode::Build;
+            }
+            "plan" => {
+                self.state.plan.allocate_path(&self.storage);
+                self.state.mode = Mode::Plan;
+            }
+            name => {
+                self.state.mode = Mode::Custom(Arc::from(name));
+            }
+        }
+        self.emit_mode_changed(&id);
+    }
+
+    fn emit_mode_changed(&self, id: &str) {
+        let data = serde_json::json!({ "mode": id });
+        self.lua_event_handle.fire_autocmd("ModeChanged", data);
+    }
+
     pub(super) fn agent_mode(&self) -> AgentMode {
-        match self.state.mode {
+        match &self.state.mode {
             Mode::Plan => match self.state.plan.path() {
                 Some(p) => AgentMode::Plan(p.to_path_buf()),
                 None => {
@@ -117,6 +189,7 @@ impl App {
                 }
             },
             Mode::Build => AgentMode::Build,
+            Mode::Custom(name) => AgentMode::Custom(ModeId::Custom(Arc::clone(name))),
         }
     }
 
@@ -137,10 +210,9 @@ impl App {
         let label: Cow<'static, str> = if self.is_bash_input() {
             "[BASH]".into()
         } else {
-            match self.state.mode {
-                Mode::Build => "[BUILD]".into(),
-                Mode::Plan => "[PLAN]".into(),
-            }
+            self.state
+                .mode
+                .label(&self.lua_event_handle.mode_registry())
         };
         let style = Style::new()
             .fg(self.effective_mode_color())

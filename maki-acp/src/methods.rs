@@ -1,3 +1,5 @@
+use maki_agent::{ModeId, ModeRegistry};
+
 use agent_client_protocol_schema::{
     AgentCapabilities, Implementation, InitializeResponse, LoadSessionResponse, McpCapabilities,
     NewSessionResponse, PromptCapabilities, ProtocolVersion, SessionConfigOption,
@@ -24,22 +26,35 @@ pub fn initialize_response() -> InitializeResponse {
         .agent_info(Implementation::new("maki", VERSION))
 }
 
-pub fn mode_state(current: &str) -> SessionModeState {
-    SessionModeState::new(
-        SessionModeId::from(current.to_string()),
-        vec![
-            SessionMode::new(SessionModeId::from(MODE_BUILD.to_string()), "Build"),
-            SessionMode::new(SessionModeId::from(MODE_PLAN.to_string()), "Plan"),
-        ],
-    )
+pub fn mode_state(current: &str, modes: &ModeRegistry) -> SessionModeState {
+    let mut list: Vec<SessionMode> = modes
+        .list()
+        .into_iter()
+        .filter(|d| !matches!(d.id, ModeId::Custom(_)))
+        .map(|d| {
+            SessionMode::new(
+                SessionModeId::from(d.id.key().to_string()),
+                d.label.to_string(),
+            )
+        })
+        .collect();
+    for def in modes.list() {
+        if let ModeId::Custom(name) = def.id {
+            list.push(SessionMode::new(
+                SessionModeId::from(name.to_string()),
+                def.label.to_string(),
+            ));
+        }
+    }
+    SessionModeState::new(SessionModeId::from(current.to_string()), list)
 }
 
-pub fn new_session_response(session_id: &str) -> NewSessionResponse {
-    NewSessionResponse::new(session_id.to_string()).modes(mode_state(MODE_BUILD))
+pub fn new_session_response(session_id: &str, modes: &ModeRegistry) -> NewSessionResponse {
+    NewSessionResponse::new(session_id.to_string()).modes(mode_state(MODE_BUILD, modes))
 }
 
-pub fn load_session_response() -> LoadSessionResponse {
-    LoadSessionResponse::new().modes(mode_state(MODE_BUILD))
+pub fn load_session_response(modes: &ModeRegistry) -> LoadSessionResponse {
+    LoadSessionResponse::new().modes(mode_state(MODE_BUILD, modes))
 }
 
 pub fn model_config_option(current: &str, specs: &[String]) -> SessionConfigOption {
@@ -57,13 +72,16 @@ pub fn model_config_option(current: &str, specs: &[String]) -> SessionConfigOpti
         .category(SessionConfigOptionCategory::Model)
 }
 
-pub fn mode_id_to_agent_mode(mode_id: &str) -> Option<maki_agent::AgentMode> {
+pub fn mode_id_to_agent_mode(mode_id: &str, modes: &ModeRegistry) -> Option<maki_agent::AgentMode> {
     match mode_id {
         MODE_BUILD => Some(maki_agent::AgentMode::Build),
         MODE_PLAN => {
             let storage = maki_storage::StateDir::resolve().ok()?;
             let plan_path = maki_storage::plans::new_plan_path(&storage).ok()?;
             Some(maki_agent::AgentMode::Plan(plan_path))
+        }
+        name if modes.contains(name) => {
+            Some(maki_agent::AgentMode::Custom(ModeId::Custom(name.into())))
         }
         _ => None,
     }

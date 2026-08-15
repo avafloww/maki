@@ -166,8 +166,10 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
         params.workflow,
     );
 
+    let modes = crate::ModeRegistry::builtin();
     let system = agent::build_system_prompt(
         &vars,
+        &modes,
         &mode,
         &instructions.text,
         &params.prompt_slots,
@@ -219,6 +221,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                     timeouts: params.timeouts,
                     file_tracker: FileReadTracker::fresh(),
                     prompt_slots: Arc::new(params.prompt_slots),
+                    modes: Arc::new(crate::ModeRegistry::builtin()),
                     subagent_cancels: Arc::new(CancelMap::new()),
                     registry: Arc::clone(ToolRegistry::global_arc()),
                     audience: ToolAudience::MAIN,
@@ -286,6 +289,7 @@ pub struct InteractiveParams {
     pub append_system_prompt: Option<String>,
     pub workflow: bool,
     pub model_policy: Arc<ModelPolicy>,
+    pub modes: Arc<crate::ModeRegistry>,
 }
 
 pub struct InteractiveHandle {
@@ -341,6 +345,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
     if params.yolo {
         permissions.toggle_yolo();
     }
+    let modes = Arc::clone(&params.modes);
 
     let answer_rx = Arc::new(Mutex::new(answer_rx));
     let file_tracker = FileReadTracker::fresh();
@@ -403,6 +408,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 let mut system = params.system_prompt_override.clone().unwrap_or_else(|| {
                     agent::build_system_prompt(
                         &vars,
+                        &modes,
                         &input.mode,
                         &instructions.text,
                         &params.prompt_slots,
@@ -438,6 +444,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                         timeouts: params.timeouts,
                         file_tracker: Arc::clone(&file_tracker),
                         prompt_slots: Arc::clone(&params.prompt_slots),
+                        modes: Arc::clone(&modes),
                         subagent_cancels: Arc::new(CancelMap::new()),
                         registry: Arc::clone(ToolRegistry::global_arc()),
                         audience: ToolAudience::MAIN,

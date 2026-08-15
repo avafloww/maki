@@ -717,7 +717,8 @@ pub fn prompt(
                 .as_deref()
                 .unwrap_or("anthropic/claude-sonnet-4-20250514");
             let model = Model::from_spec(model_spec).context("invalid default model")?;
-            build_system_prompt(&vars, &mode, &instructions, &slots, &model)
+            let modes = host.event_handle().mode_registry();
+            build_system_prompt(&vars, &modes, &mode, &instructions, &slots, &model)
         }
         PromptVariant::Research => assemble(PromptId::Research, &slots, &instructions),
         PromptVariant::General => assemble(PromptId::General, &slots, &instructions),

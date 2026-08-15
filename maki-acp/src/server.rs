@@ -42,6 +42,7 @@ struct Server {
     out_tx: Sender<Value>,
     model_specs: Vec<String>,
     model_policy: Arc<maki_config::ModelPolicy>,
+    modes: Arc<maki_agent::ModeRegistry>,
     session: Option<SessionState>,
 }
 
@@ -69,6 +70,7 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
         out_tx,
         model_specs: available_model_specs(&params.model_policy),
         model_policy: Arc::clone(&params.model_policy),
+        modes: Arc::clone(&params.modes),
         session: None,
     };
 
@@ -128,7 +130,7 @@ fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Value, pa
         "session/new" => parse_params::<NewSessionRequest>(raw).map(|req| {
             let handle = spawn_session(params, req.cwd, None, Vec::new());
             let spec = params.model.spec();
-            let resp = methods::new_session_response(handle.session_id.as_str())
+            let resp = methods::new_session_response(handle.session_id.as_str(), &srv.modes)
                 .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
             install_session(srv, handle, spec);
             AgentResponse::NewSessionResponse(resp)
@@ -145,7 +147,7 @@ fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Value, pa
             }
             let handle = spawn_session(params, req.cwd, Some(session_ref), history);
             let spec = params.model.spec();
-            let resp = methods::load_session_response()
+            let resp = methods::load_session_response(&srv.modes)
                 .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
             install_session(srv, handle, spec);
             Ok(AgentResponse::LoadSessionResponse(resp))
@@ -177,6 +179,7 @@ fn spawn_session(
         mcp_handle: params.mcp_handle.clone(),
         initial_wd: cwd,
         session_id,
+        modes: Arc::clone(&params.modes),
         initial_history: history,
         yolo: params.yolo,
         system_prompt_override: None,
@@ -250,7 +253,7 @@ fn handle_prompt(srv: &mut Server, raw: &Value, id: &RequestId) -> Result<(), Ac
 fn handle_set_mode(srv: &mut Server, raw: &Value) -> Result<AgentResponse, AcpError> {
     let req: SetSessionModeRequest = parse_params(raw)?;
     let mode_str = req.mode_id.0.to_string();
-    let new_mode = methods::mode_id_to_agent_mode(&mode_str)
+    let new_mode = methods::mode_id_to_agent_mode(&mode_str, &srv.modes)
         .ok_or_else(|| AcpError::new(-32602, format!("unknown mode: {mode_str}")))?;
 
     let session = srv.session.as_mut().ok_or_else(no_session)?;

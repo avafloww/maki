@@ -31,7 +31,9 @@ Type `/` in the input box to open the command palette.
 | `/workflow` | Toggle workflow mode (task callable inside code_execution) |
 | `/exit` | Exit the application |
 | `/reload` | Reload plugins and config |
+| `/build` | Switch to build mode (full tool access) |
 | `/memory` | View, edit, and delete memory files |
+| `/plan` | Switch to plan mode (analyse and write only the plan file) |
 | `/rename` | Rename the current session |
 | `/sessions` | Browse and switch sessions |
 
