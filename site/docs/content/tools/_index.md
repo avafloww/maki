@@ -7,7 +7,7 @@ group = "Reference"
 
 # Tools
 
-Maki ships with 21 built-in tools in this reference (19 on by default, 2 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
+Maki ships with 25 built-in tools in this reference (23 on by default, 2 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
 
 ## File Operations
 
@@ -174,6 +174,43 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 | `output_schema` | string | no | JSON Schema (object) the subagent's final result must match. When set, the result is returned as a validated JSON string. |
 | `prompt` | string | yes | Detailed task prompt for the agent |
 | `subagent_type` | string | no | Subagent type: "research" (read-only, default), "general" (can modify files), or "plan_reviewer" (read-only plan audit, plan mode only) |
+
+### `task_spawn` {#task_spawn}
+
+Start a background subagent and return its task_id immediately. The main agent stays unblocked. Poll with task_get, queue messages with task_send, and finish with task_despawn.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `description` | string | yes | Short (3-5 words) description of the task |
+| `model_tier` | string | no | Model tier (optional, omit to use current model, capped at current tier):<br>- "strong" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.<br>- "medium" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.<br>- "weak" (e.g. Haiku): Fast/cheap. Search, summarize, boilerplate, simple edits. |
+| `output_schema` | string | no | JSON Schema (object) the subagent's final result must match. When set, the result is returned as a validated JSON string. |
+| `prompt` | string | yes | Detailed task prompt for the agent |
+| `subagent_type` | string | no | Subagent type: "research" (read-only, default), "general" (can modify files), or "plan_reviewer" (read-only plan audit, plan mode only) |
+
+### `task_get` {#task_get}
+
+Poll a background subagent. Returns { status = "running" | "done" | "closed", result?, error? }. Does not block the main agent.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | Task id returned by task_spawn. |
+
+### `task_send` {#task_send}
+
+Queue a message to a background subagent. A done subagent processes it as a new turn. Returns { queued = true } immediately.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `message` | string | yes | Message to queue to the subagent. A done subagent restarts on the next turn. |
+| `task_id` | string | yes | Task id returned by task_spawn. |
+
+### `task_despawn` {#task_despawn}
+
+Cancel a background subagent, flush its chat transcript, and release its concurrency slot. Returns { ok = true }.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | Task id returned by task_spawn. |
 
 ### `todo_write` {#todo_write}
 

@@ -53,7 +53,11 @@ fn directive_is_verbatim_clone() {
     }
     // Polytoken intent-classification and artifact rules survive verbatim.
     must_contain(MODE_OVERRIDE_SRC, "plan of plans", "plan-mode directive");
-    must_contain(MODE_OVERRIDE_SRC, "write it into the plan file", "plan-mode directive");
+    must_contain(
+        MODE_OVERRIDE_SRC,
+        "write it into the plan file",
+        "plan-mode directive",
+    );
     must_contain(MODE_OVERRIDE_SRC, "plan_submit", "plan-mode directive");
     must_contain(MODE_OVERRIDE_SRC, "{plan_path}", "plan-mode directive");
     // Tool-name substitutions land.
@@ -61,7 +65,11 @@ fn directive_is_verbatim_clone() {
     must_contain(MODE_OVERRIDE_SRC, "`task`", "plan-mode directive");
     must_contain(MODE_OVERRIDE_SRC, "`plan_reviewer`", "plan-mode directive");
     // The directive splices the shared spec.
-    must_contain(MODE_OVERRIDE_SRC, "require(\"maki.plan_spec\")", "plan-mode directive");
+    must_contain(
+        MODE_OVERRIDE_SRC,
+        "require(\"maki.plan_spec\")",
+        "plan-mode directive",
+    );
 }
 
 #[test]
@@ -72,18 +80,38 @@ fn reviewer_is_verbatim_clone() {
     must_contain(TASK_SRC, "files are the truth", "plan-reviewer prompt");
     must_contain(TASK_SRC, "test infrastructure", "plan-reviewer prompt");
     must_contain(TASK_SRC, "churn", "plan-reviewer prompt");
-    must_contain(TASK_SRC, "fail when any critical or high finding remains", "plan-reviewer prompt");
+    must_contain(
+        TASK_SRC,
+        "fail when any critical or high finding remains",
+        "plan-reviewer prompt",
+    );
     must_contain(TASK_SRC, "VERDICT: pass", "plan-reviewer prompt");
-    must_contain(TASK_SRC, "embedded in your system prompt", "plan-reviewer prompt");
-    must_contain(TASK_SRC, "require(\"maki.plan_spec\")", "plan-reviewer prompt");
+    must_contain(
+        TASK_SRC,
+        "embedded in your system prompt",
+        "plan-reviewer prompt",
+    );
+    must_contain(
+        TASK_SRC,
+        "require(\"maki.plan_spec\")",
+        "plan-reviewer prompt",
+    );
 }
 
 #[test]
 fn plan_spec_is_single_shared_source() {
     // The spec reference is spelled identically in both splices, so the two
     // documents cannot drift apart.
-    must_contain(MODE_OVERRIDE_SRC, "require(\"maki.plan_spec\")", "plan-mode directive");
-    must_contain(TASK_SRC, "require(\"maki.plan_spec\")", "plan-reviewer prompt");
+    must_contain(
+        MODE_OVERRIDE_SRC,
+        "require(\"maki.plan_spec\")",
+        "plan-mode directive",
+    );
+    must_contain(
+        TASK_SRC,
+        "require(\"maki.plan_spec\")",
+        "plan-reviewer prompt",
+    );
 
     // The shared module keeps every one of the 8 plan artifact sections and
     // its upstream attribution.

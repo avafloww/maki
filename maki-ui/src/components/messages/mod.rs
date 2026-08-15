@@ -473,7 +473,8 @@ impl MessagesPanel {
         self.messages.len()
     }
 
-    #[cfg(test)]
+    /// Text of the last display message (agent text or tool-call output),
+    /// used by the `/tasks` row snippet. Empty when no message yet.
     pub fn last_message_text(&self) -> &str {
         self.messages.last().map(|m| m.text.as_str()).unwrap_or("")
     }

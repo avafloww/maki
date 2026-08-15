@@ -116,12 +116,22 @@ fn subagent_info_with_tx(
     name: &str,
     answer_tx: Option<flume::Sender<String>>,
 ) -> SubagentInfo {
+    subagent_info_full(parent_id, name, answer_tx, None)
+}
+
+fn subagent_info_full(
+    parent_id: &str,
+    name: &str,
+    answer_tx: Option<flume::Sender<String>>,
+    input_tx: Option<flume::Sender<String>>,
+) -> SubagentInfo {
     SubagentInfo {
         parent_tool_use_id: parent_id.into(),
         name: name.into(),
         prompt: None,
         model: None,
         answer_tx,
+        input_tx,
     }
 }
 
@@ -3777,12 +3787,12 @@ fn esc_in_main_chat_with_active_subagent_no_cancel() {
 #[test]
 fn cancel_subagent_removes_answer_sender() {
     let (mut app, _sub_rx, _main_rx) = app_with_subagent_tx(TASK_ID);
-    assert!(!app.subagent_answers.is_empty());
+    assert!(!app.subagent_channels.is_empty());
     app.update(Msg::Key(kb::NEXT_CHAT.to_key_event()));
     assert_eq!(app.active_chat, 1);
     app.last_esc = Some(Instant::now());
     app.update(Msg::Key(key(KeyCode::Esc)));
-    assert!(!app.subagent_answers.contains_key(TASK_ID));
+    assert!(!app.subagent_channels.contains_key(TASK_ID));
 }
 
 #[test]
@@ -4204,4 +4214,88 @@ fn run_builtin_file_picker_opens_modal() {
     let mut app = test_app();
     assert!(app.run_builtin(BuiltinAction::FilePicker).is_empty());
     assert!(app.file_picker.is_open());
+}
+
+// --- Async subagent routing (AC.8, AC.9, AC.10) ------------------------------
+
+/// A subagent tab whose `SubagentInfo` carries both an answer and an input
+/// channel, as an async session does.
+fn app_with_subagent_input_tx(id: &str) -> (App, flume::Receiver<String>) {
+    let (input_tx, input_rx) = flume::unbounded();
+    let mut app = streaming_app();
+    let info = subagent_info_full(id, "research", None, Some(input_tx));
+    app.update(Msg::Agent(Box::new(Envelope {
+        event: AgentEvent::TextDelta { text: "x".into() },
+        subagent: Some(info),
+        run_id: 1,
+    })));
+    app.active_chat = 1;
+    (app, input_rx)
+}
+
+#[test]
+fn submit_in_subagent_chat_routes_to_subagent_queue() {
+    let (mut app, input_rx) = app_with_subagent_input_tx(TASK_ID);
+    let outcome = app.submit_prompt(queued_msg("do more"));
+    assert!(matches!(outcome, SubmitOutcome::Queued));
+    assert_eq!(
+        input_rx.try_recv().unwrap(),
+        "do more",
+        "message must go to the subagent queue"
+    );
+    // The subagent's chat shows the message; the main queue is untouched.
+    assert_eq!(app.chats[1].last_message_text(), "do more");
+    assert!(app.queue.text_messages().is_empty());
+}
+
+#[test]
+fn submit_in_subagent_chat_with_images_is_rejected() {
+    let (mut app, _input_rx) = app_with_subagent_input_tx(TASK_ID);
+    let mut msg = queued_msg("hi");
+    msg.images
+        .push(ImageSource::new(ImageMediaType::Png, Arc::from("dGVzdA==")));
+    assert!(matches!(app.submit_prompt(msg), SubmitOutcome::Rejected(_)));
+}
+
+#[test]
+fn subagent_completion_queues_reply_to_main() {
+    let (mut app, _input_rx) = app_with_subagent_input_tx(TASK_ID);
+    // Terminal completion flushes the subagent's history; the driver surfaces
+    // the assistant reply in the history messages.
+    let messages = vec![Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::Text {
+            text: "the answer".into(),
+        }],
+        ..Default::default()
+    }];
+    app.update(subagent_msg(
+        AgentEvent::SubagentHistory {
+            tool_use_id: TASK_ID.to_string(),
+            messages,
+        },
+        TASK_ID,
+        None,
+    ));
+    assert_eq!(app.queue.text_messages(), ["the answer"]);
+}
+
+#[test]
+fn task_picker_rows_show_snippet() {
+    let (mut app, _input_rx) = app_with_subagent_input_tx(TASK_ID);
+    app.update(subagent_msg(
+        AgentEvent::TextDelta {
+            text: "progress line".into(),
+        },
+        TASK_ID,
+        None,
+    ));
+    app.chats[1].flush();
+    app.open_tasks();
+    let entry = app.task_picker.item(1).expect("subagent row");
+    assert!(
+        entry.snippet.contains("progress line"),
+        "snippet: {}",
+        entry.snippet
+    );
 }

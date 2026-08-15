@@ -15,4 +15,8 @@ fn main() {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=GIT_SHORT_HASH={hash}");
+    // Scope the fingerprint to these files instead of the whole package
+    // directory (which trips over slow/remote filesystems).
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=Cargo.toml");
 }

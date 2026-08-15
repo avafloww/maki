@@ -11,6 +11,8 @@ pub(crate) use crate::agent::shared_queue::QueuedMessage;
 
 pub(crate) const EMPTY_PROMPT_ERR: &str = "prompt is empty";
 pub(crate) const NO_QUEUE_ERR: &str = "session cannot queue messages";
+const NO_SUBAGENT_IMAGE_ERR: &str = "images cannot be sent to a subagent";
+const NO_SUBAGENT_ERR: &str = "subagent is no longer accepting messages";
 
 pub(crate) enum SubmitOutcome {
     Started(Vec<Action>),
@@ -124,6 +126,11 @@ impl App {
         if msg.text.trim().is_empty() && msg.images.is_empty() {
             return SubmitOutcome::Rejected(EMPTY_PROMPT_ERR);
         }
+        // Submitting text in a subagent tab routes to that subagent's driver
+        // input queue instead of the main agent (AC.8).
+        if self.is_subagent_focused() {
+            return self.submit_to_subagent(msg);
+        }
         if self.status == Status::Streaming {
             if self.queue_and_notify(msg) {
                 SubmitOutcome::Queued
@@ -146,6 +153,39 @@ impl App {
                 vec![]
             }
         }
+    }
+
+    /// True while a subagent chat tab is focused (rather than the main chat),
+    /// so text goes to that subagent instead of the main agent.
+    fn is_subagent_focused(&self) -> bool {
+        let Some(chat) = self.chats.get(self.active_chat) else {
+            return false;
+        };
+        chat.subagent_id.is_some()
+    }
+
+    /// Queue a message into the focused subagent's driver queue, showing it in
+    /// that subagent's chat. Images cannot ride the text-only driver queue.
+    fn submit_to_subagent(&mut self, msg: QueuedMessage) -> SubmitOutcome {
+        if !msg.images.is_empty() {
+            return SubmitOutcome::Rejected(NO_SUBAGENT_IMAGE_ERR);
+        }
+        let Some(subagent_id) = self.chats[self.active_chat].subagent_id.clone() else {
+            return SubmitOutcome::Started(self.start_from_queue(&msg));
+        };
+        let Some(input_tx) = self
+            .subagent_channels
+            .get(&subagent_id)
+            .and_then(|c| c.input_tx.as_ref())
+        else {
+            // Live-channel gone (subagent finished); fall back to main.
+            return SubmitOutcome::Started(self.start_from_queue(&msg));
+        };
+        self.chats[self.active_chat].show_user_message(msg.text.clone());
+        if input_tx.try_send(msg.text).is_err() {
+            return SubmitOutcome::Rejected(NO_SUBAGENT_ERR);
+        }
+        SubmitOutcome::Queued
     }
 
     /// Deferred path: the agent is busy, so park the message and let

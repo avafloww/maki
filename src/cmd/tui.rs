@@ -293,10 +293,9 @@ pub fn run(mut cli: Cli) -> Result<()> {
     let mut warnings: Vec<String> = Vec::new();
     let mut initial_prompt = read_initial_prompt(cli.initial_prompt.take())?;
     let mut teardown = Teardown::default();
-    let default_thinking: Option<StoredThinking> =
-        maki_storage::sessions::read_prefs(&storage)
-            .default_thinking
-            .or(stack.config.always_thinking);
+    let default_thinking: Option<StoredThinking> = maki_storage::sessions::read_prefs(&storage)
+        .default_thinking
+        .or(stack.config.always_thinking);
 
     loop {
         for session in &mut tabs {

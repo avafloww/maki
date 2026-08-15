@@ -1,8 +1,17 @@
 -- Structured-output story: the subagent gets a session-local structured_output
--- tool whose handler validates and captures the result as closure upvalues.
+-- tool whose handler validates and reports the result via
+-- `maki.agent.report_task_result` (the Rust driver surfaces it as `captured`).
 -- Invalid input is an inline tool error the model can fix in the same run.
--- This plugin owns structured output and subagent concurrency; Rust exposes
--- primitives only (`maki.agent.session`, `maki.json.schema_validator`,
+--
+-- Subagents run on a background driver, so the main agent is not blocked while
+-- one runs. Four tools split the lifecycle:
+--   task_spawn   -> { task_id }                 (non-blocking kickoff)
+--   task_get     -> { status, result?, error? } (poll)
+--   task_send    -> { queued = true }           (queue a message / nudge)
+--   task_despawn -> { ok = true }               (cancel + flush history)
+-- The unified `task` tool remains as a blocking composite over the four.
+--
+-- Rust exposes primitives only (`maki.agent.session`, `maki.json.schema_validator`,
 -- `maki.async.semaphore`).
 
 local ToolView = require("maki.tool_view")
@@ -20,13 +29,15 @@ local SCHEMA_ROOT_ERROR = "output_schema must have type object"
 local STRUCTURED_MISSING_ERROR = "subagent finished without calling structured_output"
 local STRUCTURED_INVALID_ERROR = "subagent result does not match output_schema"
 local SUMMARY_MISSING_ERROR = "subagent finished without providing a summary"
-local GENERAL_BLOCKED_IN_PLAN_ERR = "general subagents are blocked in plan mode; use research or plan_reviewer (read-only)"
+local GENERAL_BLOCKED_IN_PLAN_ERR =
+  "general subagents are blocked in plan mode; use research or plan_reviewer (read-only)"
 local NUDGE_MISSING =
   "You did not call the structured_output tool. Call it now with your final result matching its input schema."
 local NUDGE_SUMMARY =
   "You finished your work but did not provide a summary. Reply with a concise summary of what you did and found."
 local INVALID_INPUT_PREFIX =
   "Input does not match the required schema. Fix the errors and call structured_output again:\n"
+local UNKNOWN_TASK_ERR = "unknown task_id"
 local BODY_INDENT_COLS = 4
 local MIN_MD_WIDTH = 20
 local DEFAULT_OUTPUT_LINES = 5
@@ -38,6 +49,11 @@ Subagent types (set via `subagent_type`):
 - `general`: Full tool access. For delegating implementation work.
 - `plan_reviewer`: Read-only audit of a finished plan. Only available in plan mode. Evaluates shape, test-to-acceptance-criteria coverage, and severity of risks, and answers with VERDICT: pass|fail.
 
+Subagents run in the background, so the main agent is never blocked by one. Use
+`task_spawn` to start and `task_get` to poll, `task_send` to queue more work, and
+`task_despawn` to cancel a running subagent. The unified `task` tool is a
+blocking composite over those four and keeps working for one-shot use.
+
 Notes:
 1. Launch multiple tasks concurrently when possible.
 2. The agent's result is not visible to the user. Summarize it in your response.
@@ -48,12 +64,11 @@ Notes:
 -- Read-only plan reviewer directive: a verbatim port of pi-luna's reviewer
 -- prompt (subagents.ts), with maki's embedded-spec mechanic.
 -- The mode gate keeps this spawnable only in plan.
-local PLAN_REVIEWER_PROMPT =
-  [[You are the **plan_reviewer** subagent: a read-only plan reviewer spawned by the primary agent. Your only tools are read, grep, glob, list — no shell, no writes, no subagent spawns. Your task message names the plan file path; the plan specification (a markdown document defining the required plan shape) is embedded in your system prompt. Read the plan file yourself and judge it against the embedded specification — the files are the truth. When the caller included the user's original request, context, and inspected files, use them to judge fidelity to the actual request.
+local PLAN_REVIEWER_PROMPT = [[You are the **plan_reviewer** subagent: a read-only plan reviewer spawned by the primary agent. Your only tools are read, grep, glob, list — no shell, no writes, no subagent spawns. Your task message names the plan file path; the plan specification (a markdown document defining the required plan shape) is embedded in your system prompt. Read the plan file yourself and judge it against the embedded specification — the files are the truth. When the caller included the user's original reque...
 
 ## Review work
 1. Verify the plan follows the specification's shape: all required sections present (Goal, Implementation Summary, Implementation Plan, Acceptance Criteria, Test Strategy, Review Strategy, Documentation Strategy, Risks/Blockers/Required Decisions); acceptance criteria named AC.1, AC.2, …; each criterion observable, not a restatement of steps; implementation unknowns resolved; no plan-of-plans.
-2. Audit test-to-acceptance-criteria coverage — a core responsibility, not a nice-to-have. Every criterion needs at least one named test that would fail if the behavior regressed. Flag criteria with no mapped test (at least medium; high for core behavior), euphemisms such as "code inspection" / "implicitly verified" / "covered by existing tests", pre-existing tests that would pass regardless, and test-layer mismatches (pure logic tested only at integration level, or full-stack behavior mocked at unit level when an integration harness exists).
+2. Audit test-to-acceptance-criteria coverage — a core responsibility, not a nice-to-have. Every criterion needs at least one named test that would fail if the behavior regressed. Flag criteria with no mapped test (at least medium; high for core behavior), euphemisms such as "code inspection" / "implicitly verified" / "covered by existing tests", pre-existing tests that would pass regardless, and test-layer mismatches (pure logic tested only at integration level, or full-stack behavior mocked ...
 3. Assess test infrastructure adequacy. If a behavior cannot be adequately tested because the harness does not exist, the plan should include a phase to build the missing infrastructure (implementation phase + acceptance criteria + tests for the infrastructure itself). High if a core behavior is untestable and the plan neither includes the infrastructure nor acknowledges the gap; medium if the gap is acknowledged but not built; low if coverage could simply be stronger.
 4. Orient yourself in the relevant repository code. Inspect enough to judge whether the plan reflects the real implementation surfaces and likely contracts.
 5. Assess replace-vs-edit trade-offs. Flag incremental editing when replacement would be cleaner: high-churn edits (>~60% of a module's substantive lines), accumulated complexity, contract changes (signature/return type/error model/invariants), wrong underlying structure, or workarounds around code that should be replaced. High when edits would likely produce bugs or unmaintainable code; medium for quality concerns.
@@ -66,8 +81,7 @@ local PLAN_REVIEWER_PROMPT =
 
 Report findings classified by severity (critical / high / medium / low), quoting the plan where relevant, and end with a final line `VERDICT: pass` or `VERDICT: fail` (fail when any critical or high finding remains). If there are no findings, say so and pass. Your FINAL message is the findings report — it is delivered back to the primary automatically when you settle.
 
-]] ..
-  plan_spec
+]] .. plan_spec
 
 local opts = maki.api.register_options({
   max_concurrent = { default = 8, min = 1, desc = "Max concurrently running subagents." },
@@ -121,8 +135,11 @@ local examples = {
   },
 }
 
--- Process-wide cap on concurrent subagents.
+-- Process-wide cap on concurrent subagents, released on despawn or gc.
 local semaphore = maki.async.semaphore(opts.max_concurrent)
+
+-- Live tasks keyed by task_id.
+local tasks = {}
 
 local function bounded_errors(errors)
   local out = {}
@@ -140,28 +157,29 @@ local function current_mode()
   return mode
 end
 
-local function handler(input, ctx)
+-- Validates the shared setup for a subagent and returns
+-- `spec, err` where spec holds the model/system/tools/audience/local_tools.
+local function prepare(input, ctx)
   local subagent_type = input.subagent_type or "research"
   if subagent_type ~= "research" and subagent_type ~= "general" and subagent_type ~= "plan_reviewer" then
-    return { llm_output = "unknown subagent type: " .. subagent_type, is_error = true }
+    return nil, { llm_output = "unknown subagent type: " .. subagent_type, is_error = true }
   end
   if subagent_type == "plan_reviewer" and current_mode() ~= "plan" then
-    return { llm_output = "plan_reviewer is only available in plan mode", is_error = true }
+    return nil, { llm_output = "plan_reviewer is only available in plan mode", is_error = true }
   end
   if subagent_type == "general" and current_mode() == "plan" then
-    return { llm_output = GENERAL_BLOCKED_IN_PLAN_ERR, is_error = true }
+    return nil, { llm_output = GENERAL_BLOCKED_IN_PLAN_ERR, is_error = true }
   end
 
-  -- Compile early: a bad schema costs zero tokens.
   local validator
   if input.output_schema then
     if type(input.output_schema) ~= "table" or input.output_schema.type ~= "object" then
-      return { llm_output = SCHEMA_ROOT_ERROR, is_error = true }
+      return nil, { llm_output = SCHEMA_ROOT_ERROR, is_error = true }
     end
     local compile_err
     validator, compile_err = maki.json.schema_validator(input.output_schema)
     if compile_err then
-      return { llm_output = SCHEMA_COMPILE_ERROR .. ": " .. compile_err, is_error = true }
+      return nil, { llm_output = SCHEMA_COMPILE_ERROR .. ": " .. compile_err, is_error = true }
     end
   end
 
@@ -170,7 +188,7 @@ local function handler(input, ctx)
     spec = opts.allow_model and input.model or nil,
   })
   if model_err then
-    return { llm_output = model_err, is_error = true }
+    return nil, { llm_output = model_err, is_error = true }
   end
 
   local audience = subagent_type == "general" and "general_sub" or "research_sub"
@@ -186,7 +204,7 @@ local function handler(input, ctx)
     })
   end
   if system_err then
-    return { llm_output = system_err, is_error = true }
+    return nil, { llm_output = system_err, is_error = true }
   end
 
   local tool_defs, tools_err = maki.agent.tools(ctx, {
@@ -194,77 +212,253 @@ local function handler(input, ctx)
     spec = model.spec,
   })
   if tools_err then
-    return { llm_output = tools_err, is_error = true }
+    return nil, { llm_output = tools_err, is_error = true }
   end
 
-  local captured, last_errors
   local local_tools
   if validator then
+    -- The handler validates in Lua and reports the result to the driver via
+    -- `maki.agent.report_task_result`, which surfaces it as `captured`.
+    -- Invalid input is an inline tool error the model can fix in the same run;
+    -- the last validation errors are kept on the tool spec so the composite
+    -- can report them if the subagent never commits.
     local_tools = {
       [STRUCTURED_OUTPUT_NAME] = {
         description = STRUCTURED_OUTPUT_DESCRIPTION,
         input_schema = input.output_schema,
+        last_errors = nil,
         handler = function(value)
           local errs = validator:validate(value)
           if errs then
-            last_errors = bounded_errors(errs)
-            return nil, INVALID_INPUT_PREFIX .. last_errors
+            local spec = local_tools[STRUCTURED_OUTPUT_NAME]
+            spec.last_errors = bounded_errors(errs)
+            return nil, INVALID_INPUT_PREFIX .. spec.last_errors
           end
-          captured = value
+          local _, commit_err = maki.agent.report_task_result(value)
+          if commit_err then
+            return nil, "no active subagent session"
+          end
           return STRUCTURED_OUTPUT_ACK
         end,
       },
     }
   end
 
+  return {
+    model = model,
+    system = system,
+    tools = tool_defs,
+    audience = audience,
+    local_tools = local_tools,
+    subagent_type = subagent_type,
+  },
+    nil
+end
+
+local function ctx_opts(spec, input)
+  return {
+    model_spec = spec.model.spec,
+    system = spec.system,
+    tools = spec.tools,
+    local_tools = spec.local_tools,
+    audience = spec.audience,
+    name = input.description,
+  }
+end
+
+local function spawn(spec, input, ctx)
+  local permit = semaphore:acquire()
+  local ok, sess, sess_err = pcall(function()
+    return maki.agent.session(ctx, ctx_opts(spec, input))
+  end)
+  if not ok then
+    permit:release()
+    return nil, sess_err
+  end
+  if sess_err then
+    permit:release()
+    return nil, sess_err
+  end
+  local task_id = sess:session_id()
+  tasks[task_id] = {
+    sess = sess,
+    permit = permit,
+    validator = spec.local_tools ~= nil,
+  }
+  local message = input.prompt
+  if spec.local_tools then
+    message = message .. STRUCTURED_OUTPUT_PROMPT_SUFFIX
+  end
+  local _, send_err = sess:send(message)
+  if send_err then
+    sess:close()
+    tasks[task_id] = nil
+    permit:release()
+    return nil, send_err
+  end
+  return task_id, nil
+end
+
+-- task_spawn -----------------------------------------------------------------
+
+local spawn_schema = {
+  type = "object",
+  required = { "description", "prompt" },
+  additionalProperties = false,
+  properties = schema.properties,
+}
+
+local function spawn_handler(input, ctx)
+  local spec, err = prepare(input, ctx)
+  if err then
+    return err
+  end
+  local ok, task_id, spawn_err = pcall(spawn, spec, input, ctx)
+  if not ok then
+    return { llm_output = tostring(spawn_err), is_error = true }
+  end
+  if spawn_err then
+    return { llm_output = spawn_err, is_error = true }
+  end
+  return { llm_output = maki.json.encode({ task_id = task_id }) }
+end
+
+-- task_get -------------------------------------------------------------------
+
+local get_schema = {
+  type = "object",
+  required = { "task_id" },
+  additionalProperties = false,
+  properties = {
+    task_id = { type = "string", description = "Task id returned by task_spawn." },
+  },
+}
+
+local function get_handler(input)
+  local task = tasks[input.task_id]
+  if not task then
+    return { llm_output = UNKNOWN_TASK_ERR, is_error = true }
+  end
+  local status, err = task.sess:status()
+  if err then
+    return { llm_output = err, is_error = true }
+  end
+  return { llm_output = maki.json.encode(status) }
+end
+
+-- task_send ------------------------------------------------------------------
+
+local send_schema = {
+  type = "object",
+  required = { "task_id", "message" },
+  additionalProperties = false,
+  properties = {
+    task_id = { type = "string", description = "Task id returned by task_spawn." },
+    message = {
+      type = "string",
+      description = "Message to queue to the subagent. A done subagent restarts on the next turn.",
+    },
+  },
+}
+
+local function send_handler(input)
+  local task = tasks[input.task_id]
+  if not task then
+    return { llm_output = UNKNOWN_TASK_ERR, is_error = true }
+  end
+  local _, err = task.sess:send(input.message)
+  if err then
+    return { llm_output = err, is_error = true }
+  end
+  return { llm_output = maki.json.encode({ queued = true }) }
+end
+
+-- task_despawn ---------------------------------------------------------------
+
+local despawn_schema = {
+  type = "object",
+  required = { "task_id" },
+  additionalProperties = false,
+  properties = {
+    task_id = { type = "string", description = "Task id returned by task_spawn." },
+  },
+}
+
+local function despawn_handler(input)
+  local task = tasks[input.task_id]
+  if not task then
+    return { llm_output = UNKNOWN_TASK_ERR, is_error = true }
+  end
+  tasks[input.task_id] = nil
+  task.sess:close()
+  task.permit:release()
+  return { llm_output = maki.json.encode({ ok = true }) }
+end
+
+-- task (blocking composite) --------------------------------------------------
+local function handler(input, ctx)
+  local spec, err = prepare(input, ctx)
+  if err then
+    return err
+  end
+
   local permit = semaphore:acquire()
 
-  -- pcall so a raised error cannot leak the permit.
+  -- pcall so a raised error cannot leak the permit or leave a session open.
   local ok, out = pcall(function()
-    local sess, sess_err = maki.agent.session(ctx, {
-      model_spec = model.spec,
-      system = system,
-      tools = tool_defs,
-      local_tools = local_tools,
-      audience = audience,
-      name = input.description,
-    })
+    local ok, sess, sess_err = pcall(function()
+      return maki.agent.session(ctx, ctx_opts(spec, input))
+    end)
+    if not ok then
+      error(sess_err, 0)
+    end
     if sess_err then
-      return { llm_output = sess_err, is_error = true }
+      error(sess_err, 0)
     end
 
     local message = input.prompt
-    if validator then
+    if spec.local_tools then
       message = message .. STRUCTURED_OUTPUT_PROMPT_SUFFIX
     end
 
-    local result, err = sess:prompt(message)
+    local result = {}
+    local prompt_err
     local retries = 0
-    while not err and retries < MAX_NUDGES do
-      if validator and not captured then
+    result, prompt_err = sess:prompt(message)
+    result = result or {}
+    while not prompt_err and retries < MAX_NUDGES do
+      if spec.local_tools then
+        if result.captured then
+          break
+        end
         retries = retries + 1
-        result, err = sess:prompt(NUDGE_MISSING)
-      elseif not validator and result.text == "" then
+        result, prompt_err = sess:prompt(NUDGE_MISSING)
+      elseif result.text == "" then
         retries = retries + 1
-        result, err = sess:prompt(NUDGE_SUMMARY)
+        result, prompt_err = sess:prompt(NUDGE_SUMMARY)
       else
         break
       end
+      result = result or {}
     end
 
     sess:close()
 
-    if err then
-      return { llm_output = "sub-agent error: " .. err, is_error = true }
+    if prompt_err then
+      return { llm_output = "sub-agent error: " .. prompt_err, is_error = true }
     end
-    if validator and not captured then
+    if spec.local_tools and not result.captured then
+      local last_errors = spec.local_tools[STRUCTURED_OUTPUT_NAME].last_errors
       local msg = last_errors and (STRUCTURED_INVALID_ERROR .. ":\n" .. last_errors) or STRUCTURED_MISSING_ERROR
       return { llm_output = msg, is_error = true }
     end
-    if not validator and result.text == "" then
+    if not spec.local_tools and result.text == "" then
       return { llm_output = SUMMARY_MISSING_ERROR, is_error = true }
     end
-    return { llm_output = captured and maki.json.encode(captured) or result.text, format = "markdown" }
+    return {
+      llm_output = result.captured and maki.json.encode(result.captured) or result.text,
+      format = "markdown",
+    }
   end)
 
   permit:release()
@@ -289,6 +483,60 @@ local function restore(_input, output, is_error, ctx)
     width = math.max(maki.ui.terminal_size().cols - BODY_INDENT_COLS, MIN_MD_WIDTH),
   })
 end
+
+maki.api.register_tool({
+  name = "task_spawn",
+  description = "Start a background subagent and return its task_id immediately. The main agent stays unblocked. Poll with task_get, queue messages with task_send, and finish with task_despawn.",
+  kind = "execute",
+  audiences = { "main", "workflow" },
+  examples = {},
+  schema = spawn_schema,
+  handler = spawn_handler,
+  header = header,
+  restore = restore,
+})
+
+maki.api.register_tool({
+  name = "task_get",
+  description = 'Poll a background subagent. Returns { status = "running" | "done" | "closed", result?, error? }. Does not block the main agent.',
+  kind = "execute",
+  audiences = { "main", "workflow" },
+  examples = {},
+  schema = get_schema,
+  handler = get_handler,
+  header = function()
+    return "task_get"
+  end,
+  restore = restore,
+})
+
+maki.api.register_tool({
+  name = "task_send",
+  description = "Queue a message to a background subagent. A done subagent processes it as a new turn. Returns { queued = true } immediately.",
+  kind = "execute",
+  audiences = { "main", "workflow" },
+  examples = {},
+  schema = send_schema,
+  handler = send_handler,
+  header = function(input)
+    return "task_send → " .. input.task_id
+  end,
+  restore = restore,
+})
+
+maki.api.register_tool({
+  name = "task_despawn",
+  description = "Cancel a background subagent, flush its chat transcript, and release its concurrency slot. Returns { ok = true }.",
+  kind = "execute",
+  audiences = { "main", "workflow" },
+  examples = {},
+  schema = despawn_schema,
+  handler = despawn_handler,
+  header = function(input)
+    return "task_despawn → " .. input.task_id
+  end,
+  restore = restore,
+})
 
 maki.api.register_tool({
   name = "task",

@@ -622,9 +622,9 @@ mod tests {
 
     fn warm_empty_catalog() {
         let tmp = tempfile::tempdir().unwrap();
-        crate::providers::catalog::warm_empty_catalog_for_tests(
-            maki_storage::StateDir::from_path(tmp.path().to_path_buf()),
-        );
+        crate::providers::catalog::warm_empty_catalog_for_tests(maki_storage::StateDir::from_path(
+            tmp.path().to_path_buf(),
+        ));
     }
 
     fn policy(allowed: &[&str], excluded: &[&str]) -> ModelPolicy {

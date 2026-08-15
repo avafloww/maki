@@ -649,7 +649,10 @@ mod tests {
             .iter()
             .filter(|m| p.item_name(m) == "/thinking")
             .count();
-        assert_eq!(count, 1, "lua command should shadow the builtin of the same name");
+        assert_eq!(
+            count, 1,
+            "lua command should shadow the builtin of the same name"
+        );
     }
 
     #[test]

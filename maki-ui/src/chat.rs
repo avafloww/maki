@@ -45,6 +45,9 @@ pub struct Chat {
     pub cost: Option<f64>,
     pub context_size: u32,
     pub model_id: Option<String>,
+    /// For subagent chats, the `parent_tool_use_id` that owns this tab, so
+    /// submits in this tab can be routed to that subagent's driver.
+    pub subagent_id: Option<String>,
     pending_turn_usage: Option<String>,
     messages_panel: MessagesPanel,
     finished: bool,
@@ -57,6 +60,7 @@ impl Chat {
             cost: None,
             context_size: 0,
             model_id: None,
+            subagent_id: None,
             pending_turn_usage: None,
             messages_panel: MessagesPanel::new(ui_config, lua_event_handle),
             finished: false,
@@ -358,7 +362,6 @@ impl Chat {
         self.messages_panel.in_progress_count()
     }
 
-    #[cfg(test)]
     pub fn last_message_text(&self) -> &str {
         self.messages_panel.last_message_text()
     }

@@ -656,8 +656,9 @@ impl LoginPicker {
                             return;
                         }
                     };
-                    let _ =
-                        tx.send(CodexEvent::Started { user_code: session.user_code.clone() });
+                    let _ = tx.send(CodexEvent::Started {
+                        user_code: session.user_code.clone(),
+                    });
                     let result =
                         openai_auth::wait_device_login(&storage, &session, Some(&thread_abort));
                     let event = match result {
@@ -754,7 +755,10 @@ impl LoginPicker {
             }
         };
         if let CodexEvent::Started { user_code } = &event {
-            if let Step::CodexWaiting { user_code: slot, .. } = &mut self.step {
+            if let Step::CodexWaiting {
+                user_code: slot, ..
+            } = &mut self.step
+            {
                 *slot = Some(user_code.clone());
             }
             return None;
@@ -966,7 +970,11 @@ mod tests {
         let dir = StateDir::from_path(tempfile::tempdir().unwrap().keep());
         let mut picker = LoginPicker::new();
         picker.open(dir);
-        picker.provider_items.iter().map(|p| p.slug.clone()).collect()
+        picker
+            .provider_items
+            .iter()
+            .map(|p| p.slug.clone())
+            .collect()
     }
 
     #[test]

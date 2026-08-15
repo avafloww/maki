@@ -307,7 +307,8 @@ impl RawConfig {
             .plugins
             .keys()
             .filter(|name| {
-                !DEFAULT_BUILTINS.contains(&name.as_str()) && !OPT_IN_BUILTINS.contains(&name.as_str())
+                !DEFAULT_BUILTINS.contains(&name.as_str())
+                    && !OPT_IN_BUILTINS.contains(&name.as_str())
             })
             .collect();
         unknown.sort();

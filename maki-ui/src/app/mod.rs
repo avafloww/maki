@@ -59,7 +59,7 @@ use maki_agent::{
 };
 use maki_config::{ModelPolicy, UiConfig};
 use maki_lua::{BuiltinAction, EventHandle, HintReader, KeymapReader, LuaCommandReader, WinView};
-use maki_providers::{Model, ThinkingConfig, add_cost};
+use maki_providers::{ContentBlock, Message, Model, Role, ThinkingConfig, add_cost};
 use maki_storage::StateDir;
 use maki_storage::input_history::InputHistory;
 use maki_storage::model::persist_model;
@@ -95,12 +95,16 @@ const IMPLEMENT_PARALLEL_HINT: &str = "Use batch+task to parallelize, assign eac
 
 const TASK_DONE_DETAIL: &str = "✓ ";
 const MISSING_TOOL_COMPLETION: &str = "Tool did not report completion before the turn ended";
+/// Length cap for the `/tasks` row message snippet (AC.10).
+const SNIPPET_CHARS: usize = 64;
 
 #[derive(Clone)]
 pub(super) struct TaskEntry {
     name: String,
     finished: Option<bool>,
     chat_index: usize,
+    /// First `SNIPPET_CHARS` of the subagent chat's last message, shown dimly.
+    snippet: String,
 }
 
 impl PickerItem for TaskEntry {
@@ -110,9 +114,44 @@ impl PickerItem for TaskEntry {
     fn detail(&self) -> Option<&str> {
         matches!(self.finished, Some(true)).then_some(TASK_DONE_DETAIL)
     }
+    fn suffix(&self) -> Option<&str> {
+        (!self.snippet.is_empty()).then_some(self.snippet.as_str())
+    }
     fn is_spinning(&self) -> bool {
         matches!(self.finished, Some(false))
     }
+}
+
+/// Channels held for a live subagent tab.
+#[derive(Clone, Default)]
+struct SubagentChannels {
+    answer_tx: Option<flume::Sender<String>>,
+    input_tx: Option<flume::Sender<String>>,
+}
+
+fn truncate_snippet(text: &str) -> String {
+    let mut chars = text.chars();
+    let truncated: String = chars.by_ref().take(SNIPPET_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+/// Last assistant text block in a subagent's flushed history, used to feed an
+/// async subagent's reply back into the main agent's queue.
+fn terminal_reply(messages: &[Message]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, Role::Assistant))
+        .and_then(|m| {
+            m.content.iter().find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+        })
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -186,7 +225,10 @@ pub struct App {
     pub(super) hint_reader: HintReader,
     pub(crate) restore_event_tx: Option<maki_agent::EventSender>,
     pub(super) restoring: Arc<AtomicBool>,
-    subagent_answers: HashMap<String, flume::Sender<String>>,
+    /// Per-subagent channels: the `answer_tx` (mid-turn interrupt replies) and,
+    /// for async sessions, the driver `input_tx` (tab submits routed to the
+    /// subagent). Keyed by `parent_tool_use_id`.
+    subagent_channels: HashMap<String, SubagentChannels>,
 }
 
 impl App {
@@ -278,7 +320,7 @@ impl App {
             hint_reader,
             restore_event_tx: None,
             restoring: Arc::new(AtomicBool::new(false)),
-            subagent_answers: HashMap::new(),
+            subagent_channels: HashMap::new(),
         };
         app.model_picker.set_recents(
             maki_storage::model::read_recents(&app.storage)
@@ -419,7 +461,9 @@ impl App {
     }
 
     fn send_to_agent(&self, subagent_id: Option<&str>, answer: String) {
-        let routed = subagent_id.and_then(|id| self.subagent_answers.get(id));
+        let routed = subagent_id
+            .and_then(|id| self.subagent_channels.get(id))
+            .and_then(|c| c.answer_tx.as_ref());
         if let Some(tx) = routed {
             let _ = tx.try_send(answer);
         } else {
@@ -472,6 +516,11 @@ impl App {
                 name: chat.name.clone(),
                 finished: (chat_index > 0).then_some(chat.is_finished()),
                 chat_index,
+                snippet: if chat_index == 0 {
+                    String::new()
+                } else {
+                    truncate_snippet(chat.last_message_text())
+                },
             })
             .collect()
     }
@@ -969,7 +1018,7 @@ impl App {
         self.close_all_overlays();
         self.pending_input = PendingInput::None;
         self.finish_subagents(DisplayRole::Error, CANCELLED_TEXT);
-        self.subagent_answers.clear();
+        self.subagent_channels.clear();
         self.shell.cancel_all();
         for chat in &mut self.chats {
             chat.flush();
@@ -999,7 +1048,7 @@ impl App {
         self.chats[self.active_chat].flush();
         self.chats[self.active_chat].cancel_in_progress();
         self.chats[self.active_chat].mark_finished(DisplayRole::Error, CANCELLED_TEXT);
-        self.subagent_answers.remove(&tool_use_id);
+        self.subagent_channels.remove(&tool_use_id);
 
         vec![Action::CancelSubagent { tool_use_id }]
     }
@@ -1053,6 +1102,21 @@ impl App {
             // so we finish them here on SubagentHistory.
             if let Some(&sub_idx) = self.chat_index.get(tool_use_id.as_str()) {
                 self.chats[sub_idx].mark_finished(DisplayRole::Done, DONE_TEXT);
+            }
+            // An async subagent's reply is delivered to the main agent so it
+            // becomes a new turn; one-shot subagents already see their reply as
+            // the tool result, so only async (input_tx-named) subtasks queue it.
+            let reply = self
+                .subagent_channels
+                .get(&tool_use_id)
+                .filter(|c| c.input_tx.is_some())
+                .and_then(|_| terminal_reply(&messages))
+                .filter(|r| !r.is_empty());
+            if let Some(reply) = reply {
+                self.queue_and_notify(QueuedMessage {
+                    text: reply,
+                    images: Vec::new(),
+                });
             }
             self.sync_task_picker();
             self.state
@@ -1187,7 +1251,7 @@ impl App {
                     self.status_bar.clear_flash();
                     self.terminalize_turn(MISSING_TOOL_COMPLETION);
                     self.chat_index.clear();
-                    self.subagent_answers.clear();
+                    self.subagent_channels.clear();
                     self.status = Status::Idle;
                     self.fire_session_autocmd("TurnEnd", serde_json::json!({}));
                     if self.exit_on_done {
@@ -1197,7 +1261,7 @@ impl App {
                 ChatEventResult::Error(message) => {
                     self.status = Status::error(message.clone());
                     self.status_bar.clear_flash();
-                    self.subagent_answers.clear();
+                    self.subagent_channels.clear();
                     self.terminalize_turn(&message);
                     self.recoverable_queue = self.queue.text_messages();
                     self.queue.clear();
@@ -1226,9 +1290,13 @@ impl App {
         }
         let idx = self.chats.len();
         self.chat_index.insert(id.clone(), idx);
-        if let Some(ref tx) = subagent.answer_tx {
-            self.subagent_answers.insert(id.clone(), tx.clone());
-        }
+        self.subagent_channels.insert(
+            id.clone(),
+            SubagentChannels {
+                answer_tx: subagent.answer_tx.clone(),
+                input_tx: subagent.input_tx.clone(),
+            },
+        );
         self.chats[0].update_tool_summary(id, &subagent.name);
         if let Some(ref model) = subagent.model {
             self.chats[0].update_tool_model(id, model);
@@ -1240,6 +1308,7 @@ impl App {
         );
         chat.set_restore_channel(self.restore_event_tx.clone());
         chat.model_id = subagent.model.clone();
+        chat.subagent_id = Some(id.clone());
         if let Some(ref prompt) = subagent.prompt {
             chat.push_user_message(prompt);
         }

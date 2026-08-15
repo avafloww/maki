@@ -14,8 +14,7 @@ local plan_spec = require("maki.plan_spec")
 -- ordering, and sentences identical to upstream except for the tool-name and
 -- embedded-spec substitutions. The plan specification is spliced from
 -- `maki.plan_spec` so the directive and the reviewer prompt share one document.
-local PLAN_DIRECTIVE =
-  [[
+local PLAN_DIRECTIVE = [[
 You are in **Plan mode**. The plan file is `{plan_path}`. This is a read-only planning and investigation mode.
 
 ## Side-effect discipline
@@ -46,9 +45,7 @@ First classify the user's intent:
 **When a human asks you to "write a plan," "make a plan," or "plan this out," they always mean write it into the plan file — never describe the plan in chat.** Do not narrate, outline, or explain what the plan would be in prose. Investigate as needed, then write the complete plan document to `{plan_path}` with `write` or `edit`.
 
 A plan you write is always a plan to execute real work: it describes concrete implementation steps that the next session will carry out after acceptance. Never produce a "plan of plans" — a plan that describes how to produce another plan rather than how to build the actual thing. Unless the user explicitly and unambiguously asks for a planning process (which is rare), assume every plan request is a request to plan the implementation. Do not ask the user whether they want a plan of plans; that is never a useful question.
-]] ..
-  plan_spec ..
-  [[
+]] .. plan_spec .. [[
 ## Plan review before handoff
 
 After writing the plan, you may spawn a **`plan_reviewer`** subagent to review it. Review is strongly recommended, not required: luna decides at the `plan_submit` approval step whether to proceed, and may skip review entirely. When you review, include in the task message the user's original request, the relevant context, and the key files or systems you inspected; the plan specification is embedded in the reviewer's prompt. The reviewer reads the plan file itself with read-only tools — the file is the truth — and returns findings classified by severity (`critical` / `high` / `medium` / `low`).

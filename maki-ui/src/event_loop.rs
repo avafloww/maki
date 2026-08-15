@@ -832,14 +832,17 @@ impl<'t> EventLoop<'t> {
                 }));
                 let _ = reply_tx.send(reply);
             }
-            SessionRequest::SetThinking { set_default, thinking } => {
+            SessionRequest::SetThinking {
+                set_default,
+                thinking,
+            } => {
                 let reply = (|| {
                     let idx = self.focused;
                     if !self.sessions[idx].app.state.model.supports_thinking() {
                         return Err("Thinking requires a model that supports it".into());
                     }
-                    let parsed = StoredThinking::parse_setting(&thinking)
-                        .map_err(|e| e.to_string())?;
+                    let parsed =
+                        StoredThinking::parse_setting(&thinking).map_err(|e| e.to_string())?;
                     if set_default {
                         write_prefs(
                             &self.ctx.storage,

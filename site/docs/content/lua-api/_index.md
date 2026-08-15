@@ -837,15 +837,34 @@ local result = sess:prompt("Summarize this file.")
 sess:close()
 ```
 
+---
+
+### `maki.agent.report_task_result()` {#maki-agent-report_task_result}
+
+```lua
+maki.agent.report_task_result({value})
+```
+
+Commit a structured-output result from the currently-running subagent
+driver. The task plugin's `structured_output` local tool validates the
+value in Lua, then routes it here so the background driver can surface it
+as `captured` on completion.
+
+**Parameters:**
+
+- `{value}` (`table`) The validated result to commit.
+
+**Returns:** (`boolean?`, `string?`) `true` when a session is active, else `(nil, err)`.
+
 
 ## maki.agent.Session {#maki-agent-Session}
 
 A subagent session with its own conversation history.
 
 Create one with `maki.agent.session()`, then send messages with
-`:prompt()`. The session remembers previous turns, so you can have
-a multi-step conversation. Call `:close()` when you are done, or let
-garbage collection handle it.
+`:prompt()` or `:send()`. The session remembers previous turns, so you
+can have a multi-step conversation. Call `:close()` when you are done,
+or let garbage collection handle it.
 
 ---
 
@@ -857,7 +876,9 @@ Session:prompt({message})
 
 Send a message to the subagent and wait for its full response. The agent
 loop runs to completion, calling tools as needed. Conversation history is
-kept across calls, so you can have a multi-turn conversation.
+kept across calls, so you can have a multi-turn conversation. This is a
+blocking compatibility wrapper over `send` + the completion notifier; the
+async `send`/`status` pair is preferred for background work.
 
 The returned table has fields: `text` (string), `duration_ms` (integer),
 `input_tokens` (integer), `output_tokens` (integer). `text` is an empty
@@ -881,6 +902,37 @@ print(r.input_tokens .. " input, " .. r.output_tokens .. " output tokens")
 
 ---
 
+### `Session:send()` {#Session-send}
+
+```lua
+Session:send({message})
+```
+
+Non-blocking: enqueue a message to the subagent's driver and return
+immediately. Poll `status()` for the result.
+
+**Parameters:**
+
+- `{message}` (`string`) User message to send.
+
+**Returns:** (`boolean?`, `string?`) `true` on success, or `(nil, err)` if the session is closed.
+
+---
+
+### `Session:status()` {#Session-status}
+
+```lua
+Session:status()
+```
+
+Read the subagent's current status without blocking.
+
+**Returns:** (`table?`) Table with `status` ("running" | "done" | "closed"), and
+  when done, `result` `{ text, input_tokens, output_tokens, duration_ms, captured? }`
+  and possibly `error`.
+
+---
+
 ### `Session:close()` {#Session-close}
 
 ```lua
@@ -889,7 +941,20 @@ Session:close()
 
 Close the session and flush its history back to the parent agent. You can
 call this multiple times safely. If you forget, it runs automatically when
-the session is garbage collected.
+the session is garbage collected. Firing the cancel token wakes the driver
+so it flushes, even if it is parked on the input queue.
+
+---
+
+### `Session:session_id()` {#Session-session_id}
+
+```lua
+Session:session_id()
+```
+
+Return this session's stable id, used as a `task_id` by the task plugin.
+
+**Returns:** (`string`) The session's id.
 
 
 ## maki.async {#maki-async}
@@ -2877,7 +2942,7 @@ the choice is also persisted as the global default for new sessions.
 **Parameters:**
 
 - `{opts}` (`table`) Required fields: mode (string) the thinking setting;
-  - `set_default` (boolean) also persist as the default for new sessions.
+  - `set_default` (`boolean`) also persist as the default for new sessions.
 
 **Returns:** (`table|nil`, `string|nil`) `{mode}`, or nil and an error.
 
@@ -5092,6 +5157,16 @@ function M.resolve(opts, ctx)
 end
 
 return M
+```
+
+### `require("maki.plan_spec")`
+
+```lua
+-- Shared plan specification, spliced verbatim into the plan-mode directive and
+-- the review prompt so both always see the exact same document.
+--
+-- Ported from polytoken's default plan specification (plan_spec_default.md);
+-- keep in sync with upstream.
 ```
 
 ### `require("maki.scroll")`

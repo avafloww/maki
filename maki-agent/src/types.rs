@@ -834,6 +834,9 @@ pub struct SubagentInfo {
     pub model: Option<String>,
     #[serde(skip)]
     pub answer_tx: Option<flume::Sender<String>>,
+    /// Queue into the subagent's background driver (async sessions only).
+    #[serde(skip)]
+    pub input_tx: Option<flume::Sender<String>>,
 }
 
 #[derive(Debug, Clone)]

@@ -1563,11 +1563,11 @@ mod tests {
         StoredSubagent, TAIL_BUF, generate_title, json_path, jsonl_path, load_cwd_index,
         next_epoch, update_cwd_index, write_full_session,
     };
-    use super::{Prefs, read_prefs, write_prefs};
     use super::{
         HistorySnapshot, SCAN_CACHE_FILE, Session, SessionError, SessionLog, SessionMeta,
         StorageError, TitleSource,
     };
+    use super::{Prefs, read_prefs, write_prefs};
     use crate::StateDir;
     use crate::id::MakiId;
     use serde_json::Value;
@@ -3087,17 +3087,30 @@ mod tests {
         write_prefs(
             &state,
             &Prefs {
-                default_thinking: Some(StoredThinking::Effort { level: Effort::Medium }),
+                default_thinking: Some(StoredThinking::Effort {
+                    level: Effort::Medium,
+                }),
             },
         )
         .unwrap();
 
         assert_eq!(
             read_prefs(&state).default_thinking,
-            Some(StoredThinking::Effort { level: Effort::Medium })
+            Some(StoredThinking::Effort {
+                level: Effort::Medium
+            })
         );
 
-        write_prefs(&state, &Prefs { default_thinking: Some(StoredThinking::Off) }).unwrap();
-        assert_eq!(read_prefs(&state).default_thinking, Some(StoredThinking::Off));
+        write_prefs(
+            &state,
+            &Prefs {
+                default_thinking: Some(StoredThinking::Off),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_prefs(&state).default_thinking,
+            Some(StoredThinking::Off)
+        );
     }
 }

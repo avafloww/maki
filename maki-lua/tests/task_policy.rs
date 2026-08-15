@@ -84,6 +84,13 @@ maki.agent.tools = function(ctx, opts)
   return {}
 end
 
+-- The structured_output local tool reports its validated result here; the
+-- stub stores it as the session's committed `captured` value.
+maki.agent.report_task_result = function(value)
+  recorder.captured = value
+  return true
+end
+
 local behaviors = {}
 
 behaviors.plain = function(sess, msg)
@@ -138,7 +145,20 @@ maki.agent.session = function(ctx, opts)
   local sess = { opts = opts }
   function sess:prompt(msg)
     recorder.prompts[#recorder.prompts + 1] = msg
-    return behaviors[opts.name](self, msg)
+    local res, err = behaviors[opts.name](self, msg)
+    if res and recorder.captured ~= nil then
+      res.captured = recorder.captured
+    end
+    return res, err
+  end
+  function sess:send(msg)
+    return self:prompt(msg)
+  end
+  function sess:status()
+    return { status = "done", result = sess:prompt(recorder.last or "") }
+  end
+  function sess:session_id()
+    return opts.name
   end
   function sess:close()
     recorder.closed = recorder.closed + 1
@@ -231,6 +251,13 @@ fn exec_tool(reg: &ToolRegistry, name: &str, input: Value) -> Result<String, Str
             ToolOutput::Plain(s) | ToolOutput::Markdown(s) => s.text,
             other => panic!("unexpected output: {other:?}"),
         })
+}
+
+/// Runs a tool and parses its `llm_output` as JSON (the four-lifecycle tools
+/// return JSON strings).
+fn exec_tool_json(reg: &ToolRegistry, name: &str, input: Value) -> Value {
+    let out = exec_tool(reg, name, input).expect("tool failed");
+    serde_json::from_str(&out).expect("tool returned invalid json")
 }
 
 fn probe(reg: &ToolRegistry) -> Value {
@@ -533,4 +560,77 @@ fn raising_prompt_does_not_leak_semaphore_permit() {
     // Pool is full again (released == acquired), so this cannot block.
     let out = exec_tool(&reg, TASK_TOOL, task_input(SCENARIO_PLAIN, None)).unwrap();
     assert_eq!(out, PLAIN_TEXT);
+}
+
+// --- Four-tool async lifecycle (AC.1 - AC.5, AC.7) --------------------------
+
+#[test]
+fn spawn_returns_task_id_immediately() {
+    let (reg, _host) = load_task_host();
+    let out = exec_tool_json(&reg, "task_spawn", task_input(SCENARIO_PLAIN, None));
+    assert!(
+        out.get("task_id").and_then(Value::as_str).is_some(),
+        "task_spawn must return a task_id: {out}"
+    );
+}
+
+#[test]
+fn spawn_structured_task_registers_commit_tool() {
+    let (reg, _host) = load_task_host();
+    let out = exec_tool_json(
+        &reg,
+        "task_spawn",
+        task_input(SCENARIO_HAPPY, Some(answer_schema())),
+    );
+    assert!(
+        out.get("task_id").and_then(Value::as_str).is_some(),
+        "structured spawn must return a task_id: {out}"
+    );
+    let snap = probe(&reg);
+    assert_eq!(snap["has_local_tools"], json!(true));
+}
+
+#[test]
+fn despawn_releases_permit_and_clears_task() {
+    let (reg, _host) = load_task_host();
+    let spawn = exec_tool_json(&reg, "task_spawn", task_input(SCENARIO_PLAIN, None));
+    let task_id = spawn["task_id"].as_str().unwrap();
+
+    let ok = exec_tool_json(&reg, "task_despawn", json!({ "task_id": task_id }));
+    assert_eq!(ok["ok"], json!(true));
+
+    // Unknown task after despawn.
+    let err = exec_tool(&reg, "task_despawn", json!({ "task_id": task_id })).unwrap_err();
+    assert!(err.contains("unknown task_id"), "got: {err}");
+
+    let snap = probe(&reg);
+    assert_eq!(snap["acquired"], json!(1));
+    assert_eq!(snap["released"], json!(1));
+}
+
+#[test]
+fn send_queues_and_reactivates() {
+    let (reg, _host) = load_task_host();
+    let spawn = exec_tool_json(&reg, "task_spawn", task_input(SCENARIO_PLAIN, None));
+    let task_id = spawn["task_id"].as_str().unwrap().to_string();
+
+    let queued = exec_tool_json(
+        &reg,
+        "task_send",
+        json!({ "task_id": task_id, "message": "continue" }),
+    );
+    assert_eq!(queued["queued"], json!(true));
+}
+
+#[test]
+fn unknown_task_errors_across_lifecycle_tools() {
+    let (reg, _host) = load_task_host();
+    for tool in ["task_get", "task_send", "task_despawn"] {
+        let input = match tool {
+            "task_send" => json!({ "task_id": "missing", "message": "x" }),
+            _ => json!({ "task_id": "missing" }),
+        };
+        let err = exec_tool(&reg, tool, input).unwrap_err();
+        assert!(err.contains("unknown task_id"), "{tool} got: {err}");
+    }
 }

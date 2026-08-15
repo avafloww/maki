@@ -192,10 +192,7 @@ async fn set_title(
 /// @example
 /// local info = maki.session.thinking()
 #[lua_fn]
-async fn thinking(
-    lua: Lua,
-    #[ctx] tx: Option<flume::Sender<UiAction>>,
-) -> LuaResult<Pair<Value>> {
+async fn thinking(lua: Lua, #[ctx] tx: Option<flume::Sender<UiAction>>) -> LuaResult<Pair<Value>> {
     roundtrip(lua, tx, SessionRequest::GetThinking).await
 }
 
@@ -386,7 +383,11 @@ mod tests {
         let lua = lua_with_session(Some(tx));
         let checker = std::thread::spawn(move || {
             let Ok(UiAction::Session {
-                req: SessionRequest::SetThinking { set_default, thinking },
+                req:
+                    SessionRequest::SetThinking {
+                        set_default,
+                        thinking,
+                    },
                 reply_tx,
             }) = rx.recv()
             else {
