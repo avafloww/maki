@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::{env, thread};
 
@@ -18,6 +19,7 @@ const DEVICE_CODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/u
 const DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
 const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const DEVICE_AUTH_URL: &str = "https://auth.openai.com/codex/device";
+pub const CODEX_DEVICE_URL: &str = DEVICE_AUTH_URL;
 const REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 const POLL_SAFETY_MARGIN: Duration = Duration::from_secs(3);
 const TOKEN_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -28,6 +30,11 @@ struct DeviceCodeResponse {
     device_auth_id: String,
     user_code: String,
     interval: String,
+}
+
+pub struct DeviceSession {
+    pub device_auth_id: String,
+    pub user_code: String,
 }
 
 #[derive(Deserialize)]
@@ -119,7 +126,10 @@ fn request_device_code() -> Result<DeviceCodeResponse, AgentError> {
     serde_json::from_str(&body_text).map_err(Into::into)
 }
 
-fn poll_device_token(device: &DeviceCodeResponse) -> Result<DeviceTokenResponse, AgentError> {
+fn poll_device_token(
+    device: &DeviceCodeResponse,
+    abort: Option<&AtomicBool>,
+) -> Result<DeviceTokenResponse, AgentError> {
     let client = http_client(POLL_TIMEOUT)?;
     let interval_secs = device.interval.parse::<u64>().unwrap_or(5).max(1);
     let poll_interval = Duration::from_secs(interval_secs) + POLL_SAFETY_MARGIN;
@@ -136,6 +146,9 @@ fn poll_device_token(device: &DeviceCodeResponse) -> Result<DeviceTokenResponse,
             return Err(AgentError::Config {
                 message: "device authorization timed out".into(),
             });
+        }
+        if abort.is_some_and(|a| a.load(Ordering::Relaxed)) {
+            return Err(AgentError::Cancelled);
         }
 
         thread::sleep(poll_interval);
@@ -309,17 +322,39 @@ pub fn resolve(dir: &StateDir) -> Result<ResolvedAuth, AgentError> {
     })
 }
 
-pub fn login(dir: &StateDir) -> Result<(), AgentError> {
-    let device = request_device_code()?;
+pub fn start_device_login() -> Result<DeviceSession, AgentError> {
+    Ok(device_session_from_response(request_device_code()?))
+}
 
-    println!("Open this URL in your browser:\n\n  {DEVICE_AUTH_URL}\n");
-    println!("Enter code: {}\n", device.user_code);
-    println!("Waiting for authorization...");
+fn device_session_from_response(device: DeviceCodeResponse) -> DeviceSession {
+    DeviceSession {
+        device_auth_id: device.device_auth_id,
+        user_code: device.user_code,
+    }
+}
 
-    let device_token = poll_device_token(&device).map_err(|e| {
-        error!(error = %e, "OpenAI device authorization failed");
-        e
-    })?;
+pub fn wait_device_login(
+    dir: &StateDir,
+    session: &DeviceSession,
+    abort: Option<&AtomicBool>,
+) -> Result<(), AgentError> {
+    if abort.is_some_and(|a| a.load(Ordering::Relaxed)) {
+        return Ok(());
+    }
+    let device = DeviceCodeResponse {
+        device_auth_id: session.device_auth_id.clone(),
+        user_code: session.user_code.clone(),
+        interval: String::new(),
+    };
+    let poll_result = poll_device_token(&device, abort);
+    let device_token = match poll_result {
+        Err(AgentError::Cancelled) => return Ok(()),
+        Err(e) => {
+            error!(error = %e, "OpenAI device authorization failed");
+            return Err(e);
+        }
+        Ok(token) => token,
+    };
 
     let token_resp = exchange_device_token(&device_token).map_err(|e| {
         error!(error = %e, "OpenAI token exchange failed");
@@ -328,6 +363,17 @@ pub fn login(dir: &StateDir) -> Result<(), AgentError> {
 
     let tokens = into_oauth_tokens(token_resp);
     save_tokens(dir, PROVIDER, &tokens)?;
+    Ok(())
+}
+
+pub fn login(dir: &StateDir) -> Result<(), AgentError> {
+    let session = start_device_login()?;
+
+    println!("Open this URL in your browser:\n\n  {CODEX_DEVICE_URL}\n");
+    println!("Enter code: {}\n", session.user_code);
+    println!("Waiting for authorization...");
+
+    wait_device_login(dir, &session, None)?;
     println!("Authenticated successfully.");
     Ok(())
 }
@@ -343,7 +389,39 @@ pub fn logout(dir: &StateDir) -> Result<(), AgentError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+
+    use maki_storage::StateDir;
+    use tempfile::tempdir;
+
     use super::*;
+
+    const SAMPLE_DEVICE_RESPONSE: &str = r#"{
+        "device_auth_id": "dev_abc",
+        "user_code": "ABCD-EFGH",
+        "interval": "5"
+    }"#;
+
+    #[test]
+    fn start_device_login_maps_code_response() {
+        let parsed: DeviceCodeResponse = serde_json::from_str(SAMPLE_DEVICE_RESPONSE).unwrap();
+        let session = device_session_from_response(parsed);
+        assert_eq!(session.device_auth_id, "dev_abc");
+        assert_eq!(session.user_code, "ABCD-EFGH");
+    }
+
+    #[test]
+    fn wait_device_login_aborted_before_poll_does_not_save() {
+        let dir = StateDir::from_path(tempdir().unwrap().keep());
+        let abort = AtomicBool::new(true);
+        let session = DeviceSession {
+            device_auth_id: "dev_abc".into(),
+            user_code: "ABCD-EFGH".into(),
+        };
+        let result = wait_device_login(&dir, &session, Some(&abort));
+        assert!(result.is_ok());
+        assert!(load_tokens(&dir, PROVIDER).is_none());
+    }
 
     #[test]
     fn extract_account_id_from_jwt() {

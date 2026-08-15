@@ -538,6 +538,7 @@ impl<'t> EventLoop<'t> {
     }
 
     fn tick(&mut self) {
+        let mut login_actions: Vec<(usize, Vec<Action>)> = Vec::new();
         for (i, rt) in self.sessions.iter_mut().enumerate() {
             rt.app.float_mgr.tick();
             if i != self.focused {
@@ -547,8 +548,15 @@ impl<'t> EventLoop<'t> {
             rt.app.tick_error_expiry();
             rt.app.poll_image_paste();
             rt.app.btw_modal.poll();
+            let actions = rt.app.poll_login_picker();
+            if !actions.is_empty() {
+                login_actions.push((i, actions));
+            }
             rt.app.status_bar.poll_branch_update();
             rt.app.mcp_picker.refresh();
+        }
+        for (i, actions) in login_actions {
+            self.dispatch(i, actions);
         }
     }
 
