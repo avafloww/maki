@@ -39,6 +39,7 @@ The docs are sorted by what you came here to do:
   </div>
   <div class="card-grid">
     <a class="card" href="/docs/token-economy/"><span class="card-title">Token Economy</span><span class="card-desc">Where tokens go in an agent loop, and every trick Maki uses to spend fewer of them.</span></a>
+    <a class="card" href="/docs/modes/"><span class="card-title">Modes</span><span class="card-desc">Build, plan, and plugin-defined modes you can switch between or override.</span></a>
     <a class="card" href="/docs/context/"><span class="card-title">Context</span><span class="card-desc">What enters the model's context and when, and where to put project knowledge.</span></a>
   </div>
 </div>

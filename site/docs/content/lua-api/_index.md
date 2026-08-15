@@ -72,6 +72,7 @@ a string belongs.
 | [`maki.json.SchemaValidator`](#maki-json-SchemaValidator) | A compiled JSON Schema validator. |
 | [`maki.keymap`](#maki-keymap) | Key mappings, modeled after `vim.keymap`. |
 | [`maki.log`](#maki-log) | Structured logging for plugins. |
+| [`maki.api.mode`](#maki-api-mode) | `maki.api.mode`: define, override, list, and switch agent modes. |
 | [`maki.net`](#maki-net) | HTTP client for fetching web content. |
 | [`maki.session`](#maki-session) | Host session primitives. |
 | [`maki.text`](#maki-text) | Text transformation utilities. |
@@ -2460,6 +2461,118 @@ Emit an ERROR-level log message. Use for failures that need attention.
 
 ```lua
 maki.log.error("failed to connect to API")
+```
+
+
+## maki.api.mode {#maki-api-mode}
+
+`maki.api.mode`: define, override, list, and switch agent modes.
+Built-in `build` and `plan` are pre-registered, so overrides use the
+same call as defining a custom mode.
+
+---
+
+### `maki.api.mode.define()` {#maki-api-mode-define}
+
+```lua
+maki.api.mode.define({opts})
+```
+
+Defines a new mode or fully overrides an existing one (built-ins included).
+
+**Parameters:**
+
+- `{opts}` (`table`) { name = "audit", label = "[AUDIT]", system_prompt = string|fn(ctx)->string, restrict_write_to = string, tools = string[] }
+
+**Returns:** (`boolean`, `string|nil`) `true` on success, or nil and an error.
+
+**Example:**
+
+```lua
+maki.api.mode.define({ name = "plan", label = "[PLAN]", tools = { "read", "write" } })
+```
+
+---
+
+### `maki.api.mode.get()` {#maki-api-mode-get}
+
+```lua
+maki.api.mode.get()
+```
+
+Returns the id of the currently active mode ("build", "plan", or a custom
+name).
+
+**Returns:** (`string|nil`, `string|nil`) Mode id, or nil and an error.
+
+**Example:**
+
+```lua
+local mode = maki.api.mode.get()
+```
+
+---
+
+### `maki.api.mode.set()` {#maki-api-mode-set}
+
+```lua
+maki.api.mode.set({name})
+```
+
+Enters a mode by name; fails when it is not defined. The UI owns the
+active mode, so this answers `(true, nil)` once the switch is requested.
+
+**Parameters:**
+
+- `{name}` (`string`) Mode id ("build", "plan", or a custom name).
+
+**Returns:** (`boolean`, `string|nil`) `true` on success, or nil and an error.
+
+**Example:**
+
+```lua
+maki.api.mode.set("plan")
+```
+
+---
+
+### `maki.api.mode.list()` {#maki-api-mode-list}
+
+```lua
+maki.api.mode.list()
+```
+
+Lists all known modes as `{ name, label }` pairs (built-ins first).
+
+**Returns:** (`table|nil`, `string|nil`) Array of `{name, label}`, or nil and an error.
+
+**Example:**
+
+```lua
+for _, m in ipairs(maki.api.mode.list()) do print(m.name) end
+```
+
+---
+
+### `maki.api.mode.reset()` {#maki-api-mode-reset}
+
+```lua
+maki.api.mode.reset({name?})
+```
+
+Restores a built-in's default definition, dropping any plugin override.
+With no argument, resets every built-in.
+
+**Parameters:**
+
+- `{name?}` (`string|nil`) Mode id to reset ("build" or "plan").
+
+**Returns:** (`boolean`, `string|nil`) `true` on success, or nil and an error.
+
+**Example:**
+
+```lua
+maki.api.mode.reset("plan")
 ```
 
 

@@ -527,6 +527,7 @@ async fn session(
             timeouts: agent_ctx.timeouts,
             file_tracker: FileReadTracker::fresh(),
             prompt_slots: Arc::clone(&agent_ctx.prompt_slots),
+            modes: Arc::clone(&agent_ctx.modes),
             subagent_cancels: Arc::new(CancelMap::new()),
             registry: Arc::clone(maki_agent::tools::ToolRegistry::global_arc()),
             audience,

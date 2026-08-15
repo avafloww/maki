@@ -1316,6 +1316,7 @@ impl LuaRuntime {
     #[allow(clippy::too_many_arguments)]
     fn new(
         registry: Arc<ToolRegistry>,
+        modes: Arc<maki_agent::ModeRegistry>,
         tx: flume::Sender<Request>,
         shutdown: Arc<AtomicBool>,
         bundled_dirs: &'static [&'static Dir<'static>],
@@ -1364,6 +1365,7 @@ impl LuaRuntime {
         lua.set_app_data(HintStore::new());
         lua.set_app_data(hint_writer);
         lua.set_app_data(Arc::clone(&registry));
+        lua.set_app_data(Arc::clone(&modes));
 
         let plugins: PluginMap = Rc::new(RefCell::new(HashMap::new()));
         {
@@ -2418,12 +2420,14 @@ pub(crate) struct LuaThread {
     pub keymap_reader: KeymapReader,
     pub hint_reader: crate::api::util::command::HintReader,
     pub ui_action_rx: flume::Receiver<UiAction>,
+    pub modes: Arc<maki_agent::ModeRegistry>,
 }
 
 /// Lua lives on its own OS thread (no Send needed). `smol::block_on`
 /// drives async, load/clear requests wait for in-flight tools.
 pub fn spawn(
     registry: Arc<ToolRegistry>,
+    modes: Arc<maki_agent::ModeRegistry>,
     bundled_dirs: &'static [&'static Dir<'static>],
     jit: bool,
 ) -> Result<LuaThread, PluginError> {
@@ -2432,6 +2436,7 @@ pub fn spawn(
     let tx_clone = tx.clone();
     let shutdown: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let shutdown_thread = Arc::clone(&shutdown);
+    let modes_thread = Arc::clone(&modes);
     let (init_tx, init_rx) = flume::bounded::<Result<(), PluginError>>(1);
     let (ui_action_tx, ui_action_rx) = flume::unbounded::<UiAction>();
     let (command_writer, command_reader) = LuaCommandWriter::new();
@@ -2443,6 +2448,7 @@ pub fn spawn(
         .spawn(move || {
             let mut rt = match LuaRuntime::new(
                 registry,
+                modes_thread,
                 tx_clone,
                 shutdown_thread,
                 bundled_dirs,
@@ -2808,6 +2814,7 @@ pub fn spawn(
         keymap_reader,
         hint_reader,
         ui_action_rx,
+        modes,
     })
 }
 

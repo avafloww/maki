@@ -55,6 +55,7 @@ pub fn run(model_arg: Option<String>, yolo: bool, no_plugins: bool, no_jit: bool
     let (mcp_handle, _mcp_config_errors) = smol::block_on(maki_agent::mcp::start_connected(&cwd));
 
     let prompt_slots = plugin_host.event_handle().collect_prompt_slots();
+    let modes = plugin_host.event_handle().mode_registry();
 
     maki_acp::run(maki_acp::AcpParams {
         model,
@@ -64,6 +65,7 @@ pub fn run(model_arg: Option<String>, yolo: bool, no_plugins: bool, no_jit: bool
         initial_wd: cwd,
         mcp_handle,
         prompt_slots: Arc::new(prompt_slots),
+        modes,
         yolo,
         model_policy: Arc::new(config.provider.model_policy.clone()),
     })

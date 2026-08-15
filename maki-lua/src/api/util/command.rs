@@ -439,6 +439,12 @@ pub enum BuiltinAction {
 }
 
 pub enum UiAction {
+    SetMode {
+        id: String,
+    },
+    GetMode {
+        reply_tx: flume::Sender<String>,
+    },
     OpenWin {
         buf: Arc<SharedBuf>,
         config: FloatConfig,

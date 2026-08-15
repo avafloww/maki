@@ -117,13 +117,14 @@ pub async fn run(
         };
 
         if let Some(target) = invocation.mutable_path() {
-            let is_plan_target = ctx.mode.plan_path().is_some_and(|pp| target == pp);
+            let restrict = ctx.restrict_write_to();
+            let is_plan_target = restrict.as_deref().is_some_and(|pp| target == pp);
             if !is_plan_target {
-                if ctx.mode.plan_path().is_some() {
+                if restrict.is_some() {
                     warn!(
                         tool = %name,
                         target = %target.display(),
-                        "blocked write in plan mode"
+                        "blocked write in restricted mode"
                     );
                     return done_error(crate::tools::PLAN_WRITE_RESTRICTED.into());
                 }
@@ -308,7 +309,7 @@ async fn enforce_permission(
                 ctx.user_response_rx.as_deref(),
                 id,
                 &ctx.cancel,
-                ctx.mode.plan_path(),
+                ctx.restrict_write_to().as_deref(),
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -361,7 +362,7 @@ async fn execute_mcp_tool(
             ctx.user_response_rx.as_deref(),
             id,
             &ctx.cancel,
-            ctx.mode.plan_path(),
+            ctx.restrict_write_to().as_deref(),
         )
         .await
     {

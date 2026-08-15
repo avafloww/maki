@@ -210,6 +210,7 @@ pub struct ToolContext {
     pub timeouts: maki_providers::Timeouts,
     pub file_tracker: Arc<FileReadTracker>,
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
+    pub modes: Arc<crate::ModeRegistry>,
     pub opts: RequestOptions,
     pub subagent_cancels: Arc<CancelMap<String>>,
     pub registry: Arc<ToolRegistry>,
@@ -222,6 +223,14 @@ pub struct ToolContext {
     /// it for its own call only.
     pub live_sink: Option<flume::Sender<ToolLive>>,
     pub model_policy: Arc<ModelPolicy>,
+}
+
+impl ToolContext {
+    /// Write-restriction for the active mode (plan path or a custom def's
+    /// `restrict_write_to`). `None` means writes are unrestricted by mode.
+    pub fn restrict_write_to(&self) -> Option<PathBuf> {
+        self.modes.restrict_write_to(&self.mode)
+    }
 }
 
 /// Live progress of a dispatched child tool, streamed while it runs.
@@ -433,6 +442,7 @@ pub fn interpreter_ctx(
         timeouts: maki_providers::Timeouts::default(),
         file_tracker,
         prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
+        modes: Arc::new(crate::ModeRegistry::builtin()),
         opts: RequestOptions::default(),
         subagent_cancels: Arc::new(CancelMap::new()),
         registry,

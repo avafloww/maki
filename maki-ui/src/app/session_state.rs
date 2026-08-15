@@ -44,8 +44,9 @@ impl SessionState {
                 fallback_model.clone()
             });
 
-        let mode = match session.meta.mode {
+        let mode = match &session.meta.mode {
             Some(StoredMode::Plan) => Mode::Plan,
+            Some(StoredMode::Custom(name)) => Mode::Custom(name.clone().into()),
             _ => Mode::Build,
         };
 
@@ -115,6 +116,7 @@ impl From<Mode> for StoredMode {
         match mode {
             Mode::Build => StoredMode::Build,
             Mode::Plan => StoredMode::Plan,
+            Mode::Custom(name) => StoredMode::Custom(name.to_string()),
         }
     }
 }

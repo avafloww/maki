@@ -501,6 +501,7 @@ pub fn run(params: SdkParams) -> Result<()> {
         system_prompt_override: cli.system_prompt.clone().filter(|s| !s.is_empty()),
         append_system_prompt: cli.append_system_prompt.clone().filter(|s| !s.is_empty()),
         workflow,
+        modes: Arc::new(maki_agent::ModeRegistry::builtin()),
         model_policy: Arc::clone(&model_policy),
     });
 

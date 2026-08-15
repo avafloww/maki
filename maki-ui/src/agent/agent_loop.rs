@@ -226,8 +226,10 @@ impl AgentLoop {
         }
 
         let prompt_slots = self.lua_handle.collect_prompt_slots_async().await;
+        let modes = self.lua_handle.mode_registry();
         let system = agent::build_system_prompt(
             &self.vars,
+            &modes,
             &input.mode,
             &self.instructions.text,
             &prompt_slots,
@@ -251,6 +253,7 @@ impl AgentLoop {
                 timeouts: self.timeouts,
                 file_tracker: Arc::clone(&self.file_tracker),
                 prompt_slots: Arc::new(prompt_slots),
+                modes: Arc::clone(&modes),
                 subagent_cancels: Arc::clone(&self.subagent_cancels),
                 registry: Arc::clone(maki_agent::tools::ToolRegistry::global_arc()),
                 audience: ToolAudience::MAIN,
@@ -309,6 +312,7 @@ impl AgentLoop {
         let slot = self.model_slot.load();
         let system = agent::build_system_prompt(
             &self.vars,
+            &self.lua_handle.mode_registry(),
             &maki_agent::AgentMode::Build,
             &self.instructions.text,
             prompt_slots,

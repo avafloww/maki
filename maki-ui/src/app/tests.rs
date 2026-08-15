@@ -3210,7 +3210,7 @@ fn override_shadows_quit_builtin() {
 #[test]
 fn override_shadows_tab_mode_toggle() {
     let mut app = test_app();
-    let initial_mode = app.state.mode;
+    let initial_mode = app.state.mode.clone();
     let probe = install_override(&mut app, KeyCode::Tab, KeyModifiers::NONE);
 
     let actions = app.update(Msg::Key(key(KeyCode::Tab)));

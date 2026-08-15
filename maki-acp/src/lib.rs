@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use maki_agent::prompt::ResolvedSlots;
-use maki_agent::{AgentConfig, PermissionsConfig};
+use maki_agent::{AgentConfig, ModeRegistry, PermissionsConfig};
 use maki_config::ModelPolicy;
 use maki_providers::Timeouts;
 use maki_providers::model::Model;
@@ -20,6 +20,7 @@ pub struct AcpParams {
     pub initial_wd: PathBuf,
     pub mcp_handle: Option<maki_agent::McpHandle>,
     pub prompt_slots: Arc<ResolvedSlots>,
+    pub modes: Arc<ModeRegistry>,
     pub yolo: bool,
     pub model_policy: Arc<ModelPolicy>,
 }
