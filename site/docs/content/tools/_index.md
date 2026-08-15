@@ -177,7 +177,7 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 
 ### `task_spawn` {#task_spawn}
 
-Start a background subagent and return its task_id immediately. The main agent stays unblocked. Poll with task_get, queue messages with task_send, and finish with task_despawn.
+Start a background subagent and return its task_id immediately. The main agent stays unblocked. The result is returned automatically when the subagent finishes, so wait for the reply instead of polling task_get. Queue messages with task_send and finish with task_despawn.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -189,7 +189,7 @@ Start a background subagent and return its task_id immediately. The main agent s
 
 ### `task_get` {#task_get}
 
-Poll a background subagent. Returns { status = "running" | "done" | "closed", result?, error? }. Does not block the main agent.
+Poll a background subagent. Returns { status = "running" | "done" | "closed", result?, error? }. Normally unnecessary: a spawned subagent's result arrives automatically, so wait for that reply instead of polling task_get. Does not block the main agent.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

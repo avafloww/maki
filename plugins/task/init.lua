@@ -5,11 +5,13 @@
 --
 -- Subagents run on a background driver, so the main agent is not blocked while
 -- one runs. Four tools split the lifecycle:
---   task_spawn   -> { task_id }                 (non-blocking kickoff)
---   task_get     -> { status, result?, error? } (poll)
+--   task_spawn   -> { task_id }                 (kickoff)
+--   task_get     -> { status, result?, error? } (manual polling)
 --   task_send    -> { queued = true }           (queue a message / nudge)
 --   task_despawn -> { ok = true }               (cancel + flush history)
--- The unified `task` tool remains as a blocking composite over the four.
+-- A spawned subagent's result is returned automatically when it finishes, so the
+-- agent waits for that reply; task_get is only for manual polling. The unified
+-- `task` tool remains as a blocking composite over the four.
 --
 -- Rust exposes primitives only (`maki.agent.session`, `maki.json.schema_validator`,
 -- `maki.async.semaphore`).
@@ -50,9 +52,10 @@ Subagent types (set via `subagent_type`):
 - `plan_reviewer`: Read-only audit of a finished plan. Only available in plan mode. Evaluates shape, test-to-acceptance-criteria coverage, and severity of risks, and answers with VERDICT: pass|fail.
 
 Subagents run in the background, so the main agent is never blocked by one. Use
-`task_spawn` to start and `task_get` to poll, `task_send` to queue more work, and
-`task_despawn` to cancel a running subagent. The unified `task` tool is a
-blocking composite over those four and keeps working for one-shot use.
+`task_spawn` to start a subagent; its result is returned automatically when it
+finishes, so wait for that reply rather than polling `task_get`. Use `task_send`
+to queue more work and `task_despawn` to cancel a running subagent. The unified
+`task` tool is a blocking composite over those four and keeps working for one-shot use.
 
 Notes:
 1. Launch multiple tasks concurrently when possible.
@@ -486,7 +489,7 @@ end
 
 maki.api.register_tool({
   name = "task_spawn",
-  description = "Start a background subagent and return its task_id immediately. The main agent stays unblocked. Poll with task_get, queue messages with task_send, and finish with task_despawn. Also callable from a code_execution script as a Python async function.",
+  description = "Start a background subagent and return its task_id immediately. The main agent stays unblocked. The result is returned automatically when the subagent finishes, so wait for the reply instead of polling task_get. Queue messages with task_send and finish with task_despawn. Also callable from a code_execution script as a Python async function.",
   kind = "execute",
   audiences = { "main", "interpreter", "workflow" },
   examples = {},
@@ -498,7 +501,7 @@ maki.api.register_tool({
 
 maki.api.register_tool({
   name = "task_get",
-  description = 'Poll a background subagent. Returns { status = "running" | "done" | "closed", result?, error? }. Does not block the main agent. Also callable from a code_execution script as a Python async function.',
+  description = 'Poll a background subagent. Returns { status = "running" | "done" | "closed", result?, error? }. Normally unnecessary: a spawned subagent\'s result arrives automatically, so wait for that reply instead of polling task_get. Does not block the main agent. Also callable from a code_execution script as a Python async function.',
   kind = "execute",
   audiences = { "main", "interpreter", "workflow" },
   examples = {},
