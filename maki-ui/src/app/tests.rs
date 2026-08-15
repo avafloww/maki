@@ -4289,7 +4289,8 @@ fn subagent_completion_queues_reply_to_main() {
         TASK_ID,
         None,
     ));
-    assert_eq!(app.queue.text_messages(), ["the answer"]);
+    let expected = format!("{SUBAGENT_REPLY_HEADER}{TASK_ID}{SUBAGENT_REPLY_SUFFIX}the answer");
+    assert_eq!(app.queue.text_messages(), [expected]);
 }
 
 #[test]

@@ -95,6 +95,10 @@ const IMPLEMENT_PARALLEL_HINT: &str = "Use batch+task to parallelize, assign eac
 
 const TASK_DONE_DETAIL: &str = "✓ ";
 const MISSING_TOOL_COMPLETION: &str = "Tool did not report completion before the turn ended";
+/// Wraps an auto-queued subagent reply with its task id so the main agent can
+/// tell it apart from a directly typed user message.
+const SUBAGENT_REPLY_HEADER: &str = "[msg from ";
+const SUBAGENT_REPLY_SUFFIX: &str = "] ";
 /// Length cap for the `/tasks` row message snippet (AC.10).
 const SNIPPET_CHARS: usize = 64;
 
@@ -1124,8 +1128,13 @@ impl App {
                 .and_then(|_| terminal_reply(&messages))
                 .filter(|r| !r.is_empty());
             if let Some(reply) = reply {
+                // Header the reply with the task id so it reads as subagent
+                // output rather than a message typed by the user.
+                let text = format!(
+                    "{SUBAGENT_REPLY_HEADER}{tool_use_id}{SUBAGENT_REPLY_SUFFIX}{reply}"
+                );
                 self.queue_and_notify(QueuedMessage {
-                    text: reply,
+                    text,
                     images: Vec::new(),
                 });
             }
