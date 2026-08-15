@@ -10,7 +10,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventK
 use maki_agent::permissions::PermissionManager;
 use maki_agent::{
     ImageMediaType, McpConfigErrors, McpServerInfo, McpServerStatus, McpSnapshot,
-    McpSnapshotReader, ToolDoneEvent, ToolOutput, ToolStartEvent, TurnCompleteEvent,
+    McpSnapshotReader, ModeDefSpec, ToolDoneEvent, ToolOutput, ToolStartEvent,
+    TurnCompleteEvent,
 };
 use maki_config::{PermissionsConfig, UiConfig};
 use maki_lua::{BuiltinAction, HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader};
@@ -3056,6 +3057,81 @@ fn re_edit_keeps_plan_form_visible() {
     }))));
     assert!(matches!(app.state.plan, PlanState::Ready(_)));
     assert!(app.plan_form.is_visible());
+}
+
+#[test]
+fn plan_submit_builtin_shows_form_marks_ready_pushes_message() {
+    let dir = TempDir::new().unwrap();
+    let plan_path = dir.path().join("plan.md");
+    const PLAN_BODY: &str = "# My Plan\n\n- Step 1";
+    std::fs::write(&plan_path, PLAN_BODY).unwrap();
+
+    let mut app = test_app();
+    app.state.mode = Mode::Plan;
+    app.state.plan = PlanState::Drafting(plan_path);
+
+    let actions = app.run_builtin(BuiltinAction::PlanSubmit);
+    assert!(actions.is_empty());
+    assert!(app.plan_form.is_visible());
+    assert!(app.state.plan.is_ready());
+    assert_eq!(app.main_chat().last_message_text(), PLAN_BODY);
+    assert!(
+        !app.state
+            .session
+            .messages()
+            .iter()
+            .any(|m| m.content.iter().any(|c| matches!(
+                c,
+                ContentBlock::Text { text } if text.contains(PLAN_BODY)
+            ))),
+        "plan body must not enter the model session context (display-only)"
+    );
+}
+
+#[test]
+fn plan_submit_builtin_empty_file_does_not_show_form() {
+    let dir = TempDir::new().unwrap();
+    let plan_path = dir.path().join("plan.md");
+    std::fs::write(&plan_path, "").unwrap();
+
+    let mut app = test_app();
+    app.state.mode = Mode::Plan;
+    app.state.plan = PlanState::Drafting(plan_path);
+
+    assert!(app.run_builtin(BuiltinAction::PlanSubmit).is_empty());
+    assert!(!app.plan_form.is_visible());
+    assert!(!app.state.plan.is_ready());
+    assert!(app.status_bar.flash_text().is_some());
+}
+
+#[test]
+fn plan_submit_mode_disables_auto_open() {
+    let registry = maki_agent::ModeRegistry::builtin();
+    registry
+        .define(ModeDefSpec {
+            name: "plan".into(),
+            tools: Some(vec!["plan_submit".into()]),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let mut app = test_app();
+    app.lua_event_handle = maki_lua::EventHandle::disconnected_for_test_with_modes(Arc::new(registry));
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    app.state.mode = Mode::Plan;
+    app.state.plan = PlanState::Drafting(PathBuf::from("/tmp/plans/test.md"));
+
+    app.update(agent_msg(AgentEvent::ToolDone(Box::new(ToolDoneEvent {
+        id: "t1".into(),
+        tool: "write".into(),
+        output: ToolOutput::Plain("wrote 42 bytes to /tmp/plans/test.md".into()),
+        is_error: false,
+        annotation: None,
+        written_path: Some("/tmp/plans/test.md".into()),
+    }))));
+    assert!(!app.plan_form.is_visible());
+    assert!(!app.state.plan.is_ready());
 }
 
 #[test_case(1, Mode::Build, true,  true  ; "clear_and_implement")]

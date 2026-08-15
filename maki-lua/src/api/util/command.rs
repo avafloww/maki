@@ -434,6 +434,7 @@ pub enum BuiltinAction {
     Help,
     PlanToggle,
     PlanEditor,
+    PlanSubmit,
     EditInput,
     PopQueue,
     PrevChat,
@@ -541,6 +542,14 @@ mod tests {
             .filter(|c| c.plugin.as_ref() == "plugA")
             .collect();
         assert_eq!(plug_a_cmds.len(), 2);
+    }
+
+    #[test]
+    fn plan_submit_parses_from_lua_name() {
+        assert_eq!(
+            "plan_submit".parse::<BuiltinAction>(),
+            Ok(BuiltinAction::PlanSubmit)
+        );
     }
 
     #[test]

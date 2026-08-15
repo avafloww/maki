@@ -17,7 +17,7 @@ pub(crate) mod tests;
 pub(crate) mod view;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -85,6 +85,8 @@ const FLASH_REWIND: &str = "Press esc again to rewind...";
 const AUTH_EXPIRED_MSG: &str =
     "Token expired. Run `maki auth login` in another terminal, then press Enter to retry.";
 const FLASH_NO_PLAN: &str = "No plan file";
+const FLASH_NO_PLAN_BODY: &str = "Plan file is empty or unreadable";
+const PLAN_SUBMIT_TOOL: &str = "plan_submit";
 const FAST_UNSUPPORTED_MSG: &str = "Fast mode requires an Anthropic Opus 4.6+ model (API only)";
 const FAST_ON_MSG: &str = "Fast mode: on";
 const FAST_OFF_MSG: &str = "Fast mode: off";
@@ -784,6 +786,41 @@ impl App {
         self.state.mode == Mode::Plan && self.state.plan.is_ready()
     }
 
+    /// True when `plan_submit` is in the active mode's toolset (set by
+    /// `mode_plan_override`), flipping the plan auto-hooks on/off.
+    fn plan_submit_active(&self) -> bool {
+        if self.state.mode != Mode::Plan {
+            return false;
+        }
+        let def = self.state.mode.def(&self.lua_event_handle.mode_registry());
+        def.tools
+            .as_deref()
+            .is_some_and(|tools| tools.iter().any(|t| t.as_str() == PLAN_SUBMIT_TOOL))
+    }
+
+    fn submit_plan(&mut self) -> Vec<Action> {
+        if self.state.mode != Mode::Plan {
+            self.flash(FLASH_NO_PLAN.into());
+            return vec![];
+        }
+        let Some(path) = self.state.plan.path().map(Path::to_path_buf) else {
+            self.flash(FLASH_NO_PLAN.into());
+            return vec![];
+        };
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) if !c.trim().is_empty() => c,
+            _ => {
+                self.flash(FLASH_NO_PLAN_BODY.into());
+                return vec![];
+            }
+        };
+        self.state.plan.mark_ready();
+        self.plan_form.on_plan_ready();
+        self.main_chat()
+            .push(DisplayMessage::plan(content, path.display().to_string()));
+        vec![]
+    }
+
     /// Single implementation behind both the default keybindings and
     /// `maki.ui.action`, so a Lua rebind can never drift from the
     /// original key's behavior.
@@ -819,6 +856,7 @@ impl App {
                     }
                 };
             }
+            BuiltinAction::PlanSubmit => return self.submit_plan(),
             BuiltinAction::EditInput => return vec![Action::EditInputInEditor],
             BuiltinAction::PopQueue => {
                 self.queue.remove(0);
@@ -1175,6 +1213,7 @@ impl App {
 
         if let AgentEvent::ToolDone(ref e) = envelope.event {
             if self.state.mode == Mode::Plan
+                && !self.plan_submit_active()
                 && self.state.plan.path().is_some_and(|pp| e.wrote_to(pp))
             {
                 self.transition_plan(PlanTrigger::WriteDone);
@@ -1230,7 +1269,7 @@ impl App {
             }
         }
 
-        let plan_path = if self.state.mode == Mode::Plan {
+        let plan_path = if self.state.mode == Mode::Plan && !self.plan_submit_active() {
             self.state.plan.path()
         } else {
             None

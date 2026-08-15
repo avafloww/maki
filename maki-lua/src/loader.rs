@@ -484,6 +484,17 @@ impl EventHandle {
         Self::from_tx(flume::unbounded().0)
     }
 
+    /// Test sibling of `disconnected_for_test` that carries a specific mode
+    /// registry, for exercising mode-gated plan behavior.
+    #[doc(hidden)]
+    pub fn disconnected_for_test_with_modes(modes: Arc<maki_agent::ModeRegistry>) -> Self {
+        Self {
+            tx: flume::unbounded().0,
+            prio_tx: flume::unbounded().0,
+            modes,
+        }
+    }
+
     /// True when no runtime is draining requests. Production handles stay
     /// connected for the host's lifetime; the disconnected-for-test handle
     /// and a host whose thread has shut down both report true. Callers use

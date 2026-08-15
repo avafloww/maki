@@ -105,10 +105,13 @@ maki.setup({
   swaps the toolset to read tools plus `write`/`edit`/`plan_submit`, and adds
   `/plan` and `/build` slash commands. The directive and the plan reviewer splice
   one shared plan specification, so both always see the exact same document.
-- `plan_submit_tool` is a mode-scoped tool: it surfaces the finished plan in a
-  TUI window and offers **accept** (hands off to implementation), **refine**
-  (keep planning), or **cancel**. It only exists in plan mode because plan's
-  toolset lists it.
+- `plan_submit_tool` is a mode-scoped tool: it prints the finished plan inline
+  as a **display-only** message (kept out of your context) and surfaces the plan
+  review form, with **accept** (hands off to implementation), **refine** (keep
+  planning), or **cancel**. It only exists in plan mode because plan's toolset
+  lists it. While `plan_submit` is in an active mode's toolset, the built-in
+  auto-hooks that open the review form on a plan-file write are skipped; the
+  model calls `plan_submit` explicitly when the plan is ready.
 
 The built-in `task` tool grows a `plan_reviewer` subagent type when the plan
 override is active: a read-only audit that verifies the plan follows the shared
@@ -125,7 +128,8 @@ With all three enabled, a typical loop is:
    directive and the reduced toolset.
 2. The model calls `task` with `subagent_type = "plan_reviewer"` to audit the
    plan, then iterates until `VERDICT: pass`.
-3. The model calls `plan_submit`; you review the plan in the window and accept.
+3. The model calls `plan_submit`; the plan prints inline and you accept, refine,
+   or concede through the plan review form.
 4. Switch to build mode (`/build`) to implement with the full toolset.
 
 ## Persistence and other surfaces

@@ -4384,8 +4384,8 @@ your terminal grabs it first: bind a new key with `maki.keymap.set`
 and call this from it.
 
 Valid names: `"file_picker"`, `"search"`, `"tasks"`, `"help"`,
-`"plan_toggle"`, `"plan_editor"`, `"edit_input"`, `"pop_queue"`,
-`"prev_chat"`, `"next_chat"`.
+`"plan_toggle"`, `"plan_editor"`, `"plan_submit"`, `"edit_input"`,
+`"pop_queue"`, `"prev_chat"`, `"next_chat"`.
 
 **Parameters:**
 

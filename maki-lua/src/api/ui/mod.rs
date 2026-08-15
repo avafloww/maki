@@ -255,8 +255,8 @@ fn flash(_lua: &Lua, #[ctx] tx: flume::Sender<UiAction>, msg: String) -> LuaResu
 /// and call this from it.
 ///
 /// Valid names: `"file_picker"`, `"search"`, `"tasks"`, `"help"`,
-/// `"plan_toggle"`, `"plan_editor"`, `"edit_input"`, `"pop_queue"`,
-/// `"prev_chat"`, `"next_chat"`.
+/// `"plan_toggle"`, `"plan_editor"`, `"plan_submit"`, `"edit_input"`,
+/// `"pop_queue"`, `"prev_chat"`, `"next_chat"`.
 ///
 /// @param name string Action name, e.g. `"file_picker"`.
 /// @return (boolean|nil, string|nil) `true` on success, or nil and an error message for an unknown name.
