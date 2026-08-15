@@ -11,7 +11,14 @@ use maki_storage::StateDir;
 
 use crate::setup;
 
-pub fn run(model_arg: Option<String>, yolo: bool, no_plugins: bool, no_jit: bool) -> Result<()> {
+pub fn run(
+    model_arg: Option<String>,
+    yolo: bool,
+    no_plugins: bool,
+    no_jit: bool,
+    system_prompt_override: Option<String>,
+    append_system_prompt: Option<String>,
+) -> Result<()> {
     let storage = StateDir::resolve().context("resolve data directory")?;
     maki_providers::model_registry::load_from_storage(&storage);
 
@@ -67,6 +74,8 @@ pub fn run(model_arg: Option<String>, yolo: bool, no_plugins: bool, no_jit: bool
         prompt_slots: Arc::new(prompt_slots),
         modes,
         yolo,
+        system_prompt_override,
+        append_system_prompt,
         model_policy: Arc::new(config.provider.model_policy.clone()),
     })
 }

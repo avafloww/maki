@@ -33,6 +33,13 @@ pub(crate) struct ModelSlot {
     pub(crate) provider: Arc<dyn Provider>,
 }
 
+/// Inherited via CLI across every session (including respawns).
+#[derive(Clone, Default)]
+pub(crate) struct SystemPromptOverride {
+    pub(crate) override_text: Option<String>,
+    pub(crate) append_text: Option<String>,
+}
+
 pub(crate) enum AgentCommand {
     Cancel { run_id: u64 },
     CancelAll,
@@ -56,6 +63,7 @@ pub(crate) struct AgentHandles {
     pub(crate) queue: QueueSender,
     pub(crate) timeouts: maki_providers::Timeouts,
     model_policy: Arc<ModelPolicy>,
+    system_prompt: SystemPromptOverride,
     mailbox: Option<SessionMailbox>,
     task: smol::Task<()>,
 }
@@ -76,6 +84,7 @@ impl AgentHandles {
         mcp_handle: Option<McpHandle>,
         mcp_config_errors: McpConfigErrors,
         model_policy: Arc<ModelPolicy>,
+        system_prompt: SystemPromptOverride,
     ) -> Self {
         spawn_agent_internal(
             flume::unbounded(),
@@ -90,6 +99,7 @@ impl AgentHandles {
             timeouts,
             lua_handle,
             model_policy,
+            system_prompt,
         )
     }
 
@@ -163,6 +173,7 @@ impl AgentHandles {
             self.timeouts,
             lua_handle,
             Arc::clone(&self.model_policy),
+            self.system_prompt.clone(),
         );
         let old = mem::replace(self, new);
         // Repoint the app at the new queue before dropping `old`, otherwise the app keeps
@@ -221,6 +232,7 @@ fn spawn_agent_internal(
     timeouts: maki_providers::Timeouts,
     lua_handle: EventHandle,
     model_policy: Arc<ModelPolicy>,
+    system_prompt: SystemPromptOverride,
 ) -> AgentHandles {
     let (cmd_tx, cmd_rx) = flume::unbounded::<AgentCommand>();
     let (answer_tx, answer_rx) = flume::unbounded::<String>();
@@ -264,6 +276,7 @@ fn spawn_agent_internal(
         lua_handle,
         subagent_cancels,
         Arc::clone(&model_policy),
+        system_prompt.clone(),
     );
 
     let task = smol::spawn(agent_loop.run());
@@ -280,6 +293,7 @@ fn spawn_agent_internal(
         queue: queue_tx,
         timeouts,
         model_policy,
+        system_prompt,
         mailbox,
         task,
     }
@@ -359,6 +373,7 @@ mod tests {
             None,
             McpConfigErrors::new(PathBuf::new()),
             Arc::new(ModelPolicy::default()),
+            SystemPromptOverride::default(),
         );
         (handles, model_slot, permissions)
     }

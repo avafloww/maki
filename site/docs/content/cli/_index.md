@@ -28,7 +28,7 @@ If you pass a prompt (or pipe stdin) without `--print`, the TUI still opens and 
 | `--exit-on-done` | yes | n/a (always exits) | n/a |
 | `--image` | no (use Ctrl+V paste) | yes | via wire protocol |
 | `--verbose`, `--output-format` | no | yes | stream only |
-| `--system-prompt`, `--append-system-prompt` | no | no | yes |
+| `--system-prompt`, `--append-system-prompt` | yes | yes | yes |
 | `--max-turns`, `--session-id`, `--fork-session` | no | no | yes |
 | `--permission-mode` | no | no | yes |
 | `--include-partial-messages` | no | no | yes |
@@ -56,8 +56,8 @@ If you pass a prompt (or pipe stdin) without `--print`, the TUI still opens and 
 | `--session-id <ID>` | Session id for SDK mode |
 | `--fork-session` | Load a session's history under a new id (SDK) |
 | `--max-turns <N>` | Cap agent turns (SDK) |
-| `--system-prompt <TEXT>` | Replace the system prompt (SDK only) |
-| `--append-system-prompt <TEXT>` | Append to the built-in system prompt (SDK only) |
+| `--system-prompt <TEXT>` | Replace the system prompt entirely |
+| `--append-system-prompt <TEXT>` | Append to the built-in system prompt |
 | `--permission-mode <MODE>` | SDK: `default`, `acceptEdits`, `plan`, or `bypassPermissions` |
 | `--include-partial-messages` | Stream partial deltas in SDK mode |
 

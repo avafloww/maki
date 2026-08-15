@@ -22,6 +22,8 @@ pub struct AcpParams {
     pub prompt_slots: Arc<ResolvedSlots>,
     pub modes: Arc<ModeRegistry>,
     pub yolo: bool,
+    pub system_prompt_override: Option<String>,
+    pub append_system_prompt: Option<String>,
     pub model_policy: Arc<ModelPolicy>,
 }
 

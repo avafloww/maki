@@ -276,6 +276,8 @@ pub fn run(mut cli: Cli) -> Result<()> {
             fast,
             stack.config.always_workflow,
             Arc::new(stack.config.provider.model_policy.clone()),
+            cli.system_prompt,
+            cli.append_system_prompt,
         )
         .context("run print mode")?;
         return Ok(());
@@ -344,6 +346,8 @@ pub fn run(mut cli: Cli) -> Result<()> {
                 ui_action_rx: stack.plugin_host.ui_action_rx(),
                 lua_event_handle: stack.plugin_host.event_handle(),
                 model_policy: Arc::new(stack.config.provider.model_policy.clone()),
+                system_prompt_override: cli.system_prompt.clone(),
+                append_system_prompt: cli.append_system_prompt.clone(),
             },
             initial_prompt.take(),
         )

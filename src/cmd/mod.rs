@@ -41,7 +41,14 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             update::rollback().map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
         }
         Some(Command::Acp { model, yolo }) => {
-            acp::run(model, yolo, cli.no_plugins, cli.no_jit)?;
+            acp::run(
+                model,
+                yolo,
+                cli.no_plugins,
+                cli.no_jit,
+                cli.system_prompt,
+                cli.append_system_prompt,
+            )?;
         }
         Some(Command::Migrate { action }) => match action {
             MigrateAction::Xdg => migrate::xdg()?,

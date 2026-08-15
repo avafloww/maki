@@ -23,6 +23,7 @@ use serde_json::Value;
 use tracing::error;
 
 use super::ModelSlot;
+use super::SystemPromptOverride;
 use super::cancel_map::RunCancelMap;
 use super::shared_queue::{QueueItem, QueueReceiver};
 
@@ -50,6 +51,7 @@ pub(super) struct AgentLoop {
     lua_handle: EventHandle,
     subagent_cancels: Arc<CancelMap<String>>,
     model_policy: Arc<ModelPolicy>,
+    system_prompt: SystemPromptOverride,
 }
 
 impl AgentLoop {
@@ -74,6 +76,7 @@ impl AgentLoop {
         lua_handle: EventHandle,
         subagent_cancels: Arc<CancelMap<String>>,
         model_policy: Arc<ModelPolicy>,
+        system_prompt: SystemPromptOverride,
     ) -> Self {
         let mcp = mcp_handle.map(|h| McpSession::new(h, &initial_history));
         Self {
@@ -100,7 +103,36 @@ impl AgentLoop {
             lua_handle,
             subagent_cancels,
             model_policy,
+            system_prompt,
         }
+    }
+
+    /// Build the system prompt, honoring the CLI override and append.
+    fn build_system_with(
+        &self,
+        mode: &maki_agent::AgentMode,
+        prompt_slots: &maki_agent::prompt::ResolvedSlots,
+        model: &Model,
+    ) -> String {
+        let mut system = self
+            .system_prompt
+            .override_text
+            .clone()
+            .unwrap_or_else(|| {
+                agent::build_system_prompt(
+                    &self.vars,
+                    &self.lua_handle.mode_registry(),
+                    mode,
+                    &self.instructions.text,
+                    prompt_slots,
+                    model,
+                )
+            });
+        if let Some(append) = &self.system_prompt.append_text {
+            system.push('\n');
+            system.push_str(append);
+        }
+        system
     }
 
     pub(super) async fn run(mut self) {
@@ -227,14 +259,7 @@ impl AgentLoop {
 
         let prompt_slots = self.lua_handle.collect_prompt_slots_async().await;
         let modes = self.lua_handle.mode_registry();
-        let system = agent::build_system_prompt(
-            &self.vars,
-            &modes,
-            &input.mode,
-            &self.instructions.text,
-            &prompt_slots,
-            &slot.model,
-        );
+        let system = self.build_system_with(&input.mode, &prompt_slots, &slot.model);
         self.publish_btw_system(&prompt_slots);
         let (trigger, cancel) = CancelToken::new();
         self.set_cancel_trigger(run_id, trigger);
@@ -310,14 +335,7 @@ impl AgentLoop {
     /// the model. Everything else matches the live prompt.
     fn publish_btw_system(&self, prompt_slots: &maki_agent::prompt::ResolvedSlots) {
         let slot = self.model_slot.load();
-        let system = agent::build_system_prompt(
-            &self.vars,
-            &self.lua_handle.mode_registry(),
-            &maki_agent::AgentMode::Build,
-            &self.instructions.text,
-            prompt_slots,
-            &slot.model,
-        );
+        let system = self.build_system_with(&maki_agent::AgentMode::Build, prompt_slots, &slot.model);
         self.btw_system.store(Arc::new(system));
     }
 

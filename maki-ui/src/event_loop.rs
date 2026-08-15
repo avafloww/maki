@@ -35,7 +35,9 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use crate::AppSession;
-use crate::agent::{AgentCommand, AgentHandles, ModelSlot, shared_queue::QueueItem};
+use crate::agent::{
+    AgentCommand, AgentHandles, ModelSlot, SystemPromptOverride, shared_queue::QueueItem,
+};
 use crate::app::shell::{ShellEvent, spawn_shell};
 use crate::app::{App, Msg, QueuedMessage, SubmitOutcome};
 use crate::color_compat;
@@ -83,6 +85,8 @@ pub struct EventLoopParams {
     pub ui_action_rx: flume::Receiver<UiAction>,
     pub lua_event_handle: EventHandle,
     pub model_policy: Arc<ModelPolicy>,
+    pub system_prompt_override: Option<String>,
+    pub append_system_prompt: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -167,6 +171,7 @@ struct SpawnCtx {
     available_models: Arc<ArcSwapOption<Vec<String>>>,
     storage_writer: Arc<StorageWriter>,
     model_policy: Arc<ModelPolicy>,
+    system_prompt: SystemPromptOverride,
 }
 
 impl SpawnCtx {
@@ -185,6 +190,7 @@ impl SpawnCtx {
             self.mcp_handle.clone(),
             self.mcp_config_errors.clone(),
             Arc::clone(&self.model_policy),
+            self.system_prompt.clone(),
         );
         let mut app = App::new(
             &self.model_slot.load().model,
@@ -343,6 +349,8 @@ impl<'t> EventLoop<'t> {
             ui_action_rx,
             lua_event_handle,
             model_policy,
+            system_prompt_override,
+            append_system_prompt,
         } = params;
 
         // Apply the config theme before the warmup thread spawns, or warmup
@@ -399,6 +407,10 @@ impl<'t> EventLoop<'t> {
             available_models: bg.available,
             storage_writer,
             model_policy,
+            system_prompt: SystemPromptOverride {
+                override_text: system_prompt_override,
+                append_text: append_system_prompt,
+            },
         };
 
         let mut runtimes: Vec<SessionRuntime> = sessions

@@ -82,6 +82,8 @@ pub struct HeadlessParams {
     pub initial_wd: PathBuf,
     pub fast: bool,
     pub workflow: bool,
+    pub system_prompt_override: Option<String>,
+    pub append_system_prompt: Option<String>,
     pub model_policy: Arc<ModelPolicy>,
 }
 
@@ -167,14 +169,20 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
     );
 
     let modes = crate::ModeRegistry::builtin();
-    let system = agent::build_system_prompt(
-        &vars,
-        &modes,
-        &mode,
-        &instructions.text,
-        &params.prompt_slots,
-        &params.model,
-    );
+    let mut system = params.system_prompt_override.clone().unwrap_or_else(|| {
+        agent::build_system_prompt(
+            &vars,
+            &modes,
+            &mode,
+            &instructions.text,
+            &params.prompt_slots,
+            &params.model,
+        )
+    });
+    if let Some(append) = &params.append_system_prompt {
+        system.push('\n');
+        system.push_str(append);
+    }
 
     let mcp = params.mcp_handle.clone().map(|h| McpSession::new(h, &[]));
     let tool_names = advertised_tool_names(&tools, mcp.as_ref());

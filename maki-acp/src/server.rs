@@ -182,8 +182,8 @@ fn spawn_session(
         modes: Arc::clone(&params.modes),
         initial_history: history,
         yolo: params.yolo,
-        system_prompt_override: None,
-        append_system_prompt: None,
+        system_prompt_override: params.system_prompt_override.clone(),
+        append_system_prompt: params.append_system_prompt.clone(),
         workflow: false,
         model_policy: Arc::clone(&params.model_policy),
     })

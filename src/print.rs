@@ -149,6 +149,8 @@ pub fn run(
     fast: bool,
     workflow: bool,
     model_policy: Arc<ModelPolicy>,
+    system_prompt_override: Option<String>,
+    append_system_prompt: Option<String>,
 ) -> Result<()> {
     let prompt = match prompt_arg {
         Some(p) => p,
@@ -183,6 +185,8 @@ pub fn run(
         fast,
         workflow,
         model_policy,
+        system_prompt_override,
+        append_system_prompt,
     });
 
     let HeadlessHandle {
