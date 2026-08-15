@@ -378,6 +378,30 @@ impl StoredThinking {
     }
 }
 
+/// Global user preferences persisted across sessions, distinct from per-session
+/// meta. The default thinking overlay lets `/thinking <mode>` at runtime pin a
+/// global default without editing `init.lua`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Prefs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_thinking: Option<StoredThinking>,
+}
+
+const PREFS_FILE: &str = "prefs.json";
+
+pub fn read_prefs(state_dir: &StateDir) -> Prefs {
+    let path = state_dir.path().join(PREFS_FILE);
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+pub fn write_prefs(state_dir: &StateDir, prefs: &Prefs) -> Result<(), StorageError> {
+    let path = state_dir.path().join(PREFS_FILE);
+    atomic_write(&path, &serde_json::to_vec_pretty(prefs)?)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredSubagent {
     pub tool_use_id: String,
@@ -1538,10 +1562,12 @@ mod tests {
         StoredSubagent, TAIL_BUF, generate_title, json_path, jsonl_path, load_cwd_index,
         next_epoch, update_cwd_index, write_full_session,
     };
+    use super::{Prefs, read_prefs, write_prefs};
     use super::{
         HistorySnapshot, SCAN_CACHE_FILE, Session, SessionError, SessionLog, SessionMeta,
         StorageError, TitleSource,
     };
+    use crate::StateDir;
     use crate::id::MakiId;
     use serde_json::Value;
     use std::collections::HashMap;
@@ -3048,5 +3074,29 @@ mod tests {
 
         let loaded = TestSession::load_from(session.id, dir).unwrap();
         assert_same_session(&loaded, &session);
+    }
+
+    #[test]
+    fn prefs_overlay_round_trips_and_defaults_on_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let state = StateDir::from_path(dir.path().to_path_buf());
+
+        assert_eq!(read_prefs(&state).default_thinking, None);
+
+        write_prefs(
+            &state,
+            &Prefs {
+                default_thinking: Some(StoredThinking::Effort { level: Effort::Medium }),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_prefs(&state).default_thinking,
+            Some(StoredThinking::Effort { level: Effort::Medium })
+        );
+
+        write_prefs(&state, &Prefs { default_thinking: Some(StoredThinking::Off) }).unwrap();
+        assert_eq!(read_prefs(&state).default_thinking, Some(StoredThinking::Off));
     }
 }

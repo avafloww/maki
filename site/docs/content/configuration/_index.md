@@ -63,7 +63,7 @@ All fields are optional. Typos in field names cause an error right away.
 | `always_yolo` | bool | `false` | Start every session with YOLO mode (skip permission prompts, deny rules still apply) |
 | `always_fast` | bool | `false` | Start every session with Anthropic fast mode (Opus only; ignored otherwise) |
 | `always_workflow` | bool | `false` | Start every session with workflow mode (task callable inside code_execution) |
-| `always_thinking` | bool \| string | `false` | Start every session with extended thinking (true/"adaptive", "off", an effort level ("minimal" to "max"), or a token budget) |
+| `always_thinking` | bool \| string | `false` | Start every session with extended thinking (true/"adaptive", "off", an effort level ("minimal" to "max"), or a token budget). Can also be set at runtime with `/thinking`, which saves the choice as the default for new sessions |
 
 ### `ui`
 

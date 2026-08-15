@@ -1307,6 +1307,10 @@ impl App {
                 vec![]
             }
             "/thinking" => {
+                if self.command_palette.find_lua_command("/thinking").is_some() {
+                    self.run_lua_command("/thinking", cmd.args);
+                    return vec![];
+                }
                 if !self.state.model.supports_thinking() {
                     self.flash("Thinking requires a model that supports it".into());
                     return vec![];

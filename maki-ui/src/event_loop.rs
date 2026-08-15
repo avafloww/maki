@@ -26,11 +26,11 @@ use maki_lua::{
 };
 use maki_providers::Timeouts;
 use maki_providers::provider::{Provider, fetch_all_models, from_model};
-use maki_providers::{Message, Model};
+use maki_providers::{Message, Model, ThinkingConfig};
 use maki_storage::StateDir;
 use maki_storage::StorageError;
 use maki_storage::id::{MakiId, MakiIdParseError, SessionRef};
-use maki_storage::sessions::{SessionError, normalize_title};
+use maki_storage::sessions::{Prefs, SessionError, StoredThinking, normalize_title, write_prefs};
 use serde_json::json;
 use tracing::{info, warn};
 
@@ -806,6 +806,38 @@ impl<'t> EventLoop<'t> {
                         self.ctx.storage_writer.send(Arc::new(session));
                     }
                     Ok(json!(true))
+                })();
+                let _ = reply_tx.send(reply);
+            }
+            SessionRequest::GetThinking => {
+                let app = &self.sessions[self.focused].app;
+                let reply = Ok(json!({
+                    "mode": app.state.thinking.to_string(),
+                    "supports_thinking": app.state.model.supports_thinking(),
+                }));
+                let _ = reply_tx.send(reply);
+            }
+            SessionRequest::SetThinking { set_default, thinking } => {
+                let reply = (|| {
+                    let idx = self.focused;
+                    if !self.sessions[idx].app.state.model.supports_thinking() {
+                        return Err("Thinking requires a model that supports it".into());
+                    }
+                    let parsed = StoredThinking::parse_setting(&thinking)
+                        .map_err(|e| e.to_string())?;
+                    if set_default {
+                        write_prefs(
+                            &self.ctx.storage,
+                            &Prefs {
+                                default_thinking: Some(parsed),
+                            },
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
+                    self.sessions[idx].app.state.thinking = ThinkingConfig::from(parsed);
+                    let mode = self.sessions[idx].app.state.thinking.to_string();
+                    self.sessions[idx].app.flash(format!("Thinking: {mode}"));
+                    Ok(json!({ "mode": mode }))
                 })();
                 let _ = reply_tx.send(reply);
             }

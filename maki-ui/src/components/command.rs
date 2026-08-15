@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::mem;
 use std::sync::Arc;
 
@@ -201,7 +202,15 @@ impl CommandPalette {
         let nucleo = Nucleo::new(Config::DEFAULT, Arc::new(|| {}), None, 1);
         let injector = nucleo.injector();
 
+        let mut overridden: HashSet<String> = HashSet::new();
+        overridden.extend(lua_commands.iter().map(|c| c.name.to_string()));
+        overridden.extend(custom_commands.iter().map(|c| c.display_name()));
+        overridden.extend(mcp_prompts.iter().map(|p| format!("/{}", p.display_name)));
+
         for cmd in BUILTIN_COMMANDS.iter() {
+            if overridden.contains(cmd.name) {
+                continue;
+            }
             let item = CommandItem {
                 name: cmd.name.to_string(),
                 max_args: cmd.max_args,
@@ -623,6 +632,24 @@ mod tests {
 
         let with_prompts = synced_with_prompts("/");
         assert_eq!(with_prompts.filtered.len(), builtin_count + 2);
+    }
+
+    #[test]
+    fn lua_command_overrides_builtin_of_same_name() {
+        let lua = LuaCommandReader::from_commands(vec![LuaCommandInfo {
+            name: Arc::from("/thinking"),
+            description: Arc::from("thinking selector"),
+            plugin: Arc::from("thinking"),
+            max_args: 1,
+        }]);
+        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), lua);
+        p.sync("/thinking");
+        let count = p
+            .filtered
+            .iter()
+            .filter(|m| p.item_name(m) == "/thinking")
+            .count();
+        assert_eq!(count, 1, "lua command should shadow the builtin of the same name");
     }
 
     #[test]

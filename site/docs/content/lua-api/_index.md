@@ -2729,6 +2729,51 @@ Renames a session, live or stored.
 local _, err = maki.session.set_title({ id = id, title = "refactor" })
 ```
 
+---
+
+### `maki.session.thinking()` {#maki-session-thinking}
+
+```lua
+maki.session.thinking()
+```
+
+Returns the current thinking mode of the focused session and whether its
+model supports thinking at all (for hiding/graving the selector).
+
+**Returns:** (`table|nil`, `string|nil`) `{mode, supports_thinking}`, or nil and an error.
+
+**Example:**
+
+```lua
+local info = maki.session.thinking()
+```
+
+---
+
+### `maki.session.set_thinking()` {#maki-session-set_thinking}
+
+```lua
+maki.session.set_thinking({opts})
+```
+
+Sets the focused session's thinking mode. `mode` accepts any value
+`StoredThinking::parse_setting` understands: `off`, `adaptive`, an effort
+level (`minimal` .. `max`), or a token budget. When `set_default` is true,
+the choice is also persisted as the global default for new sessions.
+
+**Parameters:**
+
+- `{opts}` (`table`) Required fields: mode (string) the thinking setting;
+  - `set_default` (boolean) also persist as the default for new sessions.
+
+**Returns:** (`table|nil`, `string|nil`) `{mode}`, or nil and an error.
+
+**Example:**
+
+```lua
+maki.session.set_thinking({ mode = "medium", set_default = true })
+```
+
 
 ## maki.text {#maki-text}
 

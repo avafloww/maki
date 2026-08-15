@@ -15,6 +15,7 @@ use maki_lua::PluginHost;
 use maki_providers::model::Model;
 use maki_storage::StateDir;
 use maki_storage::id::MakiId;
+use maki_storage::sessions::StoredThinking;
 use maki_ui::{AppSession, RunOutcome};
 
 use crate::cli::{Cli, normalize_tool_name};
@@ -292,13 +293,17 @@ pub fn run(mut cli: Cli) -> Result<()> {
     let mut warnings: Vec<String> = Vec::new();
     let mut initial_prompt = read_initial_prompt(cli.initial_prompt.take())?;
     let mut teardown = Teardown::default();
+    let default_thinking: Option<StoredThinking> =
+        maki_storage::sessions::read_prefs(&storage)
+            .default_thinking
+            .or(stack.config.always_thinking);
 
     loop {
         for session in &mut tabs {
             if session.messages().is_empty() {
                 session.meta.fast |= stack.config.always_fast;
                 session.meta.workflow |= stack.config.always_workflow;
-                if let Some(thinking) = stack.config.always_thinking {
+                if let Some(thinking) = default_thinking {
                     session.meta.thinking = Some(thinking);
                 }
             }

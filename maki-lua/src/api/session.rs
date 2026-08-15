@@ -185,6 +185,43 @@ async fn set_title(
     roundtrip(lua, tx, req).await
 }
 
+/// Returns the current thinking mode of the focused session and whether its
+/// model supports thinking at all (for hiding/graving the selector).
+///
+/// @return (table|nil, string|nil) `{mode, supports_thinking}`, or nil and an error.
+/// @example
+/// local info = maki.session.thinking()
+#[lua_fn]
+async fn thinking(
+    lua: Lua,
+    #[ctx] tx: Option<flume::Sender<UiAction>>,
+) -> LuaResult<Pair<Value>> {
+    roundtrip(lua, tx, SessionRequest::GetThinking).await
+}
+
+/// Sets the focused session's thinking mode. `mode` accepts any value
+/// `StoredThinking::parse_setting` understands: `off`, `adaptive`, an effort
+/// level (`minimal` .. `max`), or a token budget. When `set_default` is true,
+/// the choice is also persisted as the global default for new sessions.
+///
+/// @param opts table Required fields: mode (string) the thinking setting;
+///   set_default (boolean) also persist as the default for new sessions.
+/// @return (table|nil, string|nil) `{mode}`, or nil and an error.
+/// @example
+/// maki.session.set_thinking({ mode = "medium", set_default = true })
+#[lua_fn]
+async fn set_thinking(
+    lua: Lua,
+    #[ctx] tx: Option<flume::Sender<UiAction>>,
+    opts: Table,
+) -> LuaResult<Pair<Value>> {
+    let req = SessionRequest::SetThinking {
+        set_default: opts.get("set_default").unwrap_or(false),
+        thinking: opts.get("mode")?,
+    };
+    roundtrip(lua, tx, req).await
+}
+
 lua_table! {
     /// Host session primitives. The interactive UI can run several sessions
     /// at once; these functions let plugins list, create, focus, rename, and
@@ -192,7 +229,7 @@ lua_table! {
     /// attached"` without a UI. `notify` instead targets a live agent mailbox
     /// directly, so it also works under ACP and SDK frontends.
     "maki.session" => pub(crate) fn create_session_table(tx: Option<flume::Sender<UiAction>>),
-    DOCS [list(tx), live(tx), current(tx), focus(tx), delete(tx), new(tx), prompt(tx), notify(), set_title(tx)]
+    DOCS [list(tx), live(tx), current(tx), focus(tx), delete(tx), new(tx), prompt(tx), notify(), set_title(tx), thinking(tx), set_thinking(tx)]
 }
 
 #[cfg(test)]
@@ -341,5 +378,55 @@ mod tests {
         let result: LuaResult<Value> =
             smol::block_on(lua.load("return session.set_title('oops')").eval_async());
         assert!(result.unwrap_err().to_string().contains("table"));
+    }
+
+    #[test]
+    fn set_thinking_forwards_mode_and_set_default_flag() {
+        let (tx, rx) = flume::unbounded::<UiAction>();
+        let lua = lua_with_session(Some(tx));
+        let checker = std::thread::spawn(move || {
+            let Ok(UiAction::Session {
+                req: SessionRequest::SetThinking { set_default, thinking },
+                reply_tx,
+            }) = rx.recv()
+            else {
+                panic!("expected set_thinking request");
+            };
+            assert!(set_default);
+            assert_eq!(thinking, "medium");
+            reply_tx.send(Ok(json!({ "mode": "medium" }))).unwrap();
+        });
+        let (val, err): (Table, Option<String>) = smol::block_on(
+            lua.load("return session.set_thinking({ mode = 'medium', set_default = true })")
+                .eval_async(),
+        )
+        .unwrap();
+        assert_eq!(err, None);
+        assert_eq!(val.get::<String>("mode").unwrap(), "medium");
+        checker.join().unwrap();
+    }
+
+    #[test]
+    fn thinking_roundtrips_mode_and_support_flag() {
+        let (tx, rx) = flume::unbounded::<UiAction>();
+        let lua = lua_with_session(Some(tx));
+        let checker = std::thread::spawn(move || {
+            let Ok(UiAction::Session {
+                req: SessionRequest::GetThinking,
+                reply_tx,
+            }) = rx.recv()
+            else {
+                panic!("expected get_thinking request");
+            };
+            reply_tx
+                .send(Ok(json!({ "mode": "high", "supports_thinking": true })))
+                .unwrap();
+        });
+        let (val, err): (Table, Option<String>) =
+            smol::block_on(lua.load("return session.thinking()").eval_async()).unwrap();
+        assert_eq!(err, None);
+        assert_eq!(val.get::<String>("mode").unwrap(), "high");
+        assert!(val.get::<bool>("supports_thinking").unwrap());
+        checker.join().unwrap();
     }
 }

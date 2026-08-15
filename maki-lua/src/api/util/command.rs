@@ -407,6 +407,8 @@ pub enum SessionRequest {
     Focus { id: String },
     Delete { id: String },
     SetTitle { id: String, title: String },
+    GetThinking,
+    SetThinking { set_default: bool, thinking: String },
 }
 
 pub type SessionReply = Result<serde_json::Value, String>;
