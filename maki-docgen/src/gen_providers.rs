@@ -64,6 +64,14 @@ enable_free_models = true
 
 The default is `false`."#;
 
+const OPENAI_AUTH_NOTE: &str = r#"#### Auth
+
+You can use OpenAI two ways.
+
+**API key** — Set `OPENAI_API_KEY` or pick `OpenAI (API key)` in `/login` and paste a key from [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
+
+**ChatGPT subscription** — Use OpenAI Codex through your ChatGPT login instead. Run `maki auth login openai` or pick `OpenAI Codex (ChatGPT login)` in `/login`. Maki guides you through the OAuth device flow at [auth.openai.com/codex](https://auth.openai.com/codex) and stores your OAuth tokens, which take precedence over the API key."#;
+
 const OPENCODE_GO_SECTION: &str = r#"### Opencode Go
 
 - **Env var**: `OPENCODE_API_KEY`
@@ -463,6 +471,10 @@ fn write_section(out: &mut String, section: &ProviderSection) {
 
     if section.kind == ProviderKind::Opencode {
         let _ = writeln!(out, "\n{OPENCODE_FREE_MODELS_NOTE}");
+    }
+
+    if section.kind == ProviderKind::OpenAi {
+        let _ = writeln!(out, "\n{OPENAI_AUTH_NOTE}");
     }
 }
 

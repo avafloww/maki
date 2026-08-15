@@ -334,6 +334,25 @@ impl App {
         }
     }
 
+    pub fn poll_login_picker(&mut self) -> Vec<Action> {
+        match self.login_picker.poll_codex() {
+            Some(action) => self.login_picker_actions(action),
+            None => Vec::new(),
+        }
+    }
+
+    fn login_picker_actions(&self, action: LoginPickerAction) -> Vec<Action> {
+        match action {
+            LoginPickerAction::Consumed | LoginPickerAction::Close => vec![],
+            LoginPickerAction::Authenticated { model_spec } => {
+                vec![Action::ChangeModel(model_spec), Action::RefreshModels]
+            }
+            LoginPickerAction::Configured { slug } => {
+                vec![Action::RefreshProvider { slug }, Action::RefreshModels]
+            }
+        }
+    }
+
     fn active_chat(&mut self) -> &mut Chat {
         &mut self.chats[self.active_chat]
     }
@@ -684,16 +703,8 @@ impl App {
         }
 
         if self.login_picker.is_open() {
-            return Some(match self.login_picker.handle_key(key) {
-                LoginPickerAction::Consumed => vec![],
-                LoginPickerAction::Close => vec![],
-                LoginPickerAction::Authenticated { model_spec } => {
-                    vec![Action::ChangeModel(model_spec), Action::RefreshModels]
-                }
-                LoginPickerAction::Configured { slug } => {
-                    vec![Action::RefreshProvider { slug }, Action::RefreshModels]
-                }
-            });
+            let action = self.login_picker.handle_key(key);
+            return Some(self.login_picker_actions(action));
         }
 
         if self.mcp_picker.is_open() {
