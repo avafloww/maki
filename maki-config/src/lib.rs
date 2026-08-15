@@ -76,6 +76,10 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "write",
 ];
 
+/// Bundled but not enabled by default. Users opt in with
+/// `plugins.<name> = { enabled = true }` in `maki.setup`.
+pub const OPT_IN_BUILTINS: &[&str] = &["mode_plan_override", "plan_submit_tool"];
+
 /// These used to be their own `tools.<name>` tables and are now edit plugin
 /// options; the config layer uses this list to reject the old form with a
 /// pointer to the new one.
@@ -302,13 +306,18 @@ impl RawConfig {
         let mut unknown: Vec<&String> = self
             .plugins
             .keys()
-            .filter(|name| !DEFAULT_BUILTINS.contains(&name.as_str()))
+            .filter(|name| {
+                !DEFAULT_BUILTINS.contains(&name.as_str()) && !OPT_IN_BUILTINS.contains(&name.as_str())
+            })
             .collect();
         unknown.sort();
         if let Some(&plugin) = unknown.first() {
+            let mut valid: Vec<&str> = DEFAULT_BUILTINS.to_vec();
+            valid.extend(OPT_IN_BUILTINS.iter().copied());
+            valid.sort();
             return Err(ConfigError::UnknownPlugin {
                 plugin: plugin.clone(),
-                valid: DEFAULT_BUILTINS.join(", "),
+                valid: valid.join(", "),
             });
         }
         Ok(())
