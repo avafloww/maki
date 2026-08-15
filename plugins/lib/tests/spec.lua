@@ -1432,6 +1432,25 @@ case("render_lines_nil_sections_mix_with_grouped", function()
   eq(item_lines[2], 3, "nil-section item follows without a new header")
 end)
 
+local SPEC_HEADINGS = {
+  "## Goal",
+  "## Implementation Summary",
+  "## Implementation Plan",
+  "## Acceptance Criteria",
+  "## Test Strategy",
+  "## Review Strategy",
+  "## Documentation Strategy",
+  "## Risks, Blockers, and Required Decisions",
+}
+
+case("plan_spec_is_shared_source_with_all_headings", function()
+  local spec = require("maki.plan_spec")
+  assert(type(spec) == "string" and #spec > 0, "maki.plan_spec must be a non-empty string")
+  for _, heading in ipairs(SPEC_HEADINGS) do
+    eq(spec:find(heading, 1, true) ~= nil, true, "plan spec missing heading: " .. heading)
+  end
+end)
+
 if #failures > 0 then
   error(#failures .. " case(s) failed:\n\n" .. table.concat(failures, "\n\n"))
 end

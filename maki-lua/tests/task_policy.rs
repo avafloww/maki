@@ -199,6 +199,26 @@ fn load_task_host_with_opts(
     (reg, host)
 }
 
+/// Loads the task plugin with `maki.api.mode.get` stubbed, so plan-mode gating
+/// can be exercised without a UI (the real `mode.get` replies via the UI lane).
+fn load_task_host_in_mode(mode: &str) -> (Arc<ToolRegistry>, PluginHost) {
+    let reg = Arc::new(ToolRegistry::new());
+    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let prelude = STUB_PRELUDE
+        .replace("@PLAIN_TEXT@", PLAIN_TEXT)
+        .replace("@RECOVERED_TEXT@", RECOVERED_TEXT)
+        .replace("@PROMPT_ERR@", PROMPT_ERR_MSG)
+        .replace("@RAISE_MSG@", RAISE_MSG);
+    let mode_stub = format!("maki.api.mode.get = function() return '{mode}' end\n\n");
+    host.load_source_with_opts(
+        "task_policy",
+        &format!("{prelude}{mode_stub}\n{TASK_PLUGIN_SRC}"),
+        serde_json::Map::new(),
+    )
+    .unwrap();
+    (reg, host)
+}
+
 fn exec_tool(reg: &ToolRegistry, name: &str, input: Value) -> Result<String, String> {
     let entry = reg
         .get(name)
@@ -307,6 +327,46 @@ fn bad_input_errors_before_any_session(extra: Value, expected_prefix: &str) {
     let snap = probe(&reg);
     assert_eq!(snap["sessions"], json!(0));
     assert_eq!(snap["prompt_count"], json!(0));
+}
+
+#[test]
+fn general_task_blocked_in_plan_mode() {
+    let (reg, _host) = load_task_host_in_mode("plan");
+    let mut input = task_input(SCENARIO_PLAIN, None);
+    input["subagent_type"] = json!("general");
+    let err = exec_tool(&reg, TASK_TOOL, input)
+        .expect_err("general subagents must be blocked while in plan mode");
+    assert!(err.contains("blocked in plan mode"), "got: {err}");
+    let snap = probe(&reg);
+    assert_eq!(snap["sessions"], json!(0));
+    assert_eq!(snap["prompt_count"], json!(0));
+}
+
+#[test]
+fn research_and_reviewer_allowed_in_plan_mode() {
+    let (reg, _host) = load_task_host_in_mode("plan");
+    let mut research = task_input(SCENARIO_PLAIN, None);
+    research["subagent_type"] = json!("research");
+    exec_tool(&reg, TASK_TOOL, research).expect("research must be allowed in plan mode");
+
+    let mut reviewer = task_input(SCENARIO_PLAIN, None);
+    reviewer["subagent_type"] = json!("plan_reviewer");
+    exec_tool(&reg, TASK_TOOL, reviewer).expect("plan_reviewer must be allowed in plan mode");
+
+    let snap = probe(&reg);
+    assert_eq!(snap["sessions"], json!(2));
+}
+
+#[test]
+fn plan_reviewer_blocked_outside_plan_mode() {
+    let (reg, _host) = load_task_host_in_mode("build");
+    let mut input = task_input(SCENARIO_PLAIN, None);
+    input["subagent_type"] = json!("plan_reviewer");
+    let err = exec_tool(&reg, TASK_TOOL, input)
+        .expect_err("plan_reviewer must be available only inside plan mode");
+    assert!(err.contains("only available in plan mode"), "got: {err}");
+    let snap = probe(&reg);
+    assert_eq!(snap["sessions"], json!(0));
 }
 
 #[test]

@@ -99,23 +99,29 @@ maki.setup({
 })
 ```
 
-- `mode_plan_override` replaces the built-in `plan` mode with a directive that
-  focuses on producing a reviewable artifact, restricts writes to the plan file,
-  and swaps the toolset to read tools plus `write`/`edit`/`plan_submit`. It also
-  adds `/plan` and `/build` slash commands.
+- `mode_plan_override` replaces the built-in `plan` mode with a verbatim clone
+  of polytoken's plan directive (via the `plan` plugin override). It focuses the
+  model on producing a reviewable artifact, restricts writes to the plan file,
+  swaps the toolset to read tools plus `write`/`edit`/`plan_submit`, and adds
+  `/plan` and `/build` slash commands. The directive and the plan reviewer splice
+  one shared plan specification, so both always see the exact same document.
 - `plan_submit_tool` is a mode-scoped tool: it surfaces the finished plan in a
   TUI window and offers **accept** (hands off to implementation), **refine**
   (keep planning), or **cancel**. It only exists in plan mode because plan's
   toolset lists it.
 
-The built-in `task` tool also grows a `plan_reviewer` subagent type when the
-plan override is active: a read-only audit that checks plan shape and
-test-to-acceptance-criteria coverage and answers `VERDICT: pass|fail`. It is
-only spawnable inside plan mode.
+The built-in `task` tool grows a `plan_reviewer` subagent type when the plan
+override is active: a read-only audit that verifies the plan follows the shared
+plan specification, maps every acceptance criterion to a named test, and checks
+test-infrastructure adequacy before answering `VERDICT: pass|fail`. It is only
+spawnable inside plan mode, and `general` subagents are blocked there so plan
+work stays read-only. A reviewer finding about a missing test harness is handled
+by revising the plan to build the infrastructure, confirmed via the `question`
+tool when the gap is out of scope.
 
 With all three enabled, a typical loop is:
 
-1. Switch to plan mode (`/plan`). The model drafts `plan.md` using the stricter
+1. Switch to plan mode (`/plan`). The model drafts `plan.md` using the cloned
    directive and the reduced toolset.
 2. The model calls `task` with `subagent_type = "plan_reviewer"` to audit the
    plan, then iterates until `VERDICT: pass`.

@@ -7,6 +7,7 @@
 
 local ToolView = require("maki.tool_view")
 local output_limits = require("maki.output_limits")
+local plan_spec = require("maki.plan_spec")
 
 local STRUCTURED_OUTPUT_NAME = "structured_output"
 local STRUCTURED_OUTPUT_DESCRIPTION = "Report your final result. Call it exactly once when your task is complete."
@@ -19,6 +20,7 @@ local SCHEMA_ROOT_ERROR = "output_schema must have type object"
 local STRUCTURED_MISSING_ERROR = "subagent finished without calling structured_output"
 local STRUCTURED_INVALID_ERROR = "subagent result does not match output_schema"
 local SUMMARY_MISSING_ERROR = "subagent finished without providing a summary"
+local GENERAL_BLOCKED_IN_PLAN_ERR = "general subagents are blocked in plan mode; use research or plan_reviewer (read-only)"
 local NUDGE_MISSING =
   "You did not call the structured_output tool. Call it now with your final result matching its input schema."
 local NUDGE_SUMMARY =
@@ -43,23 +45,29 @@ Notes:
 4. Tell it to return concise summaries with file:line refs, not full file contents.
 ]]
 
--- Read-only plan-reviewer directive: shape audit, test-to-AC coverage, and a
--- severity-guided verdict. The mode gate keeps this spawnable only in plan.
+-- Read-only plan reviewer directive: a verbatim port of pi-luna's reviewer
+-- prompt (subagents.ts), with maki's embedded-spec mechanic.
+-- The mode gate keeps this spawnable only in plan.
 local PLAN_REVIEWER_PROMPT =
-  [[You are a meticulous plan reviewer acting only as an auditor. You may READ and GREP, but you must never modify any file.
+  [[You are the **plan_reviewer** subagent: a read-only plan reviewer spawned by the primary agent. Your only tools are read, grep, glob, list — no shell, no writes, no subagent spawns. Your task message names the plan file path; the plan specification (a markdown document defining the required plan shape) is embedded in your system prompt. Read the plan file yourself and judge it against the embedded specification — the files are the truth. When the caller included the user's original request, context, and inspected files, use them to judge fidelity to the actual request.
 
-Review the supplied plan for:
-1. Shape: does it include a concrete Goal, numbered Implementation Plan, Acceptance Criteria (AC.n), a Test Strategy mapping each AC to a named test, Review Strategy, Documentation Strategy, and Risks & Blockers?
-2. Coverage: does every AC map to at least one named test, and every implementation step trace to an outcome?
-3. Risk: are risks and blockers concretely identified, not hand-waved?
+## Review work
+1. Verify the plan follows the specification's shape: all required sections present (Goal, Implementation Summary, Implementation Plan, Acceptance Criteria, Test Strategy, Review Strategy, Documentation Strategy, Risks/Blockers/Required Decisions); acceptance criteria named AC.1, AC.2, …; each criterion observable, not a restatement of steps; implementation unknowns resolved; no plan-of-plans.
+2. Audit test-to-acceptance-criteria coverage — a core responsibility, not a nice-to-have. Every criterion needs at least one named test that would fail if the behavior regressed. Flag criteria with no mapped test (at least medium; high for core behavior), euphemisms such as "code inspection" / "implicitly verified" / "covered by existing tests", pre-existing tests that would pass regardless, and test-layer mismatches (pure logic tested only at integration level, or full-stack behavior mocked at unit level when an integration harness exists).
+3. Assess test infrastructure adequacy. If a behavior cannot be adequately tested because the harness does not exist, the plan should include a phase to build the missing infrastructure (implementation phase + acceptance criteria + tests for the infrastructure itself). High if a core behavior is untestable and the plan neither includes the infrastructure nor acknowledges the gap; medium if the gap is acknowledged but not built; low if coverage could simply be stronger.
+4. Orient yourself in the relevant repository code. Inspect enough to judge whether the plan reflects the real implementation surfaces and likely contracts.
+5. Assess replace-vs-edit trade-offs. Flag incremental editing when replacement would be cleaner: high-churn edits (>~60% of a module's substantive lines), accumulated complexity, contract changes (signature/return type/error model/invariants), wrong underlying structure, or workarounds around code that should be replaced. High when edits would likely produce bugs or unmaintainable code; medium for quality concerns.
 
-Report issues by severity:
-- critical: plan cannot be implemented as written
-- high: likely to fail without changes
-- medium: should be improved
-- low: polish
+## Severity guide
+- critical: unsafe to hand off; execution would likely fail badly, corrupt state, violate an explicit instruction, or miss the core goal.
+- high: major gap — missing required contract, wrong file/module, missing review loop, or likely test failure.
+- medium: executable but with a meaningful quality, coverage, sequencing, or maintainability issue.
+- low: minor improvement, clarity issue, or small risk that does not block handoff.
 
-Finish with a single line "VERDICT: pass" or "VERDICT: fail".]]
+Report findings classified by severity (critical / high / medium / low), quoting the plan where relevant, and end with a final line `VERDICT: pass` or `VERDICT: fail` (fail when any critical or high finding remains). If there are no findings, say so and pass. Your FINAL message is the findings report — it is delivered back to the primary automatically when you settle.
+
+]] ..
+  plan_spec
 
 local opts = maki.api.register_options({
   max_concurrent = { default = 8, min = 1, desc = "Max concurrently running subagents." },
@@ -139,6 +147,9 @@ local function handler(input, ctx)
   end
   if subagent_type == "plan_reviewer" and current_mode() ~= "plan" then
     return { llm_output = "plan_reviewer is only available in plan mode", is_error = true }
+  end
+  if subagent_type == "general" and current_mode() == "plan" then
+    return { llm_output = GENERAL_BLOCKED_IN_PLAN_ERR, is_error = true }
   end
 
   -- Compile early: a bad schema costs zero tokens.
