@@ -17,6 +17,14 @@ use ratatui::widgets::{Block, Borders, Widget};
 
 use super::{App, Mode, Status};
 
+const SUBAGENT_INPUT_HINT: &str = "sends to this subagent \u{b7} TAB mode \u{b7} ESC cancel";
+
+/// Target hint shown under the input box so a user typing on a subagent chat
+/// knows their Enter goes to that subagent, not the main agent.
+fn subagent_input_hint(is_subagent: bool) -> Option<Line<'static>> {
+    is_subagent.then(|| Line::from(SUBAGENT_INPUT_HINT))
+}
+
 struct ViewLayout {
     msg_area: Rect,
     bottom_area: Rect,
@@ -196,7 +204,7 @@ impl App {
                     false,
                     self.separator_style(),
                     !self.any_overlay_open(),
-                    None,
+                    subagent_input_hint(true),
                 );
             }
         } else if self.plan_form_active() {
@@ -322,6 +330,7 @@ impl App {
             },
             auto_scroll: chat.auto_scroll(),
             chat_name,
+            is_subagent: chat.subagent_id.is_some(),
             retry_info: self.retry_info.as_ref(),
             thinking_label: self.state.thinking.status_label(),
             fast: self.state.fast,
@@ -465,5 +474,19 @@ impl App {
             contexts.push(KeybindContext::Editing);
         }
         contexts
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::text::Line;
+
+    use super::{SUBAGENT_INPUT_HINT, subagent_input_hint};
+
+    #[test]
+    fn subagent_input_hint_cases() {
+        let hint = subagent_input_hint(true).expect("subagent gets a target hint");
+        assert_eq!(hint, Line::from(SUBAGENT_INPUT_HINT));
+        assert!(subagent_input_hint(false).is_none());
     }
 }

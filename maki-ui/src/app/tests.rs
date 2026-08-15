@@ -4258,6 +4258,21 @@ fn submit_in_subagent_chat_with_images_is_rejected() {
 }
 
 #[test]
+fn submit_in_finished_subagent_chat_is_rejected() {
+    let (mut app, _input_rx) = app_with_subagent_input_tx(TASK_ID);
+    // The subagent's driver channel is gone: it finished. Focus stays on it.
+    app.subagent_channels.remove(TASK_ID);
+    match app.submit_prompt(queued_msg("poke")) {
+        SubmitOutcome::Rejected(e) => assert_eq!(e, queue::NO_SUBAGENT_ERR),
+        _ => panic!("finished subagent must reject, not start a main turn"),
+    }
+    assert!(
+        app.queue.text_messages().is_empty(),
+        "nothing may reach the main queue"
+    );
+}
+
+#[test]
 fn typing_in_subagent_chat_edits_input_and_submits_to_subagent() {
     let (mut app, input_rx) = app_with_subagent_input_tx(TASK_ID);
     // Typing reaches the shared input box on a focused subagent tab.

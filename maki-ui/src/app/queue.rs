@@ -178,8 +178,9 @@ impl App {
             .get(&subagent_id)
             .and_then(|c| c.input_tx.as_ref())
         else {
-            // Live-channel gone (subagent finished); fall back to main.
-            return SubmitOutcome::Started(self.start_from_queue(&msg));
+            // Live-channel gone (subagent finished); never silently reroute to
+            // the main agent. Surface the rejection via the caller's flash.
+            return SubmitOutcome::Rejected(NO_SUBAGENT_ERR);
         };
         self.chats[self.active_chat].show_user_message(msg.text.clone());
         if input_tx.try_send(msg.text).is_err() {

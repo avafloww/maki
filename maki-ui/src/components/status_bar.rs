@@ -20,6 +20,13 @@ const TRUNCATE_PREFIX: &str = "..";
 const CWD_MODEL_SEPARATOR: &str = "  ";
 const FAST_LABEL: &str = " [fast]";
 const WORKFLOW_LABEL: &str = " [workflow]";
+const SUBAGENT_LABEL_PREFIX: &str = "\u{21b3} ";
+
+/// Distinct footer badge for a focused subagent chat, contrasted with the
+/// plain `[name]` used for the main chat.
+fn subagent_label(name: &str) -> String {
+    format!(" [{SUBAGENT_LABEL_PREFIX}{name}]")
+}
 
 pub struct UsageStats<'a> {
     pub global_usage: &'a TokenUsage,
@@ -38,6 +45,7 @@ pub struct StatusBarContext<'a> {
     pub stats: UsageStats<'a>,
     pub auto_scroll: bool,
     pub chat_name: Option<&'a str>,
+    pub is_subagent: bool,
     pub retry_info: Option<&'a RetryInfo>,
     pub thinking_label: Option<Cow<'static, str>>,
     pub fast: bool,
@@ -119,10 +127,17 @@ impl StatusBar {
         left_spans.push(Span::styled(format!(" {}", ctx.mode_label), ctx.mode_style));
 
         if let Some(name) = ctx.chat_name {
-            left_spans.push(Span::styled(
-                format!(" [{name}]"),
-                theme::current().status_dim,
-            ));
+            if ctx.is_subagent {
+                left_spans.push(Span::styled(
+                    subagent_label(name),
+                    theme::current().accent,
+                ));
+            } else {
+                left_spans.push(Span::styled(
+                    format!(" [{name}]"),
+                    theme::current().status_dim,
+                ));
+            }
         }
 
         if !ctx.auto_scroll {
@@ -393,5 +408,59 @@ mod tests {
         bar.flash("Copied".into());
         bar.clear_flash();
         assert!(bar.flash.is_none());
+    }
+
+    #[test_case("task1", " [↳ task1]"            ; "named_subagent")]
+    #[test_case("",       " [↳ ]"                ; "empty_name")]
+    fn subagent_label_cases(name: &str, expected: &str) {
+        assert_eq!(subagent_label(name), expected);
+    }
+
+    fn render_status(is_subagent: bool) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(120, 1);
+        let mut term = Terminal::new(backend).unwrap();
+        let bar = StatusBar::new(Duration::from_secs(999));
+        let status = Status::Idle;
+        let token_usage = TokenUsage::default();
+        let pricing = ModelPricing::default();
+        let ctx = StatusBarContext {
+            status: &status,
+            mode_label: Cow::Borrowed("NORMAL"),
+            mode_style: Style::default(),
+            model_id: "model",
+            stats: UsageStats {
+                global_usage: &token_usage,
+                context_size: 0,
+                cost: None,
+                pricing: &pricing,
+                context_window: 0,
+                show_global: false,
+            },
+            auto_scroll: false,
+            chat_name: Some("task1"),
+            is_subagent,
+            retry_info: None,
+            thinking_label: None,
+            fast: false,
+            workflow: false,
+            restoring: false,
+        };
+        term.draw(|frame| bar.view(frame, frame.area(), &ctx))
+            .unwrap();
+        let buf = term.backend().buffer();
+        buf.content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn subagent_chat_renders_distinct_badge() {
+        assert!(render_status(true).contains(" [↳ task1]"));
+        let main = render_status(false);
+        assert!(main.contains(" [task1]"));
+        assert!(!main.contains('↳'));
     }
 }
