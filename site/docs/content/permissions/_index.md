@@ -166,6 +166,39 @@ When you pick "always allow" (or always deny for MCP), the saved scope is genera
 
 For MCP tools, both allow and deny decisions generalize to `*` (the entire tool). MCP inputs are opaque JSON with no meaningful scope pattern. Denying a single MCP invocation denies that tool until you revoke the rule.
 
+## Auto Mode (bash)
+
+Auto mode puts a separate-context classifier model in front of **every** bash command. A silent, throwaway session (empty history, its own model) reviews the command against a safety policy and returns accept or deny with a one-line reason. Approved commands run as usual. A clean deny rejects the command with that reason. Auto mode never asks you for permission: the classifier owns the gate, and if it fails (spawn, timeout, or a malformed verdict) the command is denied fail-closed with the classifier error.
+
+The classifier sees only the command and working directory in a silent throwaway session. Its turn is never relayed into your main conversation, so nothing about the main run leaks into its decision and its reasoning does not clutter the thread. The default system prompt is the codex-guardian policy (bundled, `auto_classifier_prompt.lua`).
+
+Enable it like YOLO:
+
+```lua
+-- ~/.config/maki/init.lua
+maki.setup({
+    plugins = {
+        bash = {
+            auto_mode = true,
+            auto_model = "openrouter/deepseek/deepseek-v4-flash-0731",
+        },
+    },
+})
+```
+
+Or toggle it live with `/automode`, or start the session with `--automode`. The live `/automode` toggle wins while running; a config or `--automode` seed is only the starting state.
+
+The tri-state verdict is strict:
+
+- **approve** (`approved: true`) runs the command. The tool view shows an `auto-mode: allowed` line so you can see the classifier let it through.
+- **deny** (`approved: false`) rejects it with the reason. The command never executes.
+- **error** (classifier failure, timeout, or a non-boolean verdict) denies the command fail-closed with the classifier error. No user prompt is involved, and the command never auto-runs.
+
+Two things to watch:
+
+- A clean deny rejects the command. If the classifier is too strict, tune the prompt or disable auto mode.
+- If `auto_model` is missing or unconfigured, every command is denied fail-closed, so effectively nothing runs.
+
 ## YOLO Mode
 
 To skip prompts on gated tools, toggle YOLO with `/yolo`, or run with `--yolo`. Explicit deny rules still apply. Tools that never declare permission scopes are unaffected (they never prompted).

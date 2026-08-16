@@ -344,3 +344,95 @@ fn index_dir_renders_identically_live_and_restored() {
         "restored dir listing must match the live one"
     );
 }
+
+// Phase 4: bash auto-mode gate integration. We drive the real bash handler
+// with `classify_verdict` stubbed on the shared `bash_helpers` module (require
+// caches the singleton, so `init.lua` sees the override). The deny and error
+// paths return synchronously *before* jobstart, so they are deterministic here;
+// the approve path falls through to the async jobstart loop, which this harness
+// cannot observe, so it is covered at the `spec.lua` unit layer instead.
+
+/// Load the real bash plugin with auto mode forced on and the classifier
+/// stubbed per `stub_code` (defines `bh.classify_verdict`).
+fn bash_host_with_classifier(stub_code: &str) -> (PluginHost, Arc<ToolRegistry>) {
+    let reg = Arc::new(ToolRegistry::new());
+    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    // Load the real plugin first: its `bh.set_auto_mode(opts.auto_mode)`
+    // defaults auto mode off at load time. Patch afterwards so the stubs and
+    // the forced-on toggle persist for the handler's calls.
+    host.load_source("bash", BASH_SRC).unwrap();
+    let patch = format!(
+        r#"local bh = require("bash_helpers")
+bh.set_auto_mode(true)
+{stub_code}
+"#
+    );
+    host.load_source("bash_classifier_patch", &patch).unwrap();
+    (host, reg)
+}
+
+struct Verdict {
+    is_error: bool,
+    output: String,
+}
+
+/// Run the bash tool and return whether it produced an error plus the output
+/// text. Mirrors `exec_live` but surfaces `is_error` (the gate's deny/fallback
+/// paths return error tool output, not live view bodies).
+fn exec_verdict(host: &PluginHost, reg: &ToolRegistry, input: Value) -> Verdict {
+    let mut ctx = maki_agent::tools::test_support::stub_ctx_with(
+        &maki_agent::AgentMode::Build,
+        None,
+        Some("classifier_tool_use_id"),
+    );
+    ctx.tool_output_lines = view_lines();
+    let inv = reg
+        .get("bash")
+        .expect("bash tool registered")
+        .tool
+        .parse(&input)
+        .expect("parse failed");
+    let result = smol::block_on(async { inv.execute(&ctx).await });
+    // Drain the async gate so spawned tasks settle before the host drops.
+    host.load_source("auto_barrier", "").unwrap();
+    let (is_error, output) = match result.output {
+        Ok(maki_agent::ToolOutput::Plain(s)) | Ok(maki_agent::ToolOutput::Markdown(s)) => {
+            (false, s.text)
+        }
+        Err(e) => (true, e),
+        other => panic!("unexpected output: {other:?}"),
+    };
+    Verdict { is_error, output }
+}
+
+const CLASSIFY_DENY_STUB: &str = r#"bh.classify_verdict = function(...) return "deny", "stub deny reason", nil end"#;
+const CLASSIFY_ERROR_STUB: &str = r#"bh.classify_verdict = function(...) return "error", nil, "stub boom" end"#;
+
+#[test]
+fn auto_mode_deny_rejects_command_without_running_jobstart() {
+    let (host, reg) = bash_host_with_classifier(CLASSIFY_DENY_STUB);
+    let result = exec_verdict(&host, &reg, json!({ "command": "echo denied-side-effect" }));
+    assert!(result.is_error, "a deny must fail the tool");
+    assert!(
+        result.output.contains("denied"),
+        "deny surfaces the classifier reason: {}",
+        result.output
+    );
+    assert!(
+        result.output.contains("stub deny reason"),
+        "deny carries the classifier reason: {}",
+        result.output
+    );
+}
+
+#[test]
+fn auto_mode_error_denies_fail_closed_without_prompting() {
+    let (host, reg) = bash_host_with_classifier(CLASSIFY_ERROR_STUB);
+    let result = exec_verdict(&host, &reg, json!({ "command": "echo never-runs-2" }));
+    assert!(result.is_error, "a classifier error must fail closed (deny)");
+    assert!(
+        result.output.contains("denied by auto-mode"),
+        "a classifier error must not prompt and never auto-run: {}",
+        result.output
+    );
+}

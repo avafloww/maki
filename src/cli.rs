@@ -85,6 +85,10 @@ pub struct Cli {
     #[arg(long, alias = "dangerously-skip-permissions")]
     pub yolo: bool,
 
+    /// Gate every bash command through the auto-mode classifier
+    #[arg(long)]
+    pub automode: bool,
+
     /// Exit after the agent completes (for automation workflows)
     #[arg(long)]
     pub exit_on_done: bool,
@@ -232,6 +236,9 @@ pub enum Command {
         /// Skip all permission prompts
         #[arg(long)]
         yolo: bool,
+        /// Gate every bash command through the auto-mode classifier
+        #[arg(long)]
+        automode: bool,
     },
     /// Show the rendered system prompt or tool definitions
     Prompt {

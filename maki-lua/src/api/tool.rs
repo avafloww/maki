@@ -359,7 +359,10 @@ impl ToolInvocation for LuaToolInvocation {
                     }
                     match reply_rx.recv_async().await {
                         Ok(Some(scopes)) => Some(scopes),
-                        _ => Some(PermissionScopes::force_prompt(fallback)),
+                        // Intentional "nothing to enforce" (Lua returned nil or
+                        // empty scopes): skip the permission gate.
+                        Ok(None) => None,
+                        Err(_) => Some(PermissionScopes::force_prompt(fallback)),
                     }
                 })
             }
@@ -1700,7 +1703,7 @@ mod tests {
         assert!(scopes.force_prompt);
         assert!(!scopes.scopes.is_empty());
 
-        // Callback returns None → fallback to force_prompt
+        // Callback returns None → nothing to enforce: skip the gate
         let (tx2, rx2) = flume::bounded(1);
         let inv2 = LuaToolInvocation {
             tool: Arc::from("bash"),
@@ -1719,8 +1722,8 @@ mod tests {
                 let _ = reply.send(None);
             }
         });
-        let scopes2 = smol::block_on(inv2.permission_scopes()).expect("should fallback");
-        assert!(scopes2.force_prompt);
+        let scopes2 = smol::block_on(inv2.permission_scopes());
+        assert!(scopes2.is_none(), "nil/empty scopes must skip enforcement");
     }
 
     #[test]

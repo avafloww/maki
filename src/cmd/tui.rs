@@ -96,6 +96,8 @@ fn load_config(plugin_host: &PluginHost, cli: &Cli, cwd: &Path) -> Result<Config
     if cli.yolo || config.always_yolo {
         config.permissions.yolo = true;
     }
+    let automode_on = cli.automode || config.always_automode;
+    super::seed_automode(&mut config, automode_on);
     if !cli.allowed_tools.is_empty() {
         config.agent.allowed_tools = cli
             .allowed_tools
@@ -469,6 +471,24 @@ mod tests {
         RawConfig::default()
             .into_config(false)
             .expect("default config")
+    }
+
+    #[test]
+    fn seed_automode_wires_bash_opt_when_requested() {
+        let mut on = test_config();
+        crate::cmd::seed_automode(&mut on, true);
+        assert_eq!(
+            on.plugins.opts["bash"]["auto_mode"],
+            serde_json::json!(true),
+            "--automode seeds config.plugins.opts[\"bash\"][\"auto_mode\"]"
+        );
+
+        let mut off = test_config();
+        crate::cmd::seed_automode(&mut off, false);
+        assert!(
+            !off.plugins.opts.contains_key("bash"),
+            "auto_mode absent when --automode is off"
+        );
     }
 
     #[test]

@@ -1845,7 +1845,7 @@ impl LuaRuntime {
         tool: &str,
         input: Value,
     ) -> Option<PermissionScopes> {
-        let (func, lua_input) = plugin_fn(
+        let (func, lua_input) = match plugin_fn(
             &self.lua,
             &self.plugins,
             plugin,
@@ -1853,16 +1853,22 @@ impl LuaRuntime {
             "permission_scopes",
             |tk| tk.permission_scopes.as_ref(),
             &input,
-        )?;
+        ) {
+            Some(pair) => pair,
+            // No callback to ask: fail closed to a prompt.
+            None => return Some(PermissionScopes::force_prompt(input.to_string())),
+        };
         let result: LuaValue = match run_detached(&self.lua, func.call_async(lua_input)).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(plugin, tool, error = %e, "permission_scopes callback failed");
-                return None;
+                return Some(PermissionScopes::force_prompt(input.to_string()));
             }
         };
         let table = match result {
             LuaValue::Table(t) => t,
+            // Returning nil means "nothing to enforce": skip the gate
+            // entirely (bash auto mode, blank command).
             _ => return None,
         };
         let scopes_table: mlua::Table = table.get("scopes").ok()?;

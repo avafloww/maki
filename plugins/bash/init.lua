@@ -1,6 +1,7 @@
 local truncate = require("maki.truncate")
 local ToolView = require("maki.tool_view")
 local output_limits = require("maki.output_limits")
+local bh = require("bash_helpers")
 
 local RTK_REWRITE_TIMEOUT_MS = 2000
 local RTK_UNSUPPORTED_FLAGS = {
@@ -75,7 +76,7 @@ local function relative_path(p)
   return p
 end
 
-local function build_header_lines(command)
+local function build_header_lines(command, annotation)
   local header = {}
   local highlighted = maki.ui.highlight(command, "bash")
   if highlighted then
@@ -86,6 +87,9 @@ local function build_header_lines(command)
     header[#header + 1] = command
   end
   header[#header + 1] = { { SEPARATOR, "dim" } }
+  if annotation then
+    header[#header + 1] = annotation
+  end
   return header
 end
 
@@ -155,7 +159,7 @@ local function append_line(output, line)
   output[#output + 1] = line
 end
 
-local function create_bash_view(command, ctx)
+local function create_bash_view(command, ctx, annotation)
   local tol = ctx:tool_output_lines()
   local buf = maki.ui.buf()
   local view = ToolView.new(buf, {
@@ -163,7 +167,7 @@ local function create_bash_view(command, ctx)
     keep = "tail",
     max_line_bytes = output_limits.DEFAULT_MAX_LINE_BYTES,
   })
-  view:set_header(build_header_lines(command))
+  view:set_header(build_header_lines(command, annotation))
   buf:on("click", function()
     view:toggle()
   end)
@@ -255,7 +259,27 @@ local opts = maki.api.register_options(output_limits.extend({
     min = 5,
     desc = "Kill the command after this many seconds. A call's `timeout` param overrides it.",
   },
+  auto_mode = {
+    default = false,
+    type = "boolean",
+    desc = "Classify every bash command before executing it (accept/deny with reason).",
+  },
+  auto_model = {
+    default = "openrouter/deepseek/deepseek-v4-flash-0731",
+    desc = "Model spec for the bash auto-mode classifier.",
+  },
 }))
+
+bh.set_auto_mode(opts.auto_mode)
+
+maki.api.register_command({
+  name = "/automode",
+  description = "Toggle bash auto mode (classifier gates every bash command)",
+  handler = function()
+    bh.set_auto_mode(not bh.auto_mode_on)
+    maki.ui.flash("auto mode: " .. (bh.auto_mode_on and "on" or "off"))
+  end,
+})
 
 maki.api.register_tool({
   name = "bash",
@@ -271,6 +295,9 @@ maki.api.register_tool({
     },
   },
   permission_scopes = function(input)
+    if bh.auto_mode_on then
+      return nil
+    end
     local command = input.command
     if not command or command:match("^%s*$") then
       return nil
@@ -344,12 +371,27 @@ maki.api.register_tool({
 
     ctx:set_deadline(timeout_secs)
 
+    local auto_annotation
+    if bh.auto_mode_on then
+      local verdict, reason, err = bh.classify_verdict(command, workdir or maki.uv.cwd(), opts, ctx)
+      if verdict == "approve" then
+        auto_annotation = { { "auto-mode: allowed", "dim" } }
+        -- fall through to the jobstart path unchanged
+      else
+        return {
+          llm_output = "command denied by auto-mode: "
+            .. ((verdict == "deny" and reason) or err or "no classifier verdict"),
+          is_error = true,
+        }
+      end
+    end
+
     local rewritten = rtk_rewrite(command, ctx)
     if rewritten then
       command = rewritten
     end
 
-    local buf, view = create_bash_view(command, ctx)
+    local buf, view = create_bash_view(command, ctx, auto_annotation)
 
     local output_parts = {}
     local has_output = false

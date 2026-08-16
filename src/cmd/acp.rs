@@ -14,6 +14,7 @@ use crate::setup;
 pub fn run(
     model_arg: Option<String>,
     yolo: bool,
+    automode: bool,
     no_plugins: bool,
     no_jit: bool,
     system_prompt_override: Option<String>,
@@ -41,6 +42,8 @@ pub fn run(
     if yolo || config.always_yolo {
         config.permissions.yolo = true;
     }
+    let automode_on = automode || config.always_automode;
+    super::seed_automode(&mut config, automode_on);
     config.validate()?;
 
     plugin_host

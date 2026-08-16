@@ -122,6 +122,13 @@ pub const TOP_LEVEL_FIELDS: &[ConfigField] = &[
         description: "Start every session with YOLO mode (skip permission prompts, deny rules still apply)",
     },
     ConfigField {
+        name: "always_automode",
+        ty: "bool",
+        default: ConfigValue::Bool(false),
+        min: None,
+        description: "Start every session with bash auto mode (classify every bash command)",
+    },
+    ConfigField {
         name: "always_fast",
         ty: "bool",
         default: ConfigValue::Bool(false),
@@ -229,6 +236,7 @@ impl AlwaysThinking {
 #[serde(default, deny_unknown_fields)]
 pub struct RawConfig {
     pub always_yolo: Option<bool>,
+    pub always_automode: Option<bool>,
     pub always_fast: Option<bool>,
     pub always_workflow: Option<bool>,
     pub always_thinking: Option<AlwaysThinking>,
@@ -249,6 +257,7 @@ impl RawConfig {
             self,
             overlay,
             always_yolo,
+            always_automode,
             always_fast,
             always_workflow,
             always_thinking
@@ -277,6 +286,7 @@ impl RawConfig {
             .collect();
         Ok(Config {
             always_yolo: self.always_yolo.unwrap_or(false),
+            always_automode: self.always_automode.unwrap_or(false),
             always_fast: self.always_fast.unwrap_or(false),
             always_workflow: self.always_workflow.unwrap_or(false),
             always_thinking: self
@@ -821,6 +831,7 @@ pub struct PermissionsConfig {
 #[derive(Clone)]
 pub struct Config {
     pub always_yolo: bool,
+    pub always_automode: bool,
     pub always_fast: bool,
     pub always_workflow: bool,
     pub always_thinking: Option<StoredThinking>,
@@ -2200,6 +2211,31 @@ mod tests {
         assert!(raw.into_config(false).unwrap().always_workflow);
     }
 
+    #[test]
+    fn always_automode_resolves_default_and_set() {
+        let defaults = RawConfig::default().into_config(false).unwrap();
+        assert!(!defaults.always_automode, "absent resolves to false");
+
+        let raw = RawConfig {
+            always_automode: Some(true),
+            ..Default::default()
+        };
+        assert!(raw.into_config(false).unwrap().always_automode);
+    }
+
+    #[test]
+    fn always_automode_overlay_wins() {
+        let mut base = RawConfig {
+            always_automode: Some(false),
+            ..Default::default()
+        };
+        base.merge(RawConfig {
+            always_automode: Some(true),
+            ..Default::default()
+        });
+        assert_eq!(base.always_automode, Some(true), "overlay wins");
+    }
+
     #[test_case(AlwaysThinking::Toggle(true), StoredThinking::Adaptive ; "toggle_true")]
     #[test_case(AlwaysThinking::Toggle(false), StoredThinking::Off ; "toggle_false")]
     #[test_case(AlwaysThinking::Budget(8192), StoredThinking::Budget { tokens: 8192 } ; "budget_number")]
@@ -2276,6 +2312,7 @@ mod tests {
     fn validate_rejects_invalid_sections(section: &str, field: &str, value: u64) {
         let mut config = Config {
             always_yolo: false,
+            always_automode: false,
             always_fast: false,
             always_workflow: false,
             always_thinking: None,

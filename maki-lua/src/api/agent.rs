@@ -122,9 +122,18 @@ async fn relay_session_events(
     subagent_info: Arc<OnceLock<SubagentInfo>>,
     usage_tx: flume::Sender<TokenUsage>,
     live_sink: Option<flume::Sender<ToolLive>>,
+    silent: bool,
 ) {
     let mut cost = None;
     while let Ok(mut envelope) = sub_rx.recv_async().await {
+        if silent {
+            // Keep the driver's usage barrier satisfied (it waits on usage_rx)
+            // without relaying the subagent's turn into the parent session.
+            if let AgentEvent::Done { usage, .. } = &envelope.event {
+                let _ = usage_tx.send(*usage);
+            }
+            continue;
+        }
         match &envelope.event {
             AgentEvent::TurnComplete(turn) => {
                 add_cost(&mut cost, turn.cost);
@@ -406,6 +415,10 @@ async fn call_tool(
 ///     `"max"`), or a budget integer (token count). Inherits parent setting
 ///     if omitted.
 ///   `fast` (boolean?) - use fast mode. Inherits parent setting if omitted.
+///   `silent` (boolean?) - do not relay the session's turns, annotations, or
+///     usage into the parent session's UI or event stream. The session still
+///     completes and `:prompt()` still returns its result (including a commit
+///     set via a `local_tools` handler). Use for hidden one-shot classification.
 /// @return (Session?, string?) Session handle, or `(nil, err)` on failure.
 /// @example
 /// local tools = maki.agent.tools(ctx, { audience = "general_sub" })
@@ -441,6 +454,7 @@ async fn session(
         .get::<Option<bool>>("fast")?
         .unwrap_or(agent_ctx.opts.fast);
     let mcp_enabled: bool = opts.get::<Option<bool>>("mcp")?.unwrap_or(true);
+    let silent: bool = opts.get::<Option<bool>>("silent")?.unwrap_or(false);
 
     let (model, provider): (Model, Arc<dyn provider::Provider>) = if let Some(ref spec) = model_spec
     {
@@ -455,8 +469,10 @@ async fn session(
     };
     // A standalone task shows its model via SubagentInfo on the header;
     // a dispatching caller (batch) gets the same thing as a live annotation.
-    if let Some(sink) = &agent_ctx.live_sink {
-        let _ = sink.send(ToolLive::Annotation(model.spec()));
+    if !silent {
+        if let Some(sink) = &agent_ctx.live_sink {
+            let _ = sink.send(ToolLive::Annotation(model.spec()));
+        }
     }
 
     let mut tools_json: JsonValue = match tools_val {
@@ -532,6 +548,7 @@ async fn session(
         Arc::clone(&subagent_info),
         usage_tx,
         agent_ctx.live_sink.clone(),
+        silent,
     ))
     .detach();
 
@@ -1208,6 +1225,7 @@ mod tests {
             subagent_info,
             usage_tx,
             Some(live_tx),
+            false,
         ));
 
         let live = live_rx
