@@ -458,7 +458,6 @@ if prompt_err then
       end
       return { llm_output = "sub-agent error: " .. prompt_err, is_error = true }
     end
-    end
     if spec.local_tools and not result.captured then
       local last_errors = spec.local_tools[STRUCTURED_OUTPUT_NAME].last_errors
       local msg = last_errors and (STRUCTURED_INVALID_ERROR .. ":\n" .. last_errors) or STRUCTURED_MISSING_ERROR
