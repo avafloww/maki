@@ -3,12 +3,16 @@
 //! scriptable Lua stubs.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use maki_agent::tools::ToolRegistry;
 use maki_agent::tools::test_support::stub_ctx;
+use maki_agent::tools::ToolContext;
 use maki_agent::{AgentMode, ToolOutput};
 use maki_lua::PluginHost;
 use serde_json::{Value, json};
+
+mod common;
 
 const TASK_PLUGIN_SRC: &str = include_str!("../../plugins/task/init.lua");
 
@@ -655,4 +659,174 @@ fn unknown_task_errors_across_lifecycle_tools() {
         let err = exec_tool(&reg, tool, input).unwrap_err();
         assert!(err.contains("unknown task_id"), "{tool} got: {err}");
     }
+}
+
+// --- Real-driver pair (AC.3, AC.4) ------------------------------------------
+//
+// The stub suite above tests the task plugin's policy logic with a Lua
+// `maki.agent.session` stand-in. These tests swap that stand-in for the REAL
+// bound `maki.agent.session` (wrapped only to set `inherit_provider = true`, so
+// the spawned driver reuses the parent's canned provider instead of building
+// one from `model_spec` over the network). The plugin's gating and
+// structured-output policy run unchanged; we assert the gating matrix holds AND
+// that the granted session is actually served by the canned provider (real
+// driver, not the stub).
+
+/// Like [`STUB_PRELUDE`] but the real `maki.agent.session` is preserved (only
+/// wrapped to force `inherit_provider = true`). `resolve_model`/`system_prompt`/
+/// `tools` stay stubbed so no real model lookup, file read, or registry scan is
+/// needed; only the session spawn and its driver run for real against the canned
+/// provider. `report_task_result` is left real so structured-output commits flow
+/// through the driver as `captured`.
+const REAL_DRIVER_PRELUDE: &str = r#"
+recorder = { sessions = 0 }
+
+local real_session = maki.agent.session
+maki.agent.session = function(ctx, opts)
+  recorder.sessions = recorder.sessions + 1
+  opts.inherit_provider = true
+  return real_session(ctx, opts)
+end
+
+maki.agent.resolve_model = function(ctx, opts)
+  return { spec = "anthropic/claude-sonnet-4-20250514" }
+end
+
+maki.agent.system_prompt = function(ctx, opts)
+  return "sys"
+end
+
+maki.agent.tools = function(ctx, opts)
+  return {}
+end
+
+maki.api.register_tool({
+  name = "probe",
+  description = "recorder snapshot",
+  schema = { type = "object", properties = {}, additionalProperties = false },
+  audiences = { "main" },
+  handler = function()
+    return maki.json.encode({ sessions = recorder.sessions })
+  end,
+})
+"#;
+
+fn load_real_driver_host(mode: &str) -> (Arc<ToolRegistry>, PluginHost) {
+    let reg = Arc::new(ToolRegistry::new());
+    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let mode_stub = format!("maki.api.mode.get = function() return '{mode}' end\n\n");
+    host.load_source(
+        "task_policy_real",
+        &format!("{mode_stub}\n{REAL_DRIVER_PRELUDE}\n{TASK_PLUGIN_SRC}"),
+    )
+    .unwrap();
+    (reg, host)
+}
+
+fn probe_real(reg: &ToolRegistry, ctx: &ToolContext) -> Value {
+    let out = common::exec_tool(reg, ctx, "probe", json!({})).expect("probe failed");
+    out
+}
+
+/// Poll `task_get` (each poll drives the smol executor, letting the background
+/// subagent driver advance) until the task is done or closed.
+fn wait_task_done(reg: &ToolRegistry, ctx: &ToolContext, task_id: &str) -> Value {
+    for _ in 0..400 {
+        if let Ok(out) = common::exec_tool(reg, ctx, "task_get", json!({ "task_id": task_id })) {
+            if out["status"] == "done" || out["status"] == "closed" {
+                return out;
+            }
+        }
+        smol::block_on(async { smol::Timer::after(Duration::from_millis(5)).await });
+    }
+    panic!("task {task_id} did not finish");
+}
+
+#[test]
+fn task_policy_spawn_honors_mode_gating_real() {
+    let provider = Arc::new(common::CannedProvider::new(vec![
+        common::canned_reply("ok"),
+        common::canned_reply("ok"),
+        common::canned_reply("ok"),
+        common::canned_reply("ok"),
+    ]));
+    let (ctx, _rx, _trigger) = common::ctx_with_provider(Arc::clone(&provider));
+
+    // general in plan mode -> blocked before any session is spawned.
+    let (reg, _host) = load_real_driver_host("plan");
+    let mut general = task_input(SCENARIO_PLAIN, None);
+    general["subagent_type"] = json!("general");
+    let err = common::exec_tool(&reg, &ctx, "task_spawn", general)
+        .expect_err("general must be blocked in plan mode");
+    assert!(err.contains("blocked in plan mode"), "got: {err}");
+    assert_eq!(probe_real(&reg, &ctx)["sessions"], json!(0));
+
+    // plan_reviewer in plan mode -> allowed; outside plan -> blocked.
+    let mut reviewer = task_input(SCENARIO_PLAIN, None);
+    reviewer["subagent_type"] = json!("plan_reviewer");
+    let spawn = common::exec_tool(&reg, &ctx, "task_spawn", reviewer)
+        .expect("plan_reviewer must spawn in plan mode");
+    let task_id = spawn["task_id"].as_str().unwrap().to_string();
+    wait_task_done(&reg, &ctx, &task_id);
+    assert_eq!(probe_real(&reg, &ctx)["sessions"], json!(1));
+
+    let (reg_build, _host) = load_real_driver_host("build");
+    let mut reviewer_build = task_input(SCENARIO_PLAIN, None);
+    reviewer_build["subagent_type"] = json!("plan_reviewer");
+    let err = common::exec_tool(&reg_build, &ctx, "task_spawn", reviewer_build)
+        .expect_err("plan_reviewer must be blocked outside plan mode");
+    assert!(err.contains("only available in plan mode"), "got: {err}");
+    assert_eq!(probe_real(&reg_build, &ctx)["sessions"], json!(0));
+
+    // research is allowed in every mode.
+    let mut research = task_input(SCENARIO_PLAIN, None);
+    research["subagent_type"] = json!("research");
+    let spawn = common::exec_tool(&reg, &ctx, "task_spawn", research)
+        .expect("research must spawn in plan mode");
+    wait_task_done(&reg, &ctx, spawn["task_id"].as_str().unwrap());
+
+    let (reg_build2, _host) = load_real_driver_host("build");
+    let mut research_build = task_input(SCENARIO_PLAIN, None);
+    research_build["subagent_type"] = json!("research");
+    let spawn = common::exec_tool(&reg_build2, &ctx, "task_spawn", research_build)
+        .expect("research must spawn in build mode");
+    wait_task_done(&reg_build2, &ctx, spawn["task_id"].as_str().unwrap());
+
+    // The granted sessions were served by the canned provider (real driver),
+    // not a Lua stub: the provider recorded the requests it received.
+    assert!(
+        !provider.captured_thinking().is_empty(),
+        "the real driver must have called the canned provider"
+    );
+}
+
+#[test]
+fn task_policy_structured_output_real_driver() {
+    let provider = Arc::new(common::CannedProvider::new(vec![
+        common::canned_tool_use(STRUCTURED_OUTPUT_TOOL, json!({ "answer": "42" })),
+        common::canned_reply("done"),
+    ]));
+    let (ctx, _rx, _trigger) = common::ctx_with_provider(Arc::clone(&provider));
+
+    let (reg, _host) = load_real_driver_host("build");
+    let spawn = common::exec_tool(
+        &reg,
+        &ctx,
+        "task_spawn",
+        task_input(SCENARIO_HAPPY, Some(answer_schema())),
+    )
+    .expect("structured spawn failed");
+    let task_id = spawn["task_id"].as_str().unwrap().to_string();
+    let status = wait_task_done(&reg, &ctx, &task_id);
+
+    assert_eq!(status["status"], json!("done"), "got: {status}");
+    let captured = &status["result"]["captured"];
+    assert_eq!(captured, &json!({ "answer": "42" }), "captured must be the validated result");
+
+    // The structured_output local tool was offered to the model.
+    let names = common::tool_names(&provider.captured_tools()[0]);
+    assert!(
+        names.iter().any(|n| n == STRUCTURED_OUTPUT_TOOL),
+        "reviewer tools must include structured_output: {names:?}"
+    );
 }
