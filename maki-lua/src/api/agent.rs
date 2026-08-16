@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use async_lock::Mutex as AsyncMutex;
 use futures::future::{Either, select};
 use maki_agent::agent::tool_dispatch::{self, Emit};
-use maki_agent::cancel::{CancelMap, CancelSlot};
+use maki_agent::cancel::{CancelMap, CancelSlot, CancelToken};
 use maki_agent::tools::interpreter_bridge;
 use maki_agent::tools::registry::ToolRegistry;
 use maki_agent::tools::schema::sanitize_tool_input_schema;
@@ -564,7 +564,13 @@ async fn session(
         .tool_use_id
         .clone()
         .unwrap_or_else(|| format!("session-{}", MakiId::generate()));
-    let (child_trigger, child_cancel) = agent_ctx.cancel.child();
+    // The subagent's cancel is independent of the parent run's cancel: it is
+    // triggered only through the shared `subagent_cancels` map (task_despawn,
+    // CancelSubagent, global CancelAll). Deriving it from `agent_ctx.cancel`
+    // (the run's token, which the UI fires at normal run end by dropping the
+    // run's CancelTrigger) would close every in-flight subagent as soon as the
+    // spawning run finishes.
+    let (child_trigger, child_cancel) = CancelToken::new();
     // Several sessions can share one `ui_id`, so keep the slot and retire
     // only ours on close instead of clearing the whole key.
     let cancel_slot = agent_ctx
