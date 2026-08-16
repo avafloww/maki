@@ -6,8 +6,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use std::time::Instant;
 
-const LOGO: &str = "maki";
-const TAGLINE: &str = "the efficient coder";
+const LOGO: &str = "luna-maki";
+const TAGLINE: &str = "luna's fucked up efficient coder";
 const HELP_SEGMENTS: &[(&str, bool)] = &[
     (key::HELP.label, true),
     (" help", false),
