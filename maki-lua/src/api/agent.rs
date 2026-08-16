@@ -631,6 +631,7 @@ async fn session(
         start: Instant::now(),
         commit,
         input_tx: Some(input_tx.clone()),
+        replied: false,
         closed: false,
     };
 
@@ -781,21 +782,42 @@ struct SubagentDriver {
     /// Queue used to submit further messages to this subagent (also carried
     /// on `SubagentInfo` so the UI can route tab submits to it).
     input_tx: Option<flume::Sender<String>>,
+    /// Whether a completed run has already surfaced its history to the parent,
+    /// so `close` does not re-emit a duplicate reply to the main agent.
+    replied: bool,
     closed: bool,
 }
 
 impl SubagentDriver {
+    /// Surface this subagent's transcript to the parent so its latest reply
+    /// reaches the main agent. Idempotent: only the first completed run after a
+    /// spawn delivers a reply; `close` uses the same guard to avoid re-queueing
+    /// the same text when the user eventually despawns the subagent.
+    fn emit_history(&mut self) {
+        if self.replied {
+            return;
+        }
+        self.replied = true;
+        let _ = self.parent_event_tx.send(AgentEvent::SubagentHistory {
+            tool_use_id: self.ui_id.clone(),
+            messages: self.history.as_slice().to_vec(),
+        });
+    }
+
     fn close(&mut self) {
         if self.closed {
             return;
         }
         self.closed = true;
         self.parent_cancels.retire(&self.ui_id, self.cancel_slot);
-        let messages = std::mem::replace(&mut self.history, History::new(Vec::new())).into_vec();
-        let _ = self.parent_event_tx.send(AgentEvent::SubagentHistory {
-            tool_use_id: self.ui_id.clone(),
-            messages,
-        });
+        if !self.replied {
+            let messages =
+                std::mem::replace(&mut self.history, History::new(Vec::new())).into_vec();
+            let _ = self.parent_event_tx.send(AgentEvent::SubagentHistory {
+                tool_use_id: self.ui_id.clone(),
+                messages,
+            });
+        }
         info!(
             name = %self.name,
             duration_ms = self.start.elapsed().as_millis() as u64,
@@ -921,6 +943,7 @@ async fn subagent_driver(
         }
         *status.lock().unwrap() = SubagentStatus::Done(result.clone());
         let _ = done_tx.send(result);
+        driver.emit_history();
     }
     unregister_commit_slot(&driver.ui_id);
     driver.close();
