@@ -357,17 +357,19 @@ fn index_dir_renders_identically_live_and_restored() {
 fn bash_host_with_classifier(stub_code: &str) -> (PluginHost, Arc<ToolRegistry>) {
     let reg = Arc::new(ToolRegistry::new());
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
-    // Load the real plugin first: its `bh.set_auto_mode(opts.auto_mode)`
-    // defaults auto mode off at load time. Patch afterwards so the stubs and
-    // the forced-on toggle persist for the handler's calls.
-    host.load_source("bash", BASH_SRC).unwrap();
-    let patch = format!(
+    // The classifier stub and the auto toggle must reach the same `bash_helpers`
+    // instance the handler captured. Every `load_source` gets a fresh per-env
+    // require cache, so a separate plugin chunk wouldn't share the module; run
+    // them as one source instead. The setup comes after `BASH_SRC` because it
+    // defaults auto mode off via `bh.set_auto_mode(opts.auto_mode)`.
+    let classifier_setup = format!(
         r#"local bh = require("bash_helpers")
 bh.set_auto_mode(true)
 {stub_code}
 "#
     );
-    host.load_source("bash_classifier_patch", &patch).unwrap();
+    host.load_source("bash", &format!("{BASH_SRC}\n{classifier_setup}"))
+        .unwrap();
     (host, reg)
 }
 
