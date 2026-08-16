@@ -1,25 +1,25 @@
-//! Reproduction for: async subagents die as soon as the run that spawned them
-//! ends, so `task_get` reports `closed` and the subagent never surfaces in the
-//! UI task list.
+//! Reproduction tests for async subagent lifecycle regressions.
 //!
-//! Hypothesis: a subagent's `child_cancel` is derived from the parent run's
-//! cancel (`agent_ctx.cancel.child()` in `maki.agent.session`). At the end of a
-//! normal run the UI's `clear_cancel_trigger` drops the run's `CancelTrigger`,
-//! and `CancelTrigger::drop` FIRES the cancel. That cascades into the child and
-//! closes every in-flight subagent's driver before it can finish.
-//!
-//! The subagent is created with NO `model_spec`, so `session()` inherits the
-//! parent context's mock provider (stub_ctx's `NullProvider`) and no message is
-//! sent, so the driver merely parks on its input queue — no model call, no
-//! network, no credentials. This isolates the cancel-lifecycle behavior.
+//! 1. `subagent_outlives_the_run_that_spawned_it`: a subagent must survive its
+//!    parent run ending normally (the run's cancel must not close it).
+//! 2. `subagent_completion_surfaces_reply_to_parent`: after a subagent finishes
+//!    a run, its transcript must be surfaced to the parent so the UI can queue
+//!    the reply back to the main agent (SubagentHistory must be emitted, not
+//!    only on explicit close).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use maki_agent::cancel::{CancelMap, CancelToken, CancelTrigger};
 use maki_agent::tools::test_support::stub_ctx;
 use maki_agent::tools::{ToolContext, ToolRegistry};
-use maki_agent::{AgentMode, ToolOutput};
+use maki_agent::{AgentEvent, AgentMode, Envelope, EventSender, ToolOutput};
 use maki_lua::PluginHost;
+use maki_providers::provider::{BoxFuture, Provider};
+use maki_providers::{
+    AgentError, ContentBlock, Message, Model, ModelInfo, ProviderEvent, RequestOptions, Role,
+    StopReason, StreamResponse, TokenUsage,
+};
+use maki_storage::id::SessionRef;
 use serde_json::{json, Value};
 
 const PROBE_SRC: &str = r#"
@@ -49,6 +49,20 @@ maki.api.register_tool({
     return maki.json.encode(session_holder.sess:status())
   end,
 })
+
+maki.api.register_tool({
+  name = "probe_send",
+  description = "send a message to the subagent session",
+  schema = { type = "object", properties = { message = { type = "string" } }, additionalProperties = false },
+  audiences = { "main" },
+  handler = function(input)
+    local _, err = session_holder.sess:send(input.message)
+    if err then
+      return { llm_output = "send failed: " .. err, is_error = true }
+    end
+    return maki.json.encode({ ok = true })
+  end,
+})
 "#;
 
 fn load_probe_host() -> (Arc<ToolRegistry>, PluginHost) {
@@ -58,11 +72,69 @@ fn load_probe_host() -> (Arc<ToolRegistry>, PluginHost) {
     (reg, host)
 }
 
-/// A real tool context that mimics production: a live parent cancel token plus
-/// a real subagent-cancel map, so spawned subagents derive from a run cancel.
-/// The run `CancelTrigger` is returned separately so the test controls when the
-/// run's cancel fires (dropping/firing the trigger is what production does at
-/// run end).
+/// A provider that hands back canned single-turn responses so a subagent run
+/// completes deterministically without any network or credentials.
+struct CannedProvider {
+    replies: Mutex<Vec<StreamResponse>>,
+}
+
+impl Provider for CannedProvider {
+    fn stream_message<'a>(
+        &'a self,
+        _model: &'a Model,
+        _messages: &'a [Message],
+        _system: &'a str,
+        _tools: &'a Value,
+        _event_tx: &'a flume::Sender<ProviderEvent>,
+        _opts: RequestOptions,
+        _session_id: Option<&'a SessionRef>,
+    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
+        Box::pin(async {
+            let mut replies = self.replies.lock().unwrap();
+            Ok(replies.remove(0))
+        })
+    }
+
+    fn list_models(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<ModelInfo>, AgentError>> {
+        Box::pin(async { unimplemented!() })
+    }
+}
+
+fn canned_reply(text: &str) -> StreamResponse {
+    StreamResponse {
+        message: Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text { text: text.into() }],
+            ..Default::default()
+        },
+        usage: TokenUsage::default(),
+        stop_reason: Some(StopReason::EndTurn),
+    }
+}
+
+/// A real tool context with a canned provider and a live event channel back to
+/// the "ui" (the returned receiver), mimicking a production run whose cancel we
+/// can fire on demand.
+fn ctx_with_canned_provider() -> (ToolContext, flume::Receiver<Envelope>, CancelTrigger) {
+    let (run_trigger, run_cancel) = CancelToken::new();
+    let (tx, rx) = flume::unbounded::<Envelope>();
+    let event_tx = EventSender::new(tx, 0);
+    let mut ctx = stub_ctx(&AgentMode::Build);
+    ctx.cancel = run_cancel;
+    ctx.subagent_cancels = Arc::new(CancelMap::new());
+    ctx.event_tx = event_tx;
+    ctx.provider = Arc::new(CannedProvider {
+        replies: Mutex::new(vec![canned_reply("the answer"), canned_reply("the answer")]),
+    });
+    ctx.model = Arc::new(Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap());
+    (ctx, rx, run_trigger)
+}
+
+/// A real tool context that mimics production for the no-run cancel test: a
+/// live parent cancel plus a real subagent-cancel map, using the stock stub
+/// provider (the subagent never runs, so no provider is needed).
 fn production_like_ctx() -> (ToolContext, CancelTrigger) {
     let mut ctx = stub_ctx(&AgentMode::Build);
     let (run_trigger, run_cancel) = CancelToken::new();
@@ -71,12 +143,7 @@ fn production_like_ctx() -> (ToolContext, CancelTrigger) {
     (ctx, run_trigger)
 }
 
-fn exec_tool(
-    reg: &ToolRegistry,
-    ctx: &ToolContext,
-    name: &str,
-    input: Value,
-) -> Result<Value, String> {
+fn exec_tool(reg: &ToolRegistry, ctx: &ToolContext, name: &str, input: Value) -> Result<Value, String> {
     let inv = reg
         .get(name)
         .unwrap_or_else(|| panic!("tool {name} not registered"))
@@ -94,32 +161,20 @@ fn exec_tool(
 }
 
 /// A subagent spawned during a run must survive that run ending normally.
-/// `status()` should report it as `running`/`done`, never `closed`, unless it
-/// was explicitly despawned or a global cancel fired.
+/// `status()` should report it as `running`/`done`, never `closed`.
 #[test]
 fn subagent_outlives_the_run_that_spawned_it() {
     let (reg, _host) = load_probe_host();
     let (ctx, run_trigger) = production_like_ctx();
 
-    let spawned = exec_tool(&reg, &ctx, "probe_spawn", json!({})).expect("spawn failed");
-    eprintln!("spawn -> {spawned}");
-    let task_id = spawned["task_id"].as_str().unwrap().to_owned();
-    let _ = task_id;
+    exec_tool(&reg, &ctx, "probe_spawn", json!({})).expect("spawn failed");
 
-    // Before the run ends, the subagent must be alive (running), not closed.
     let before = exec_tool(&reg, &ctx, "probe_status", json!({})).unwrap();
     eprintln!("status (before run end) -> {before}");
-    assert_ne!(
-        before["status"],
-        "closed",
-        "subagent must be alive right after spawn: {before}"
-    );
+    assert_ne!(before["status"], "closed", "subagent must be alive after spawn");
 
-    // Simulate the spawning run ending normally: production drops the run's
-    // CancelTrigger in clear_cancel_trigger, which fires the run cancel.
     run_trigger.cancel();
 
-    // Give the driver a beat to observe the cancel, then check the outcome.
     let mut status = Value::Null;
     for _ in 0..20 {
         status = exec_tool(&reg, &ctx, "probe_status", json!({})).unwrap();
@@ -132,5 +187,44 @@ fn subagent_outlives_the_run_that_spawned_it() {
         status["status"],
         "closed",
         "a spawned subagent must not be closed by its parent run ending normally: {status}"
+    );
+}
+
+/// After a subagent finishes a run, its transcript must be surfaced to the
+/// parent (as a SubagentHistory envelope) so the UI can queue the reply back to
+/// the main agent with a header. Regression: this was only emitted on explicit
+/// close, so a completed async subagent's reply never reached the main agent.
+#[test]
+fn subagent_completion_surfaces_reply_to_parent() {
+    let (reg, _host) = load_probe_host();
+    let (ctx, parent_rx, _run_trigger) = ctx_with_canned_provider();
+
+    exec_tool(&reg, &ctx, "probe_spawn", json!({})).expect("spawn failed");
+    exec_tool(&reg, &ctx, "probe_send", json!({ "message": "do the thing" }))
+        .expect("send failed");
+
+    // Pump the executor and drain the parent event channel until the subagent's
+    // completed run surfaces its history.
+    let mut found = false;
+    for _ in 0..100 {
+        for envelope in parent_rx.try_iter() {
+            if let AgentEvent::SubagentHistory { messages, .. } = &envelope.event {
+                let has_reply = messages
+                    .iter()
+                    .any(|m| m.role == Role::Assistant && !m.content.is_empty());
+                eprintln!("subagent surfaced history, has reply: {has_reply}");
+                if has_reply {
+                    found = true;
+                }
+            }
+        }
+        if found {
+            break;
+        }
+        smol::block_on(async { smol::Timer::after(std::time::Duration::from_millis(5)).await });
+    }
+    assert!(
+        found,
+        "a completed subagent's reply must reach the parent as SubagentHistory"
     );
 }
