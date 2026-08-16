@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$Repo = "tontinton/maki"
+$Repo = "lun-4/maki"
 $Binary = "maki"
 $InstallDir = if ($env:MAKI_INSTALL_DIR) {
     $env:MAKI_INSTALL_DIR
