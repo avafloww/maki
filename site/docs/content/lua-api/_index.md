@@ -867,6 +867,14 @@ and tool set.
     `"max"`), or a budget integer (token count). Inherits parent setting
     if omitted.
   - `fast` (`boolean?`) use fast mode. Inherits parent setting if omitted.
+  - `inherit_provider` (`boolean?`) reuse the parent model and provider instead
+    of building one from `model_spec`. Used by tests (and tools that want to
+    thread a caller-provided provider) to drive a real spawned session without
+    hitting the network. `model_spec` is ignored when this is `true`. Default: `false`.
+  - `silent` (`boolean?`) do not relay the session's turns, annotations, or
+    usage into the parent session's UI or event stream. The session still
+    completes and `:prompt()` still returns its result (including a commit
+    set via a `local_tools` handler). Use for hidden one-shot classification.
 
 **Returns:** ([`Session?`](#maki-agent-Session), `string?`) Session handle, or `(nil, err)` on failure.
 
