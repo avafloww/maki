@@ -4157,7 +4157,7 @@ fn cancel_preserves_panel_window_and_closes_transient() {
         "panel dock survives cancel and stays visible",
     );
     assert!(
-        !app.float_mgr.is_open(),
+        !app.float_mgr.needs_input(),
         "transient focused float is closed by cancel",
     );
 }
