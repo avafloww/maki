@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use maki_agent::cancel::{CancelMap, CancelToken, CancelTrigger};
 use maki_agent::tools::test_support::stub_ctx;
-use maki_agent::tools::{ToolContext, ToolOutput, ToolRegistry};
+use maki_agent::tools::{ToolContext, ToolRegistry};
 use maki_agent::{AgentMode, ToolOutput};
 use maki_lua::PluginHost;
 use serde_json::{json, Value};
