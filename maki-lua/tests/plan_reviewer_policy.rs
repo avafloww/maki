@@ -102,16 +102,13 @@ fn wait_task_done(reg: &ToolRegistry, ctx: &ToolContext, task_id: &str) -> Value
 
 #[test]
 fn plan_reviewer_audits_plan_and_returns_verdict() {
-    let provider = Arc::new(CannedProvider::new(vec![
-        canned_reply("VERDICT: pass"),
-        canned_reply("VERDICT: fail\n- finding: missing AC mapping"),
-    ]));
-    let (ctx, _rx, _trigger) = ctx_with_provider(Arc::clone(&provider));
     let (reg, _host) = load_reviewer_host("plan", false);
 
-    let spawn = exec_tool(&reg, &ctx, "task_spawn", reviewer_input("pass-review"))
+    let pass = Arc::new(CannedProvider::new(vec![canned_reply("VERDICT: pass")]));
+    let (ctx_pass, _rx, _trigger) = ctx_with_provider(Arc::clone(&pass));
+    let spawn = exec_tool(&reg, &ctx_pass, "task_spawn", reviewer_input("pass-review"))
         .expect("reviewer must spawn in plan mode");
-    let status = wait_task_done(&reg, &ctx, spawn["task_id"].as_str().unwrap());
+    let status = wait_task_done(&reg, &ctx_pass, spawn["task_id"].as_str().unwrap());
     assert!(
         status["result"]["text"]
             .as_str()
@@ -119,9 +116,13 @@ fn plan_reviewer_audits_plan_and_returns_verdict() {
         "pass verdict must surface: {status}"
     );
 
-    let spawn = exec_tool(&reg, &ctx, "task_spawn", reviewer_input("fail-review"))
+    let fail = Arc::new(CannedProvider::new(vec![
+        canned_reply("VERDICT: fail\n- finding: missing AC mapping"),
+    ]));
+    let (ctx_fail, _rx, _trigger) = ctx_with_provider(Arc::clone(&fail));
+    let spawn = exec_tool(&reg, &ctx_fail, "task_spawn", reviewer_input("fail-review"))
         .expect("reviewer must spawn in plan mode");
-    let status = wait_task_done(&reg, &ctx, spawn["task_id"].as_str().unwrap());
+    let status = wait_task_done(&reg, &ctx_fail, spawn["task_id"].as_str().unwrap());
     assert!(
         status["result"]["text"]
             .as_str()

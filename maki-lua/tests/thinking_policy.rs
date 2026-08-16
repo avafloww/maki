@@ -80,14 +80,16 @@ fn thinking_effort_reaches_the_model(thinking: Value, expected: ThinkingConfig) 
     assert_eq!(wait_capture(&provider), expected);
 }
 
+/// A non-thinking model receives `Off` at the provider regardless of the
+/// requested thinking: the agent run clamps via `RequestOptions::clamped(model)`
+/// before calling `stream_message`. This pins where enforcement actually lives
+/// (the agent layer, reached here through the real `maki.agent.session` path),
+/// so a future change that moves clamping is caught.
 #[test]
-fn thinking_not_enforced_at_session_layer() {
+fn thinking_clamped_to_off_for_non_supporting_model() {
     let (reg, _host) = load_thinking_host();
     let provider = Arc::new(CannedProvider::new(vec![canned_reply("ok")]));
     let (mut ctx, _rx, _trigger) = ctx_with_provider(Arc::clone(&provider));
-    // A model that does not support thinking. Enforcement is UI-owned, so the
-    // session layer must still thread the requested thinking through unchanged
-    // (not clamp it to Off).
     let non_thinking = Arc::new(Model::from_spec("copilot/gpt-5-mini").unwrap());
     assert!(!non_thinking.supports_thinking(), "fixture model must not support thinking");
     ctx.model = non_thinking;
@@ -95,7 +97,7 @@ fn thinking_not_enforced_at_session_layer() {
     exec_tool(&reg, &ctx, "probe_thinking", json!({ "thinking": "high" })).unwrap();
     assert_eq!(
         wait_capture(&provider),
-        ThinkingConfig::Effort(Effort::High),
-        "session must not clamp thinking to Off for a non-supporting model"
+        ThinkingConfig::Off,
+        "a non-thinking model must clamp the requested effort to Off at the agent layer"
     );
 }
