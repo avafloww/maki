@@ -473,10 +473,10 @@ async fn session(
     };
     // A standalone task shows its model via SubagentInfo on the header;
     // a dispatching caller (batch) gets the same thing as a live annotation.
-    if !silent {
-        if let Some(sink) = &agent_ctx.live_sink {
-            let _ = sink.send(ToolLive::Annotation(model.spec()));
-        }
+    if !silent
+        && let Some(sink) = &agent_ctx.live_sink
+    {
+        let _ = sink.send(ToolLive::Annotation(model.spec()));
     }
 
     let mut tools_json: JsonValue = match tools_val {
