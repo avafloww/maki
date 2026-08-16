@@ -447,8 +447,17 @@ local function handler(input, ctx)
 
     sess:close()
 
-    if prompt_err then
+if prompt_err then
+      -- A result alongside the error means the run was cut short after
+      -- streaming some text, and half a transcript beats a bare error.
+      if result and result.text and result.text ~= "" then
+        return {
+          llm_output = "sub-agent interrupted (" .. prompt_err .. "). Partial output:\n" .. result.text,
+          is_error = true,
+        }
+      end
       return { llm_output = "sub-agent error: " .. prompt_err, is_error = true }
+    end
     end
     if spec.local_tools and not result.captured then
       local last_errors = spec.local_tools[STRUCTURED_OUTPUT_NAME].last_errors

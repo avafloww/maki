@@ -18,8 +18,8 @@ use maki_agent::tools::{
     ToolContext, ToolFilter, ToolLive,
 };
 use maki_agent::{
-    Agent, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, Envelope, EventSender,
-    History, McpSession, SubagentInfo, ToolDoneEvent,
+    Agent, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, DoneReason,
+    EMPTY_RESPONSE_MARKER, Envelope, EventSender, History, McpSession, SubagentInfo, ToolDoneEvent,
 };
 use maki_lua_macro::{lua_class, lua_fn, lua_table};
 use maki_providers::model::ModelTier;
@@ -35,6 +35,7 @@ use crate::api::ui::buf::BufHandle;
 use crate::api::util::convert::{json_to_lua, lua_to_json, lua_tool_result};
 use crate::api::util::ctx::{AgentContext, LuaCtx};
 use crate::api::util::pair::{Pair, err_pair, try_pair};
+use crate::runtime::CANCELLED_MSG;
 
 const SESSION_CLOSED_ERR: &str = "session closed";
 const DEFAULT_SESSION_AUDIENCE: ToolAudience = ToolAudience::GENERAL_SUB;
@@ -219,7 +220,10 @@ async fn system_prompt(
     ctx: mlua::UserDataRef<LuaCtx>,
     opts: Table,
 ) -> LuaResult<Pair<String>> {
-    let agent = try_pair!(dispatch_ctx(&ctx, "system_prompt"));
+    let slots = Arc::clone(&try_pair!(dispatch_ctx(&ctx, "system_prompt")).prompt_slots);
+    // Nothing may hold the ctx borrow across the wait: a cancel hook firing
+    // meanwhile needs `ctx:finish`, which takes it mutably.
+    drop(ctx);
     let prompt_id_str: String = opts.get("prompt_id")?;
     let prompt_id = match prompt_id_str.as_str() {
         "research" => maki_agent::prompt::PromptId::Research,
@@ -240,7 +244,7 @@ async fn system_prompt(
         _ => return Err(mlua::Error::runtime("instructions must be bool or string")),
     };
 
-    let assembled = maki_agent::prompt::assemble(prompt_id, &agent.prompt_slots, &instructions);
+    let assembled = maki_agent::prompt::assemble(prompt_id, &slots, &instructions);
     Ok((Some(vars.apply(&assembled).into_owned()), None))
 }
 
@@ -846,7 +850,8 @@ impl SubagentDriver {
             prompt: None,
         };
         let error = match agent.run(input).await {
-            Ok(()) => None,
+            Ok(DoneReason::Cancelled) => Some(CANCELLED_MSG.to_owned()),
+            Ok(_) => None,
             Err(e) => Some(e.to_string()),
         };
         drop(agent);
@@ -866,7 +871,9 @@ impl SubagentDriver {
             .rfind(|m| matches!(m.role, Role::Assistant))
             .and_then(|m| {
                 m.content.iter().find_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.as_str()),
+                    ContentBlock::Text { text } if text != EMPTY_RESPONSE_MARKER => {
+                        Some(text.as_str())
+                    }
                     _ => None,
                 })
             })
@@ -944,7 +951,9 @@ impl Drop for LuaSession {
 /// tools).
 ///
 /// @param message string User message to send.
-/// @return (table?, string?) Result table on success, or `(nil, err)` on failure.
+/// @return (table?, string?) Result table on success, or `(nil, err)` on
+/// failure. A run cut short after streaming some text hands you both: the
+/// error and a `{ text = <what it streamed> }` table.
 /// @example
 /// local r, err = sess:prompt("What files are in this project?")
 /// if err then error(err) end
@@ -959,7 +968,7 @@ async fn prompt(
     let input_tx = this.input_tx.clone();
     let done_rx = this.done_rx.clone();
     drop(this);
-    if let Err(e) = input_tx.send(message) {
+if let Err(e) = input_tx.send(message) {
         return Ok((None, Some(e.to_string())));
     }
     match done_rx.recv_async().await {
@@ -970,7 +979,14 @@ async fn prompt(
 
 fn build_prompt_result(lua: &Lua, result: SubagentRunResult) -> LuaResult<Pair<Table>> {
     if let Some(e) = &result.error {
-        return Ok((None, Some(e.clone())));
+        let tbl = if result.text.is_empty() {
+            None
+        } else {
+            let t = lua.create_table()?;
+            t.set("text", result.text)?;
+            Some(t)
+        };
+        return Ok((tbl, Some(e.clone())));
     }
     let tbl = lua.create_table()?;
     tbl.set("text", result.text)?;
@@ -1120,7 +1136,7 @@ fn call_local_tool(
 
 #[cfg(test)]
 mod tests {
-    use maki_agent::TurnCompleteEvent;
+    use maki_agent::{DoneReason, TurnCompleteEvent};
     use maki_providers::Message;
     use serde_json::json;
 
@@ -1212,7 +1228,7 @@ mod tests {
             AgentEvent::Done {
                 usage: DONE_USAGE,
                 num_turns: 2,
-                stop_reason: None,
+                reason: DoneReason::EndTurn,
             },
         ] {
             sub_tx.send(envelope(event)).unwrap();
