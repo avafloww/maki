@@ -211,7 +211,7 @@ fn subagent_completion_surfaces_reply_to_parent() {
             if let AgentEvent::SubagentHistory { messages, .. } = &envelope.event {
                 let has_reply = messages
                     .iter()
-                    .any(|m| m.role == Role::Assistant && !m.content.is_empty());
+                    .any(|m| matches!(m.role, Role::Assistant) && !m.content.is_empty());
                 eprintln!("subagent surfaced history, has reply: {has_reply}");
                 if has_reply {
                     found = true;
