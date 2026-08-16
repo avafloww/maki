@@ -6,6 +6,22 @@ a fucked up fork of [maki](https://github.com/tontinton/maki):
 
 _maki is good! i just have different opinions that i dont think are upstreamable!_
 
+## things lunamaki does on top of maki
+
+- `/thinking` that saves to storage and has an UI using the Pi's 7-level effort system
+- mode overrides and a plan mode inspired/stolen from [polytoken](https://docs.polytoken.dev)
+- `plan_submit` tool so model decides when it's time to go for it
+- async subagent implementation where you can talk to the subagents
+- Claude Code-style automode via `/automode`
+- misc ux fixes, such as
+   - `--apend-system-prompt` works in TUI mode
+   - `/login` has OpenAI Codex auth as an option
+   - Esc-Esc doesn't wipe the todo UI
+
+## installing lunamaki
+
+TODO
+
 ## Features
 
 ### Context efficiency
