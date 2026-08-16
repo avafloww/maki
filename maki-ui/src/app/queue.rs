@@ -12,7 +12,7 @@ pub(crate) use crate::agent::shared_queue::QueuedMessage;
 pub(crate) const EMPTY_PROMPT_ERR: &str = "prompt is empty";
 pub(crate) const NO_QUEUE_ERR: &str = "session cannot queue messages";
 const NO_SUBAGENT_IMAGE_ERR: &str = "images cannot be sent to a subagent";
-const NO_SUBAGENT_ERR: &str = "subagent is no longer accepting messages";
+pub(crate) const NO_SUBAGENT_ERR: &str = "subagent is no longer accepting messages";
 
 pub(crate) enum SubmitOutcome {
     Started(Vec<Action>),
