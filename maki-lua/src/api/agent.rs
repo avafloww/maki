@@ -43,6 +43,32 @@ const DEFAULT_SESSION_AUDIENCE: ToolAudience = ToolAudience::GENERAL_SUB;
 /// A per-session structured-output commit slot.
 type CommitSlot = Arc<Mutex<Option<JsonValue>>>;
 
+/// Build the `(model, provider)` pair that backs a `maki.agent.session` spawn.
+/// `inherit_provider` (or an absent `model_spec`) reuses the parent model and
+/// provider so a test-side wrapper can drive a real spawned session through a
+/// caller-provided provider without network. Otherwise build a provider for the
+/// given `model_spec`.
+async fn build_session_provider(
+    model_spec: &Option<String>,
+    inherit_provider: bool,
+    agent_ctx: &AgentContext,
+) -> Result<(Model, Arc<dyn provider::Provider>), String> {
+    if inherit_provider || model_spec.is_none() {
+        Ok((
+            Model::clone(&agent_ctx.model),
+            Arc::clone(&agent_ctx.provider),
+        ))
+    } else {
+        let spec = model_spec.as_deref().expect("model_spec present");
+        let mut m = Model::from_spec_with_policy(spec, &agent_ctx.model_policy)
+            .map_err(|e| e.to_string())?;
+        let p = provider::from_model_async(&mut m, agent_ctx.timeouts)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok((m, Arc::from(p)))
+    }
+}
+
 /// Per-session structured-output commit slots, keyed by the session's ui_id.
 /// `maki.agent.report_task_result` routes a commit to whichever session is
 /// running the tool, so the background driver can surface it as `captured`.
@@ -419,6 +445,10 @@ async fn call_tool(
 ///     `"max"`), or a budget integer (token count). Inherits parent setting
 ///     if omitted.
 ///   `fast` (boolean?) - use fast mode. Inherits parent setting if omitted.
+///   `inherit_provider` (boolean?) - reuse the parent model and provider instead
+///     of building one from `model_spec`. Used by tests (and tools that want to
+///     thread a caller-provided provider) to drive a real spawned session without
+///     hitting the network. `model_spec` is ignored when this is `true`. Default: `false`.
 ///   `silent` (boolean?) - do not relay the session's turns, annotations, or
 ///     usage into the parent session's UI or event stream. The session still
 ///     completes and `:prompt()` still returns its result (including a commit
@@ -454,23 +484,15 @@ async fn session(
         }
         None => DEFAULT_SESSION_AUDIENCE,
     };
+    let inherit_provider: bool = opts.get::<Option<bool>>("inherit_provider")?.unwrap_or(false);
     let fast: bool = opts
         .get::<Option<bool>>("fast")?
         .unwrap_or(agent_ctx.opts.fast);
     let mcp_enabled: bool = opts.get::<Option<bool>>("mcp")?.unwrap_or(true);
     let silent: bool = opts.get::<Option<bool>>("silent")?.unwrap_or(false);
 
-    let (model, provider): (Model, Arc<dyn provider::Provider>) = if let Some(ref spec) = model_spec
-    {
-        let mut m = try_pair!(Model::from_spec_with_policy(spec, &agent_ctx.model_policy));
-        let p = try_pair!(provider::from_model_async(&mut m, agent_ctx.timeouts).await);
-        (m, Arc::from(p))
-    } else {
-        (
-            Model::clone(&agent_ctx.model),
-            Arc::clone(&agent_ctx.provider),
-        )
-    };
+    let (model, provider): (Model, Arc<dyn provider::Provider>) =
+        try_pair!(build_session_provider(&model_spec, inherit_provider, &agent_ctx).await);
     // A standalone task shows its model via SubagentInfo on the header;
     // a dispatching caller (batch) gets the same thing as a live annotation.
     if !silent
@@ -1165,11 +1187,44 @@ fn call_local_tool(
 
 #[cfg(test)]
 mod tests {
+    use maki_agent::tools::test_support::stub_ctx;
     use maki_agent::{DoneReason, TurnCompleteEvent};
     use maki_providers::Message;
     use serde_json::json;
 
     use super::*;
+
+    /// `inherit_provider` must select the reuse branch even when `model_spec`
+    /// is present, so a test-side wrapper can drive a real spawned session
+    /// through the parent provider instead of building one from the spec
+    /// (which would hit the network).
+    #[test]
+    fn inherit_provider_selects_reuse_branch_over_model_spec() {
+        let ctx = stub_ctx(&AgentMode::Build);
+        let parent_model = ctx.model.spec();
+        let parent_provider = Arc::clone(&ctx.provider);
+        let agent = AgentContext::from(&ctx);
+
+        let (model, provider) = smol::block_on(build_session_provider(
+            &Some("anthropic/claude-opus-4-20250514".into()),
+            true,
+            &agent,
+        ))
+        .unwrap();
+
+        assert!(Arc::ptr_eq(&provider, &parent_provider), "must reuse parent provider");
+        assert_eq!(model.spec(), parent_model, "must reuse parent model");
+    }
+
+    #[test]
+    fn absent_model_spec_reuses_parent_provider() {
+        let ctx = stub_ctx(&AgentMode::Build);
+        let parent_provider = Arc::clone(&ctx.provider);
+        let agent = AgentContext::from(&ctx);
+
+        let (_, provider) = smol::block_on(build_session_provider(&None, false, &agent)).unwrap();
+        assert!(Arc::ptr_eq(&provider, &parent_provider));
+    }
 
     fn call(src: &str, input: JsonValue) -> Result<String, String> {
         let lua = Lua::new();

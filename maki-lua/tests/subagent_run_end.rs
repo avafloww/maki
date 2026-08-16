@@ -7,20 +7,16 @@
 //!    the reply back to the main agent (SubagentHistory must be emitted, not
 //!    only on explicit close).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use maki_agent::cancel::{CancelMap, CancelToken, CancelTrigger};
-use maki_agent::tools::test_support::stub_ctx;
-use maki_agent::tools::{ToolContext, ToolRegistry};
-use maki_agent::{AgentEvent, AgentMode, Envelope, EventSender, ToolOutput};
+use maki_agent::tools::ToolRegistry;
+use maki_agent::AgentEvent;
 use maki_lua::PluginHost;
-use maki_providers::provider::{BoxFuture, Provider};
-use maki_providers::{
-    AgentError, ContentBlock, Message, Model, ModelInfo, ProviderEvent, RequestOptions, Role,
-    StopReason, StreamResponse, TokenUsage,
-};
-use maki_storage::id::SessionRef;
+use maki_providers::Role;
 use serde_json::{json, Value};
+
+mod common;
+use common::{ctx_with_canned_provider, exec_tool, production_like_ctx};
 
 const PROBE_SRC: &str = r#"
 session_holder = { sess = nil }
@@ -70,94 +66,6 @@ fn load_probe_host() -> (Arc<ToolRegistry>, PluginHost) {
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     host.load_source("probe", PROBE_SRC).unwrap();
     (reg, host)
-}
-
-/// A provider that hands back canned single-turn responses so a subagent run
-/// completes deterministically without any network or credentials.
-struct CannedProvider {
-    replies: Mutex<Vec<StreamResponse>>,
-}
-
-impl Provider for CannedProvider {
-    fn stream_message<'a>(
-        &'a self,
-        _model: &'a Model,
-        _messages: &'a [Message],
-        _system: &'a str,
-        _tools: &'a Value,
-        _event_tx: &'a flume::Sender<ProviderEvent>,
-        _opts: RequestOptions,
-        _session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        Box::pin(async {
-            let mut replies = self.replies.lock().unwrap();
-            Ok(replies.remove(0))
-        })
-    }
-
-    fn list_models(
-        &self,
-    ) -> BoxFuture<'_, Result<Vec<ModelInfo>, AgentError>> {
-        Box::pin(async { unimplemented!() })
-    }
-}
-
-fn canned_reply(text: &str) -> StreamResponse {
-    StreamResponse {
-        message: Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::Text { text: text.into() }],
-            ..Default::default()
-        },
-        usage: TokenUsage::default(),
-        stop_reason: Some(StopReason::EndTurn),
-    }
-}
-
-/// A real tool context with a canned provider and a live event channel back to
-/// the "ui" (the returned receiver), mimicking a production run whose cancel we
-/// can fire on demand.
-fn ctx_with_canned_provider() -> (ToolContext, flume::Receiver<Envelope>, CancelTrigger) {
-    let (run_trigger, run_cancel) = CancelToken::new();
-    let (tx, rx) = flume::unbounded::<Envelope>();
-    let event_tx = EventSender::new(tx, 0);
-    let mut ctx = stub_ctx(&AgentMode::Build);
-    ctx.cancel = run_cancel;
-    ctx.subagent_cancels = Arc::new(CancelMap::new());
-    ctx.event_tx = event_tx;
-    ctx.provider = Arc::new(CannedProvider {
-        replies: Mutex::new(vec![canned_reply("the answer"), canned_reply("the answer")]),
-    });
-    ctx.model = Arc::new(Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap());
-    (ctx, rx, run_trigger)
-}
-
-/// A real tool context that mimics production for the no-run cancel test: a
-/// live parent cancel plus a real subagent-cancel map, using the stock stub
-/// provider (the subagent never runs, so no provider is needed).
-fn production_like_ctx() -> (ToolContext, CancelTrigger) {
-    let mut ctx = stub_ctx(&AgentMode::Build);
-    let (run_trigger, run_cancel) = CancelToken::new();
-    ctx.cancel = run_cancel;
-    ctx.subagent_cancels = Arc::new(CancelMap::new());
-    (ctx, run_trigger)
-}
-
-fn exec_tool(reg: &ToolRegistry, ctx: &ToolContext, name: &str, input: Value) -> Result<Value, String> {
-    let inv = reg
-        .get(name)
-        .unwrap_or_else(|| panic!("tool {name} not registered"))
-        .tool
-        .parse(&input)
-        .expect("parse failed");
-    let out = smol::block_on(async { inv.execute(ctx).await })
-        .output
-        .map(|out| match out {
-            ToolOutput::Plain(s) | ToolOutput::Markdown(s) => s.text,
-            other => panic!("unexpected output: {other:?}"),
-        })
-        .map_err(|e| e.to_string())?;
-    serde_json::from_str(&out).map_err(|e| format!("invalid json {out:?}: {e}"))
 }
 
 /// A subagent spawned during a run must survive that run ending normally.
