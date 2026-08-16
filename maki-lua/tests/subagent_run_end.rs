@@ -26,7 +26,9 @@ const PRELUDE: &str = r#"
 maki.api.mode.get = function() return 'build' end
 
 maki.agent.resolve_model = function(ctx, opts)
-  return { spec = "test/model" }
+  -- Must be a spec session() can construct a provider for; this is stub_ctx's
+  -- own model, so the resolve seam behaves like production.
+  return { spec = "anthropic/claude-sonnet-4-20250514" }
 end
 
 maki.agent.system_prompt = function(ctx, opts)
