@@ -575,16 +575,16 @@ impl<'t> EventLoop<'t> {
             } else {
                 let _ = rt.app.float_mgr.tick();
             }
-            rt.app.tick_edge_scroll();
-            rt.app.tick_error_expiry();
-            rt.app.poll_image_paste();
-            rt.app.btw_modal.poll();
+            dirty |= rt.app.tick_edge_scroll();
+            dirty |= rt.app.tick_error_expiry();
+            dirty |= rt.app.poll_image_paste();
+            dirty |= rt.app.btw_modal.poll();
             let actions = rt.app.poll_login_picker();
             if !actions.is_empty() {
                 login_actions.push((i, actions));
             }
-            rt.app.status_bar.poll_branch_update();
-            rt.app.mcp_picker.refresh();
+            dirty |= rt.app.status_bar.poll_branch_update();
+            dirty |= rt.app.mcp_picker.refresh();
         }
         for (i, actions) in login_actions {
             self.dispatch(i, actions);
