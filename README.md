@@ -1,6 +1,10 @@
 <img src="./banner.png">
 
-An AI coding agent optimized for minimal use of context tokens, while providing a great user experience.
+a fucked up fork of [maki](https://github.com/tontinton/maki):
+
+> An AI coding agent optimized for minimal use of context tokens, while providing a great user experience.
+
+_maki is good! i just have different opinions that i dont think are upstreamable!_
 
 ## Features
 
