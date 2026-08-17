@@ -6,6 +6,7 @@
 
 mod btw;
 mod image_paste;
+pub(crate) mod mentions;
 pub(crate) mod mode;
 mod mouse;
 mod queue;
@@ -230,6 +231,7 @@ pub struct App {
 
     pub(crate) storage: StateDir,
     pub(crate) usage_slot: Arc<ArcSwapOption<UsageFetchState>>,
+    pub(crate) available_models: Arc<ArcSwapOption<Vec<String>>>,
     pub(crate) shared_history: Option<SharedMessages>,
     pub(crate) btw_system: Option<Arc<ArcSwap<String>>>,
     pub(crate) image_paste_rx: Vec<flume::Receiver<Result<ImageSource, String>>>,
@@ -296,7 +298,7 @@ impl App {
             task_picker: ListPicker::new(),
             task_picker_original: None,
             theme_picker: ThemePicker::new(),
-            model_picker: ModelPicker::new(available_models),
+            model_picker: ModelPicker::new(Arc::clone(&available_models)),
             login_picker: LoginPicker::new(),
             mcp_picker: McpPicker::new(mcp_reader, mcp_config_errors),
             rewind_picker: RewindPicker::new(),
@@ -327,6 +329,7 @@ impl App {
             last_esc: None,
             storage,
             usage_slot: Arc::new(ArcSwapOption::empty()),
+            available_models,
             shared_history: None,
             btw_system: None,
             image_paste_rx: vec![],
@@ -1085,8 +1088,14 @@ impl App {
             self.file_completion.sync_query(&query);
         } else {
             let skills = maki_agent::skills::enumerate_skills(Path::new(&cwd));
+            let models = self
+                .available_models
+                .load_full()
+                .map(|arc| (*arc).clone())
+                .unwrap_or_default();
+            let plan_mode = matches!(self.state.mode, Mode::Plan);
             self.file_completion
-                .open(&cwd, skills, &query, (start, end));
+                .open(&cwd, skills, models, plan_mode, &query, (start, end));
         }
     }
 

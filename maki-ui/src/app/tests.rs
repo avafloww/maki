@@ -109,6 +109,7 @@ fn app_with_model_slot() -> (App, Arc<ArcSwapOption<Vec<String>>>) {
     let models = Arc::new(ArcSwapOption::empty());
     let mut app = test_app();
     app.model_picker = ModelPicker::new(Arc::clone(&models));
+    app.available_models = Arc::clone(&models);
     (app, models)
 }
 
@@ -529,7 +530,7 @@ fn submit_prompt_queues_while_streaming() {
     app.status = Status::Streaming;
     assert!(matches!(
         app.submit_prompt(queued_msg("hi")),
-        SubmitOutcome::Queued
+        SubmitOutcome::Queued(_)
     ));
     assert_eq!(app.queue.len(), 1);
 }
@@ -4809,6 +4810,204 @@ fn command_palette_takes_precedence() {
     );
 }
 
+// --- `@` reference completion: subagents and models (AC.1–AC.7) ---------------
+
+fn completion_match_items(app: &App) -> Vec<CompletionItem> {
+    app.file_completion.match_items()
+}
+
+fn subagent_match_names(app: &App) -> Vec<String> {
+    completion_match_items(app)
+        .into_iter()
+        .filter_map(|i| match i {
+            CompletionItem::Subagent { name, .. } => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn at_a_prefix_lists_subagents() {
+    let (_tmp, mut app) = completion_app();
+    for c in "@a:".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    converge_completion(&mut app);
+    assert_eq!(
+        subagent_match_names(&app),
+        vec!["research".to_string(), "general".to_string()]
+    );
+}
+
+#[test]
+fn at_subagent_prefix_lists_subagents() {
+    let (_tmp, mut app) = completion_app();
+    for c in "@subagent:".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    converge_completion(&mut app);
+    assert_eq!(
+        subagent_match_names(&app),
+        vec!["research".to_string(), "general".to_string()]
+    );
+}
+
+#[test]
+fn at_a_prefix_in_plan_mode_hides_general() {
+    let (_tmp, mut app) = completion_app();
+    app.set_mode_id("plan".into());
+    for c in "@a:".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    converge_completion(&mut app);
+    let names = subagent_match_names(&app);
+    assert!(!names.contains(&"general".to_string()));
+    assert!(names.contains(&"plan_reviewer".to_string()));
+    assert!(names.contains(&"research".to_string()));
+}
+
+#[test]
+fn at_m_prefix_lists_models() {
+    let (_tmp, mut app) = completion_app();
+    app.available_models.store(Some(Arc::new(vec![
+        "zai/glm-5".into(),
+        "anthropic/claude".into(),
+    ])));
+    for c in "@m:".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    converge_completion(&mut app);
+    let specs: Vec<String> = completion_match_items(&app)
+        .into_iter()
+        .filter_map(|i| match i {
+            CompletionItem::Model { spec } => Some(spec),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        specs,
+        vec!["zai/glm-5".to_string(), "anthropic/claude".to_string()]
+    );
+}
+
+#[test]
+fn enter_inserts_subagent_reference_with_trailing_space() {
+    let (_tmp, mut app) = completion_app();
+    for c in "@a:res".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    converge_completion(&mut app);
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert_eq!(app.input_box.buffer.value(), "@subagent:research ");
+}
+
+#[test]
+fn enter_inserts_model_reference_with_trailing_space() {
+    let (_tmp, mut app) = completion_app();
+    app.available_models
+        .store(Some(Arc::new(vec!["zai/glm-5".into()])));
+    for c in "@m:glm".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    converge_completion(&mut app);
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert_eq!(app.input_box.buffer.value(), "@model:zai/glm-5 ");
+}
+
+#[test]
+fn mixed_list_includes_skills_subagents_and_models() {
+    let (tmp, mut app) = completion_app();
+    seed_skill(tmp.path(), "review");
+    app.available_models
+        .store(Some(Arc::new(vec!["zai/glm-5".into()])));
+    app.update(Msg::Key(key(KeyCode::Char('@'))));
+    converge_completion(&mut app);
+    let items = completion_match_items(&app);
+    assert!(
+        items
+            .iter()
+            .any(|i| matches!(i, CompletionItem::Skill { .. }))
+    );
+    assert!(
+        items
+            .iter()
+            .any(|i| matches!(i, CompletionItem::Subagent { .. }))
+    );
+    assert!(
+        items
+            .iter()
+            .any(|i| matches!(i, CompletionItem::Model { .. }))
+    );
+}
+
+#[test]
+fn ac5_submit_expands_subagent_directive() {
+    let app = test_app();
+    let input = app.build_agent_input(&queued_msg("@subagent:research review this package"));
+    assert!(!input.message.contains("@subagent:research"));
+    assert!(input.message.contains("`task`"));
+    assert!(input.message.contains("subagent_type \"research\""));
+    assert!(input.message.contains("review this package"));
+}
+
+#[test]
+fn ac6_submit_expands_subagent_model_skill_directive() {
+    let app = test_app();
+    let input = app.build_agent_input(&queued_msg(
+        "@subagent:general @m:weak @skill:pdf fix the report",
+    ));
+    assert!(input.message.contains("subagent_type \"general\""));
+    assert!(input.message.contains("model_tier \"weak\""));
+    assert!(input.message.contains("pdf"));
+    assert!(input.message.contains("fix the report"));
+    assert!(!input.message.contains("@m:weak"));
+    assert!(!input.message.contains("@skill:pdf"));
+}
+
+#[test]
+fn ac7_standalone_model_switch_emits_change_model_and_strips_token() {
+    let mut app = test_app();
+    let outcome = app.submit_prompt(queued_msg("@model:zai/glm-5 fix the bug"));
+    let actions = match outcome {
+        SubmitOutcome::Started(a) => a,
+        _ => panic!("expected Started"),
+    };
+    assert!(matches!(actions[0], Action::ChangeModel(_)));
+    let mut change_spec = None;
+    let mut message = None;
+    for a in actions {
+        match a {
+            Action::ChangeModel(s) => change_spec = Some(s),
+            Action::SendMessage(inp) => message = Some(inp.message),
+            _ => {}
+        }
+    }
+    assert_eq!(change_spec.as_deref(), Some("zai/glm-5"));
+    let msg = message.expect("SendMessage action");
+    assert!(!msg.contains("@model:zai/glm-5"));
+    assert!(msg.contains("fix the bug"));
+}
+
+#[test]
+fn standalone_model_only_switches_model_without_starting_run() {
+    let mut app = test_app();
+    let outcome = app.submit_prompt(queued_msg("@model:zai/glm-5"));
+    match outcome {
+        SubmitOutcome::Started(actions) => {
+            assert_eq!(actions.len(), 1);
+            assert!(matches!(actions[0], Action::ChangeModel(_)));
+        }
+        _ => panic!("expected Started with only ChangeModel"),
+    }
+}
+
+#[test]
+fn unrecognized_references_pass_through_at_submit() {
+    let app = test_app();
+    let input = app.build_agent_input(&queued_msg("foo@bar @nothing:whatever fix it"));
+    assert_eq!(input.message, "foo@bar @nothing:whatever fix it");
+}
+
 // --- Async subagent routing (AC.8, AC.9, AC.10) ------------------------------
 
 /// A subagent tab whose `SubagentInfo` carries both an answer and an input
@@ -4830,7 +5029,7 @@ fn app_with_subagent_input_tx(id: &str) -> (App, flume::Receiver<String>) {
 fn submit_in_subagent_chat_routes_to_subagent_queue() {
     let (mut app, input_rx) = app_with_subagent_input_tx(TASK_ID);
     let outcome = app.submit_prompt(queued_msg("do more"));
-    assert!(matches!(outcome, SubmitOutcome::Queued));
+    assert!(matches!(outcome, SubmitOutcome::Queued(_)));
     assert_eq!(
         input_rx.try_recv().unwrap(),
         "do more",

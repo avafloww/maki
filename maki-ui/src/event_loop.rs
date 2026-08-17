@@ -933,7 +933,10 @@ impl<'t> EventLoop<'t> {
                 self.dispatch(idx, actions);
                 Ok(json!("started"))
             }
-            SubmitOutcome::Queued => Ok(json!("queued")),
+            SubmitOutcome::Queued(actions) => {
+                self.dispatch(idx, actions);
+                Ok(json!("queued"))
+            }
             SubmitOutcome::Rejected(e) => Err(e.into()),
         }
     }

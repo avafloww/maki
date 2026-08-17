@@ -16,7 +16,7 @@ pub(crate) const NO_SUBAGENT_ERR: &str = "subagent is no longer accepting messag
 
 pub(crate) enum SubmitOutcome {
     Started(Vec<Action>),
-    Queued,
+    Queued(Vec<Action>),
     Rejected(&'static str),
 }
 
@@ -127,18 +127,37 @@ impl App {
             return SubmitOutcome::Rejected(EMPTY_PROMPT_ERR);
         }
         // Submitting text in a subagent tab routes to that subagent's driver
-        // input queue instead of the main agent (AC.8).
+        // input queue instead of the main agent. Mention expansion is a
+        // main-agent concern, so subagent tabs pass text through verbatim.
         if self.is_subagent_focused() {
             return self.submit_to_subagent(msg);
         }
+        // `@`-references rewrite the agent message (build_agent_input expands)
+        // and may surface a session model switch that must take effect before
+        // the run starts. The message is expanded again inside build_agent_input;
+        // this parse is only for the model switch and the empty-message case.
+        let expanded = super::mentions::expand_references(&msg.text);
+        let model_action = expanded.model_switch.map(Action::ChangeModel);
+        // A prompt that reduced to only a standalone model reference (no task
+        // text, no directive) just switches the model without starting a run.
+        if expanded.message.trim().is_empty() {
+            return match model_action {
+                Some(action) => SubmitOutcome::Started(vec![action]),
+                None => SubmitOutcome::Rejected(EMPTY_PROMPT_ERR),
+            };
+        }
         if self.status == Status::Streaming {
             if self.queue_and_notify(msg) {
-                SubmitOutcome::Queued
+                SubmitOutcome::Queued(model_action.into_iter().collect())
             } else {
                 SubmitOutcome::Rejected(NO_QUEUE_ERR)
             }
         } else {
-            SubmitOutcome::Started(self.start_from_queue(&msg))
+            let mut actions = self.start_from_queue(&msg);
+            if let Some(action) = model_action {
+                actions.insert(0, action);
+            }
+            SubmitOutcome::Started(actions)
         }
     }
 
@@ -147,7 +166,7 @@ impl App {
     pub(super) fn submit_or_queue(&mut self, msg: QueuedMessage) -> Vec<Action> {
         match self.submit_prompt(msg) {
             SubmitOutcome::Started(actions) => actions,
-            SubmitOutcome::Queued => vec![],
+            SubmitOutcome::Queued(actions) => actions,
             SubmitOutcome::Rejected(e) => {
                 self.flash(e.into());
                 vec![]
@@ -186,7 +205,7 @@ impl App {
         if input_tx.try_send(msg.text).is_err() {
             return SubmitOutcome::Rejected(NO_SUBAGENT_ERR);
         }
-        SubmitOutcome::Queued
+        SubmitOutcome::Queued(vec![])
     }
 
     /// Deferred path: the agent is busy, so park the message and let
