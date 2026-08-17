@@ -4792,15 +4792,16 @@ fn popup_closes_when_token_removed() {
 #[test]
 fn command_palette_takes_precedence() {
     let (_tmp, mut app) = completion_app();
-    // A live `/compact ` command keeps the palette matched while we type `@`.
-    for c in "/compact ".chars() {
+    // `/thinking ` takes an argument, so the palette stays matched while an
+    // `@` token is added to that argument space.
+    for c in "/thinking ".chars() {
         app.update(Msg::Key(key(KeyCode::Char(c))));
     }
     assert!(app.command_palette.is_active());
     app.update(Msg::Key(key(KeyCode::Char('@'))));
     assert!(
         app.command_palette.is_active(),
-        "palette stays matched on /compact"
+        "palette stays matched on /thinking"
     );
     assert!(
         !app.file_completion.is_active(),
