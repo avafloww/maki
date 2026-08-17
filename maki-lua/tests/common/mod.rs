@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use maki_agent::cancel::{CancelMap, CancelToken, CancelTrigger};
 use maki_agent::tools::test_support::stub_ctx;
-use maki_agent::tools::{ToolContext, ToolOutput, ToolRegistry};
-use maki_agent::{AgentMode, Envelope, EventSender};
+use maki_agent::tools::{ToolContext, ToolRegistry};
+use maki_agent::{AgentMode, Envelope, EventSender, ToolOutput};
 use maki_providers::provider::{BoxFuture, Provider};
 use maki_providers::{
     AgentError, ContentBlock, Message, Model, ModelInfo, ProviderEvent, RequestOptions, Role,
@@ -139,7 +139,8 @@ pub fn ctx_with_provider(
     ctx.cancel = run_cancel;
     ctx.subagent_cancels = Arc::new(CancelMap::new());
     ctx.event_tx = event_tx;
-    ctx.provider = Arc::clone(&provider);
+    let provider_dyn: Arc<dyn Provider> = Arc::clone(&provider);
+    ctx.provider = provider_dyn;
     ctx.model = Arc::new(default_model());
     (ctx, rx, run_trigger)
 }
