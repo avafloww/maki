@@ -28,6 +28,7 @@ use crate::chat::{CANCELLED_TEXT, ChatEventResult, DONE_TEXT, ERROR_TEXT};
 use crate::clipboard::ClipboardState;
 use crate::components::btw_modal::BtwModal;
 use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
+use crate::components::file_completion::{CompletionAction, CompletionItem, FileCompletionMenu, at_token_range};
 use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
 use crate::components::help_modal::HelpModal;
 use crate::components::input::{InputAction, InputBox, Submission};
@@ -205,6 +206,7 @@ pub struct App {
     pub(super) float_mgr: FloatManager,
     pub(super) search_modal: SearchModal,
     pub(super) file_picker: FilePickerModal,
+    pub(super) file_completion: FileCompletionMenu,
     pub(super) permission_prompt: PermissionPrompt,
     pub(super) plan_form: PlanForm,
     pub(super) status_bar: StatusBar,
@@ -302,6 +304,7 @@ impl App {
             float_mgr: FloatManager::new(),
             search_modal: SearchModal::new(),
             file_picker: FilePickerModal::new(),
+            file_completion: FileCompletionMenu::new(),
             permission_prompt: PermissionPrompt::new(),
             plan_form: PlanForm::new(),
             status_bar: StatusBar::new(flash),
@@ -693,6 +696,7 @@ impl App {
                         self.input_box.handle_paste_with_spaces(&path)
                     {
                         self.command_palette.sync(&val);
+                        self.sync_file_completion();
                     }
                     vec![]
                 }
@@ -955,6 +959,7 @@ impl App {
                 self.start_image_paste();
             } else if let InputAction::PaletteSync(val) = self.input_box.handle_key(key) {
                 self.command_palette.sync(&val);
+                self.sync_file_completion();
             }
             return vec![];
         }
@@ -966,6 +971,7 @@ impl App {
             CommandAction::Consumed => return vec![],
             CommandAction::Execute(cmd) => {
                 self.input_box.discard();
+                self.file_completion.close();
                 return self.execute_command(cmd, 0);
             }
             CommandAction::Complete(text) => {
@@ -977,11 +983,30 @@ impl App {
             CommandAction::Passthrough => {}
         }
 
+        if self.file_completion.is_active() {
+            match self.file_completion.handle_key(key) {
+                CompletionAction::Consumed => return vec![],
+                CompletionAction::Close => {
+                    self.file_completion.close();
+                    return vec![];
+                }
+                CompletionAction::Select(item) => {
+                    self.insert_completion(item);
+                    return vec![];
+                }
+                CompletionAction::Passthrough => {}
+            }
+        }
+
         let streaming = self.status == Status::Streaming;
         match self.input_box.handle_key(key) {
-            InputAction::Submit(sub) => self.handle_submit(sub),
+            InputAction::Submit(sub) => {
+                self.file_completion.close();
+                self.handle_submit(sub)
+            }
             InputAction::PaletteSync(val) => {
                 self.command_palette.sync(&val);
+                self.sync_file_completion();
                 vec![]
             }
             InputAction::Passthrough(key) => {
@@ -1025,6 +1050,53 @@ impl App {
             }
             InputAction::ContinueLine | InputAction::None => vec![],
         }
+    }
+
+    /// Opens, refreshes, or closes the `@` completion popup to match the token
+    /// under the input cursor. Suppressed while the command palette or an
+    /// overlay owns the screen.
+    fn sync_file_completion(&mut self) {
+        if self.status == Status::Streaming {
+            self.file_completion.close();
+            return;
+        }
+        let range = {
+            let buf = &self.input_box.buffer;
+            at_token_range(&buf.lines()[buf.y()], buf.x())
+        };
+        let Some((start, end)) = range else {
+            self.file_completion.close();
+            return;
+        };
+        if self.command_palette.is_active() || self.any_overlay_open() {
+            self.file_completion.close();
+            return;
+        }
+
+        let cwd = self.state.session.cwd.clone();
+        let query = {
+            let line = &self.input_box.buffer.lines()[self.input_box.buffer.y()];
+            line[start + 1..end].to_string()
+        };
+        self.file_completion.set_token_byte_range((start, end));
+        if self.file_completion.is_active() {
+            self.file_completion.sync_query(&query);
+        } else {
+            let skills = maki_agent::skills::enumerate_skills(Path::new(&cwd));
+            self.file_completion.open(&cwd, skills, &query, (start, end));
+        }
+    }
+
+    /// Replaces the `@`-token with the chosen completion and drops the popup.
+    fn insert_completion(&mut self, item: CompletionItem) {
+        let replacement = item.replacement();
+        let (start, end) = self.file_completion.token_byte_range();
+        self.file_completion.close();
+        self.input_box
+            .buffer
+            .replace_range_on_current_line(start, end, &replacement);
+        let val = self.input_box.buffer.value();
+        self.command_palette.sync(&val);
     }
 
     /// Typing path for a focused subagent tab: characters go into the shared
@@ -1752,11 +1824,20 @@ impl App {
             | self.usage_modal.poll(&self.usage_slot)
             | self.hints.poll(self.hint_reader.load_full())
             | self.tick_file_picker()
+            | self.tick_file_completion()
             | Dirty::any(self.chats.iter_mut().map(Chat::tick))
     }
 
     fn tick_file_picker(&mut self) -> Dirty {
         let (dirty, flash) = self.file_picker.tick();
+        if let Some(flash) = flash {
+            self.status_bar.flash(flash);
+        }
+        dirty
+    }
+
+    fn tick_file_completion(&mut self) -> Dirty {
+        let (dirty, flash) = self.file_completion.tick();
         if let Some(flash) = flash {
             self.status_bar.flash(flash);
         }
@@ -1777,6 +1858,7 @@ impl App {
             self.selection_state
                 .as_ref()
                 .map_or(Cadence::IDLE, SelectionState::cadence),
+            self.file_completion.cadence(),
             Cadence::any(self.chats.iter().map(Chat::cadence)),
         ])
     }
@@ -1855,6 +1937,7 @@ impl App {
         }
         if let InputAction::PaletteSync(val) = self.input_box.handle_paste(text) {
             self.command_palette.sync(&val);
+            self.sync_file_completion();
         }
     }
 
