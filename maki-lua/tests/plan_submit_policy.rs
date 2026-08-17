@@ -9,9 +9,9 @@
 
 use std::sync::Arc;
 
-use maki_agent::tools::test_support::stub_ctx;
-use maki_agent::tools::ToolRegistry;
 use maki_agent::AgentMode;
+use maki_agent::tools::ToolRegistry;
+use maki_agent::tools::test_support::stub_ctx;
 use maki_lua::PluginHost;
 use serde_json::json;
 
@@ -29,7 +29,11 @@ fn plan_submit_rejected_outside_plan_mode() {
     // uses to gate without a UI). `current_mode() ~= "plan"` fires the gate
     // before `maki.ui.action` is ever reached, so no UI lane is needed.
     let prelude = "maki.api.mode.get = function() return 'build' end\n\n";
-    _host.load_source("plan_submit_policy", &format!("{prelude}\n{PLAN_SUBMIT_SRC}"))
+    _host
+        .load_source(
+            "plan_submit_policy",
+            &format!("{prelude}\n{PLAN_SUBMIT_SRC}"),
+        )
         .unwrap();
 
     let ctx = stub_ctx(&AgentMode::Build);

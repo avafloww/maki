@@ -484,7 +484,9 @@ async fn session(
         }
         None => DEFAULT_SESSION_AUDIENCE,
     };
-    let inherit_provider: bool = opts.get::<Option<bool>>("inherit_provider")?.unwrap_or(false);
+    let inherit_provider: bool = opts
+        .get::<Option<bool>>("inherit_provider")?
+        .unwrap_or(false);
     let fast: bool = opts
         .get::<Option<bool>>("fast")?
         .unwrap_or(agent_ctx.opts.fast);
@@ -495,9 +497,7 @@ async fn session(
         try_pair!(build_session_provider(&model_spec, inherit_provider, &agent_ctx).await);
     // A standalone task shows its model via SubagentInfo on the header;
     // a dispatching caller (batch) gets the same thing as a live annotation.
-    if !silent
-        && let Some(sink) = &agent_ctx.live_sink
-    {
+    if !silent && let Some(sink) = &agent_ctx.live_sink {
         let _ = sink.send(ToolLive::Annotation(model.spec()));
     }
 
@@ -1019,7 +1019,7 @@ async fn prompt(
     let input_tx = this.input_tx.clone();
     let done_rx = this.done_rx.clone();
     drop(this);
-if let Err(e) = input_tx.send(message) {
+    if let Err(e) = input_tx.send(message) {
         return Ok((None, Some(e.to_string())));
     }
     match done_rx.recv_async().await {
@@ -1212,7 +1212,10 @@ mod tests {
         ))
         .unwrap();
 
-        assert!(Arc::ptr_eq(&provider, &parent_provider), "must reuse parent provider");
+        assert!(
+            Arc::ptr_eq(&provider, &parent_provider),
+            "must reuse parent provider"
+        );
         assert_eq!(model.spec(), parent_model, "must reuse parent model");
     }
 

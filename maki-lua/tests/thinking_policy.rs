@@ -13,10 +13,10 @@ use std::time::Duration;
 use maki_agent::tools::ToolRegistry;
 use maki_lua::PluginHost;
 use maki_providers::{Effort, Model, ThinkingConfig};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 mod common;
-use common::{canned_reply, ctx_with_provider, exec_tool, CannedProvider};
+use common::{CannedProvider, canned_reply, ctx_with_provider, exec_tool};
 
 const PROBE_SRC: &str = r#"
 maki.api.register_tool({
@@ -76,7 +76,13 @@ fn thinking_effort_reaches_the_model(thinking: Value, expected: ThinkingConfig) 
     let provider = Arc::new(CannedProvider::new(vec![canned_reply("ok")]));
     let (ctx, _rx, _trigger) = ctx_with_provider(Arc::clone(&provider));
 
-    exec_tool(&reg, &ctx, "probe_thinking", json!({ "thinking": thinking })).unwrap();
+    exec_tool(
+        &reg,
+        &ctx,
+        "probe_thinking",
+        json!({ "thinking": thinking }),
+    )
+    .unwrap();
     assert_eq!(wait_capture(&provider), expected);
 }
 
@@ -91,7 +97,10 @@ fn thinking_clamped_to_off_for_non_supporting_model() {
     let provider = Arc::new(CannedProvider::new(vec![canned_reply("ok")]));
     let (mut ctx, _rx, _trigger) = ctx_with_provider(Arc::clone(&provider));
     let non_thinking = Arc::new(Model::from_spec("copilot/gpt-5-mini").unwrap());
-    assert!(!non_thinking.supports_thinking(), "fixture model must not support thinking");
+    assert!(
+        !non_thinking.supports_thinking(),
+        "fixture model must not support thinking"
+    );
     ctx.model = non_thinking;
 
     exec_tool(&reg, &ctx, "probe_thinking", json!({ "thinking": "high" })).unwrap();

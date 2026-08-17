@@ -12,10 +12,10 @@ use std::sync::Arc;
 
 use maki_agent::tools::{ToolContext, ToolRegistry};
 use maki_lua::PluginHost;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 mod common;
-use common::{canned_reply, ctx_with_provider, exec_tool_text, tool_names, CannedProvider};
+use common::{CannedProvider, canned_reply, ctx_with_provider, exec_tool_text, tool_names};
 
 const TASK_PLUGIN_SRC: &str = include_str!("../../plugins/task/init.lua");
 const PLAN_REVIEWER_ONLY_ERR: &str = "plan_reviewer is only available in plan mode";
@@ -91,7 +91,11 @@ fn reviewer_input(description: &str) -> Value {
 /// `:prompt`) against the canned provider. `:prompt` blocks on the driver's
 /// `done_rx` and `smol::block_on` pumps the background driver to completion, the
 /// same pattern the automode suite proves. No `task_spawn`/`task_get` polling.
-fn run_reviewer(reg: &ToolRegistry, ctx: &ToolContext, description: &str) -> Result<String, String> {
+fn run_reviewer(
+    reg: &ToolRegistry,
+    ctx: &ToolContext,
+    description: &str,
+) -> Result<String, String> {
     exec_tool_text(reg, ctx, "task", reviewer_input(description))
 }
 
@@ -101,14 +105,19 @@ fn plan_reviewer_audits_plan_and_returns_verdict() {
 
     let pass = Arc::new(CannedProvider::new(vec![canned_reply("VERDICT: pass")]));
     let (ctx_pass, _rx, _trigger) = ctx_with_provider(Arc::clone(&pass));
-    let text = run_reviewer(&reg, &ctx_pass, "pass-review").expect("reviewer must run in plan mode");
-    assert!(text.contains("VERDICT: pass"), "pass verdict must surface: {text}");
+    let text =
+        run_reviewer(&reg, &ctx_pass, "pass-review").expect("reviewer must run in plan mode");
+    assert!(
+        text.contains("VERDICT: pass"),
+        "pass verdict must surface: {text}"
+    );
 
-    let fail = Arc::new(CannedProvider::new(vec![
-        canned_reply("VERDICT: fail\n- finding: missing AC mapping"),
-    ]));
+    let fail = Arc::new(CannedProvider::new(vec![canned_reply(
+        "VERDICT: fail\n- finding: missing AC mapping",
+    )]));
     let (ctx_fail, _rx, _trigger) = ctx_with_provider(Arc::clone(&fail));
-    let text = run_reviewer(&reg, &ctx_fail, "fail-review").expect("reviewer must run in plan mode");
+    let text =
+        run_reviewer(&reg, &ctx_fail, "fail-review").expect("reviewer must run in plan mode");
     assert!(
         text.contains("VERDICT: fail"),
         "fail verdict with findings must surface: {text}"

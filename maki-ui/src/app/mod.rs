@@ -1184,9 +1184,8 @@ impl App {
             if let Some(reply) = reply {
                 // Header the reply with the task id so it reads as subagent
                 // output rather than a message typed by the user.
-                let text = format!(
-                    "{SUBAGENT_REPLY_HEADER}{tool_use_id}{SUBAGENT_REPLY_SUFFIX}{reply}"
-                );
+                let text =
+                    format!("{SUBAGENT_REPLY_HEADER}{tool_use_id}{SUBAGENT_REPLY_SUFFIX}{reply}");
                 self.queue_and_notify(QueuedMessage {
                     text,
                     images: Vec::new(),

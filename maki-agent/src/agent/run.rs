@@ -1110,7 +1110,7 @@ mod tests {
             trigger.cancel();
 
             let mut history = History::new(Vec::new());
-let (agent, event_rx) = make_agent(HangingProvider, &mut history);
+            let (agent, event_rx) = make_agent(HangingProvider, &mut history);
             let mut agent = agent.with_cancel(cancel);
 
             assert_eq!(

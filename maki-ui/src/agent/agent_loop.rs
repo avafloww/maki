@@ -114,20 +114,16 @@ impl AgentLoop {
         prompt_slots: &maki_agent::prompt::ResolvedSlots,
         model: &Model,
     ) -> String {
-        let mut system = self
-            .system_prompt
-            .override_text
-            .clone()
-            .unwrap_or_else(|| {
-                agent::build_system_prompt(
-                    &self.vars,
-                    &self.lua_handle.mode_registry(),
-                    mode,
-                    &self.instructions.text,
-                    prompt_slots,
-                    model,
-                )
-            });
+        let mut system = self.system_prompt.override_text.clone().unwrap_or_else(|| {
+            agent::build_system_prompt(
+                &self.vars,
+                &self.lua_handle.mode_registry(),
+                mode,
+                &self.instructions.text,
+                prompt_slots,
+                model,
+            )
+        });
         if let Some(append) = &self.system_prompt.append_text {
             system.push('\n');
             system.push_str(append);
@@ -335,7 +331,8 @@ impl AgentLoop {
     /// the model. Everything else matches the live prompt.
     fn publish_btw_system(&self, prompt_slots: &maki_agent::prompt::ResolvedSlots) {
         let slot = self.model_slot.load();
-        let system = self.build_system_with(&maki_agent::AgentMode::Build, prompt_slots, &slot.model);
+        let system =
+            self.build_system_with(&maki_agent::AgentMode::Build, prompt_slots, &slot.model);
         self.btw_system.store(Arc::new(system));
     }
 

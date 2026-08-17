@@ -153,7 +153,7 @@ async fn handle_request(
         "initialize" => Ok(AgentResponse::InitializeResponse(
             methods::initialize_response(),
         )),
-"session/new" => new_session(srv, raw, params).await,
+        "session/new" => new_session(srv, raw, params).await,
         "session/load" => load_session(srv, raw, params).await,
         "session/prompt" => match handle_prompt(srv, raw, &id) {
             Ok(()) => return,
