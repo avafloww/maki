@@ -15,7 +15,7 @@ use maki_lua::PluginHost;
 use serde_json::{json, Value};
 
 mod common;
-use common::{canned_reply, ctx_with_provider, exec_tool, tool_names, CannedProvider};
+use common::{canned_reply, ctx_with_provider, exec_tool_text, tool_names, CannedProvider};
 
 const TASK_PLUGIN_SRC: &str = include_str!("../../plugins/task/init.lua");
 const PLAN_REVIEWER_ONLY_ERR: &str = "plan_reviewer is only available in plan mode";
@@ -93,8 +93,7 @@ fn reviewer_input(description: &str) -> Value {
 /// `done_rx` and `smol::block_on` pumps the background driver to completion, the
 /// same pattern the automode suite proves. No `task_spawn`/`task_get` polling.
 fn run_reviewer(reg: &ToolRegistry, ctx: &ToolContext, description: &str) -> Result<String, String> {
-    let out = exec_tool(reg, ctx, "task", reviewer_input(description))?;
-    Ok(out.to_string())
+    exec_tool_text(reg, ctx, "task", reviewer_input(description))
 }
 
 #[test]

@@ -24,14 +24,13 @@ const GATE_ERR: &str = "plan_submit is only available in plan mode";
 #[test]
 fn plan_submit_rejected_outside_plan_mode() {
     let reg = Arc::new(ToolRegistry::new());
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let _host = PluginHost::new(Arc::clone(&reg)).unwrap();
     // Stub the mode to a non-plan id (the same pattern the task_policy suite
     // uses to gate without a UI). `current_mode() ~= "plan"` fires the gate
     // before `maki.ui.action` is ever reached, so no UI lane is needed.
     let prelude = "maki.api.mode.get = function() return 'build' end\n\n";
-    host.load_source("plan_submit_policy", &format!("{prelude}\n{PLAN_SUBMIT_SRC}"))
+    _host.load_source("plan_submit_policy", &format!("{prelude}\n{PLAN_SUBMIT_SRC}"))
         .unwrap();
-    drop(host);
 
     let ctx = stub_ctx(&AgentMode::Build);
     let err = exec_tool(&reg, &ctx, "plan_submit", json!({})).unwrap_err();

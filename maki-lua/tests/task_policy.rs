@@ -729,10 +729,12 @@ fn probe_real(reg: &ToolRegistry, ctx: &ToolContext) -> Value {
 
 /// Run the blocking `task` composite (which drives the real `maki.agent.session`
 /// via `:prompt`) against the canned provider. Mirrors the passing automode
-/// pattern: `:prompt` blocks on the driver's `done_rx`, and `smol::block_on` pumps
-/// the background driver to completion. No `task_spawn`/`task_get` polling.
-fn run_task(reg: &ToolRegistry, ctx: &ToolContext, input: Value) -> Result<Value, String> {
-    common::exec_tool(reg, ctx, TASK_TOOL, input)
+/// pattern: `:prompt` blocks on the driver's `done_rx`, and `smol::block_on`
+/// pumps the background driver to completion. No `task_spawn`/`task_get` polling.
+/// Returns the raw tool output text: the plain path yields prose, the
+/// structured path yields a JSON string (parsed by the caller when needed).
+fn run_task(reg: &ToolRegistry, ctx: &ToolContext, input: Value) -> Result<String, String> {
+    common::exec_tool_text(reg, ctx, TASK_TOOL, input)
 }
 
 #[test]
@@ -796,7 +798,8 @@ fn task_policy_structured_output_real_driver() {
     let (reg, _host) = load_real_driver_host("build");
     let out = run_task(&reg, &ctx, task_input(SCENARIO_HAPPY, Some(answer_schema())))
         .expect("structured task failed");
-    assert_eq!(out, json!({ "answer": "42" }));
+    let parsed: Value = serde_json::from_str(&out).expect("result is not json");
+    assert_eq!(parsed, json!({ "answer": "42" }));
 
     // The structured_output local tool was offered to the model.
     let names = common::tool_names(&provider.captured_tools()[0]);
