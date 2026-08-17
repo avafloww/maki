@@ -71,7 +71,7 @@ fn scan_skill_dir(dir: &Path, skills: &mut HashMap<String, SkillInfo>) {
         return;
     };
     for entry in entries.flatten() {
-        if !entry.file_type().is_some_and(|ft| ft.is_dir()) {
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
             continue;
         }
         let skill_dir = entry.path();
