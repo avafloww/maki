@@ -4690,7 +4690,7 @@ fn write_completion_fixture(cwd: &Path, rel: &str, content: &str) {
 /// Lets the completion popup's walker finish and the popup go visible.
 fn converge_completion(app: &mut App) {
     for _ in 0..40 {
-        app.file_completion.tick();
+        let _ = app.file_completion.tick();
         std::thread::yield_now();
     }
 }

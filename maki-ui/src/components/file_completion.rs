@@ -36,10 +36,7 @@ pub fn at_token_range(line: &str, cursor_chars: usize) -> Option<(usize, usize)>
         if bytes[i] != b'@' {
             continue;
         }
-        let token_start = before[..i]
-            .chars()
-            .next_back()
-            .map_or(true, char::is_whitespace);
+        let token_start = before[..i].chars().next_back().is_none_or(char::is_whitespace);
         if token_start {
             return Some((i, cursor_byte));
         }
@@ -468,7 +465,7 @@ fn row_line<'a>(c: &Candidate, max_width: usize, selected: bool, t: &'a theme::T
     let text = c.item.display();
     let mut must_break = false;
     let mut spans = vec![Span::styled("   ", base)];
-    let mut remaining = max_width.saturating_sub(3);
+    let remaining = max_width.saturating_sub(3);
 
     if let CompletionItem::File { .. } = c.item {
         let mut in_match = false;
