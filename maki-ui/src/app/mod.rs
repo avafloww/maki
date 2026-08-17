@@ -6,7 +6,6 @@
 
 mod btw;
 mod image_paste;
-pub(crate) mod mentions;
 pub(crate) mod mode;
 mod mouse;
 mod queue;
@@ -64,7 +63,8 @@ use maki_agent::{
 };
 use maki_config::{ModelPolicy, UiConfig};
 use maki_lua::{
-    BuiltinAction, EventHandle, HintReader, HintSnapshot, KeymapReader, LuaCommandReader, WinView,
+    BuiltinAction, CompletionCtx, EventHandle, HintReader, HintSnapshot, KeymapReader,
+    LuaCommandReader, WinView,
 };
 use maki_providers::{ContentBlock, Message, Model, Role, ThinkingConfig, add_cost};
 use maki_storage::StateDir;
@@ -1087,15 +1087,18 @@ impl App {
         if self.file_completion.is_active() {
             self.file_completion.sync_query(&query);
         } else {
-            let skills = maki_agent::skills::enumerate_skills(Path::new(&cwd));
             let models = self
                 .available_models
                 .load_full()
                 .map(|arc| (*arc).clone())
                 .unwrap_or_default();
-            let plan_mode = matches!(self.state.mode, Mode::Plan);
+            let ctx = CompletionCtx {
+                mode: self.state.mode.id_key(),
+                models,
+            };
+            let items = self.lua_event_handle.collect_completion_items(&ctx);
             self.file_completion
-                .open(&cwd, skills, models, plan_mode, &query, (start, end));
+                .open(&cwd, items, &query, (start, end));
         }
     }
 
@@ -1673,6 +1676,15 @@ impl App {
             name.to_string()
         } else {
             format!("{name} {args}")
+        };
+        // Same single-expansion rule as submit_prompt: `@`-references in the
+        // prompt args are rewritten once here, before the agent sees them.
+        let display_text = match self.lua_event_handle.expand_references(&display_text) {
+            Ok(text) => text,
+            Err(e) => {
+                self.flash(e);
+                return vec![];
+            }
         };
         let mut input = self.build_agent_input(&QueuedMessage {
             text: display_text.clone(),

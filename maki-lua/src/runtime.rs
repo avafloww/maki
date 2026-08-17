@@ -34,6 +34,7 @@ use crate::api::keymap::{KeymapStore, KeymapWriter};
 use crate::api::options::{PluginOptionSpecs, PluginOpts, collect_plugin_options};
 use crate::api::slot::SlotStore;
 use crate::api::tool::{LuaTool, PendingTool, PendingTools, PermissionScopeSpec, ToolCallReply};
+use crate::api::completion::{self, CompletionCtx, ItemSpec};
 use crate::api::ui::HintStore;
 use crate::api::ui::buf::{BufHandle, BufferStore};
 use crate::api::util::command::{CommandHandlerMap, HintWriter, publish_command_snapshot};
@@ -213,6 +214,19 @@ pub enum Request {
         live: LiveCtx,
         ctx: Box<LuaCtx>,
         reply: flume::Sender<()>,
+    },
+    /// Gather `@`-completion candidates from every registered source. Sent by
+    /// the UI when the popup opens; answered synchronously on the Lua thread.
+    CollectCompletionItems {
+        ctx: CompletionCtx,
+        reply: flume::Sender<Vec<ItemSpec>>,
+    },
+    /// Rewrite a finished prompt by dispatching each `@prefix:value` token to
+    /// its registered expander. Sent by the UI at submit; an `Err` flashes and
+    /// aborts the run.
+    ExpandReferences {
+        text: String,
+        reply: flume::Sender<Result<String, String>>,
     },
 }
 
@@ -1414,6 +1428,7 @@ impl LuaRuntime {
         lua.set_app_data(hint_writer);
         lua.set_app_data(Arc::clone(&registry));
         lua.set_app_data(Arc::clone(&modes));
+        completion::install(&lua);
 
         let plugins: PluginMap = Rc::new(RefCell::new(HashMap::new()));
         {
@@ -1881,6 +1896,7 @@ impl LuaRuntime {
                 writer.publish(entries);
             }
         }
+        completion::clear_plugin(&self.lua, plugin);
     }
 
     fn evict_warm(&self, tool_use_id: &str) {
@@ -2878,6 +2894,18 @@ pub fn spawn(
                                     }
                                 }).detach();
                             }
+                        }
+                        Request::CollectCompletionItems { ctx, reply } => {
+                            let items =
+                                run_detached(&rt.lua, completion::collect_completion_items(&rt.lua, &ctx))
+                                    .await;
+                            let _ = reply.send(items);
+                        }
+                        Request::ExpandReferences { text, reply } => {
+                            let res =
+                                run_detached(&rt.lua, completion::expand_references(&rt.lua, &text))
+                                    .await;
+                            let _ = reply.send(res);
                         }
                     }
                 }

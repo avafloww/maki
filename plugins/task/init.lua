@@ -62,6 +62,7 @@ Notes:
 2. The agent's result is not visible to the user. Summarize it in your response.
 3. Each invocation starts fresh - inline any needed context into the prompt.
 4. Tell it to return concise summaries with file:line refs, not full file contents.
+5. If a `@model:` reference next to a subagent requests an exact model but the `model` parameter is not in this tool's schema (the `allow_model` option is off), the model is unavailable. Do not silently substitute another model: if the `question` tool is loaded, ask the user how to proceed; otherwise reject the request and ask the user to clarify.
 ]]
 
 -- Read-only plan reviewer directive: a verbatim port of pi-luna's reviewer
@@ -559,4 +560,57 @@ maki.api.register_tool({
   handler = handler,
   header = header,
   restore = restore,
+})
+
+local SUBAGENT_TYPES = {
+  research = "Read-only search and summarize",
+  general = "Can modify files",
+  plan_reviewer = "Read-only plan audit (plan mode)",
+}
+local SUBAGENT_ORDER = { "research", "general", "plan_reviewer" }
+
+maki.api.register_completion_source("subagent", {
+  get_items = function(ctx)
+    local mode = ctx.mode or "build"
+    local items = {}
+    for _, name in ipairs(SUBAGENT_ORDER) do
+      local include
+      if mode == "plan" then
+        include = name ~= "general"
+      else
+        include = name ~= "plan_reviewer"
+      end
+      if include then
+        items[#items + 1] = {
+          label = "subagent:" .. name,
+          kind = "subagent",
+          insertion = "@subagent:" .. name .. " ",
+          description = SUBAGENT_TYPES[name],
+        }
+      end
+    end
+    return items
+  end,
+})
+
+local function valid_subagent_type(value)
+  return value == "research" or value == "general" or value == "plan_reviewer"
+end
+
+local function expand_subagent(ref)
+  local value = ref.value
+  if not valid_subagent_type(value) then
+    return nil, "unknown subagent type: " .. value
+  end
+  return "<subagent:" .. value .. ">", nil
+end
+
+maki.api.register_expander("subagent", expand_subagent)
+maki.api.register_expander("a", expand_subagent)
+
+-- `after_instructions` is a system-only slot, so this teaches the main agent
+-- what the token means without costing subagent prompts any tokens.
+maki.api.register_prompt_hint({
+  slot = "after_instructions",
+  content = "A `<subagent:type>` token in a user message (typed as `@subagent:type`) is a delegation request: launch a subagent with the task tool, setting `subagent_type` to `type`.",
 })

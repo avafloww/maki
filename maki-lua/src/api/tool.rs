@@ -28,6 +28,7 @@ use mlua::{
 };
 use serde_json::{Value, json};
 
+use crate::api::completion::add_completion_fns;
 use crate::api::options::{PluginOpts, register_options__doc, register_options__register};
 use crate::api::ui::buf::{BufHandle, line_to_lua};
 use crate::api::util::command::{
@@ -925,7 +926,8 @@ pub(crate) fn create_api_table(
     ui_action_tx: Option<flume::Sender<UiAction>>,
 ) -> LuaResult<Table> {
     let t = lua.create_table()?;
-    add_tool_fns(&t, lua, pending, plugin, opts)?;
+    add_tool_fns(&t, lua, pending, Arc::clone(&plugin), opts)?;
+    add_completion_fns(&t, lua, plugin)?;
     run_command__register(&t, lua, ui_action_tx)?;
     Ok(t)
 }

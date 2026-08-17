@@ -194,9 +194,10 @@ impl App {
     }
 
     pub(crate) fn build_agent_input(&self, msg: &QueuedMessage) -> AgentInput {
-        let expanded = super::mentions::expand_references(&msg.text);
+        // `msg.text` is already `@`-expanded at submit time (`submit_prompt`);
+        // no second expansion here.
         AgentInput {
-            message: expanded.message,
+            message: msg.text.clone(),
             mode: self.agent_mode(),
             images: msg.images.clone(),
             preamble: Vec::new(),

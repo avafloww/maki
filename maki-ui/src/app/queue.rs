@@ -17,7 +17,7 @@ pub(crate) const NO_SUBAGENT_ERR: &str = "subagent is no longer accepting messag
 pub(crate) enum SubmitOutcome {
     Started(Vec<Action>),
     Queued(Vec<Action>),
-    Rejected(&'static str),
+    Rejected(String),
 }
 
 #[derive(Default)]
@@ -124,40 +124,32 @@ impl App {
     /// commands, `exit`, `!`) is the caller's job, or skipped on purpose.
     pub(crate) fn submit_prompt(&mut self, msg: QueuedMessage) -> SubmitOutcome {
         if msg.text.trim().is_empty() && msg.images.is_empty() {
-            return SubmitOutcome::Rejected(EMPTY_PROMPT_ERR);
+            return SubmitOutcome::Rejected(EMPTY_PROMPT_ERR.into());
         }
         // Submitting text in a subagent tab routes to that subagent's driver
-        // input queue instead of the main agent. Mention expansion is a
+        // input queue instead of the main agent. `@`-reference expansion is a
         // main-agent concern, so subagent tabs pass text through verbatim.
         if self.is_subagent_focused() {
             return self.submit_to_subagent(msg);
         }
-        // `@`-references rewrite the agent message (build_agent_input expands)
-        // and may surface a session model switch that must take effect before
-        // the run starts. The message is expanded again inside build_agent_input;
-        // this parse is only for the model switch and the empty-message case.
-        let expanded = super::mentions::expand_references(&msg.text);
-        let model_action = expanded.model_switch.map(Action::ChangeModel);
-        // A prompt that reduced to only a standalone model reference (no task
-        // text, no directive) just switches the model without starting a run.
-        if expanded.message.trim().is_empty() {
-            return match model_action {
-                Some(action) => SubmitOutcome::Started(vec![action]),
-                None => SubmitOutcome::Rejected(EMPTY_PROMPT_ERR),
-            };
-        }
+        // Expand `@prefix:value` tokens once, here, via the registered Lua
+        // expanders. A rejected expander flashes and aborts the run. The
+        // expanded text is stored so `build_agent_input` reuses it without
+        // re-expanding.
+        let expanded = match self.lua_event_handle.expand_references(&msg.text) {
+            Ok(text) => text,
+            Err(e) => return SubmitOutcome::Rejected(e),
+        };
+        let mut msg = msg;
+        msg.text = expanded;
         if self.status == Status::Streaming {
             if self.queue_and_notify(msg) {
-                SubmitOutcome::Queued(model_action.into_iter().collect())
+                SubmitOutcome::Queued(vec![])
             } else {
-                SubmitOutcome::Rejected(NO_QUEUE_ERR)
+                SubmitOutcome::Rejected(NO_QUEUE_ERR.into())
             }
         } else {
-            let mut actions = self.start_from_queue(&msg);
-            if let Some(action) = model_action {
-                actions.insert(0, action);
-            }
-            SubmitOutcome::Started(actions)
+            SubmitOutcome::Started(self.start_from_queue(&msg))
         }
     }
 
@@ -168,7 +160,7 @@ impl App {
             SubmitOutcome::Started(actions) => actions,
             SubmitOutcome::Queued(actions) => actions,
             SubmitOutcome::Rejected(e) => {
-                self.flash(e.into());
+                self.flash(e);
                 vec![]
             }
         }
@@ -187,7 +179,7 @@ impl App {
     /// that subagent's chat. Images cannot ride the text-only driver queue.
     fn submit_to_subagent(&mut self, msg: QueuedMessage) -> SubmitOutcome {
         if !msg.images.is_empty() {
-            return SubmitOutcome::Rejected(NO_SUBAGENT_IMAGE_ERR);
+            return SubmitOutcome::Rejected(NO_SUBAGENT_IMAGE_ERR.into());
         }
         let Some(subagent_id) = self.chats[self.active_chat].subagent_id.clone() else {
             return SubmitOutcome::Started(self.start_from_queue(&msg));
@@ -199,11 +191,11 @@ impl App {
         else {
             // Live-channel gone (subagent finished); never silently reroute to
             // the main agent. Surface the rejection via the caller's flash.
-            return SubmitOutcome::Rejected(NO_SUBAGENT_ERR);
+            return SubmitOutcome::Rejected(NO_SUBAGENT_ERR.into());
         };
         self.chats[self.active_chat].show_user_message(msg.text.clone());
         if input_tx.try_send(msg.text).is_err() {
-            return SubmitOutcome::Rejected(NO_SUBAGENT_ERR);
+            return SubmitOutcome::Rejected(NO_SUBAGENT_ERR.into());
         }
         SubmitOutcome::Queued(vec![])
     }

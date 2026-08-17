@@ -16,16 +16,18 @@ pub use api::util::command::{
 };
 pub use docs::{DocKind, FnDoc, ModuleDoc, ParamDoc, api_docs};
 pub use error::PluginError;
-pub use loader::{EventHandle, PluginHost};
+pub use loader::{EventHandle, PluginHost, TestCompletionBackend};
 pub use plugin_permissions::{Permission, PluginPermissions};
 pub use runtime::{KILL_GRACE, RestoreItem, WARM_TOOL_CAP};
 
+pub use api::completion::{CompletionCtx, ItemSpec, at_is_token_start};
+
 pub mod test_support {
-    use crate::KeymapReader;
     use crate::api::keymap::{KeymapEntry, KeymapWriter};
     use crate::api::util::command::{
         HintEntries, HintReader, HintWriter, LuaCommandInfo, LuaCommandReader, LuaCommandWriter,
     };
+    use crate::{EventHandle, KeymapReader, TestCompletionBackend};
 
     pub struct LuaCommandWriterHandle(LuaCommandWriter);
 
@@ -112,5 +114,14 @@ pub mod test_support {
         let (writer, reader) = KeymapWriter::new();
         writer.publish(entries);
         reader
+    }
+
+    /// An `EventHandle` backed by an in-memory completion/expander store, plus
+    /// the store handle so tests can seed sources and expanders. Use this for
+    /// `@`-completion and submit-expansion tests that run without a plugin host.
+    pub fn event_handle_with_completion() -> (EventHandle, std::sync::Arc<TestCompletionBackend>) {
+        let backend = std::sync::Arc::new(TestCompletionBackend::new());
+        let handle = EventHandle::with_completion_for_test(std::sync::Arc::clone(&backend));
+        (handle, backend)
     }
 }

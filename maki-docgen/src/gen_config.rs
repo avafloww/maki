@@ -136,6 +136,31 @@ fn write_theme_section(out: &mut String) {
          the fallback.\n"
     )
     .unwrap();
+    writeln!(
+        out,
+        "Theme files can also carry an optional `[completion]` table that \
+         recolors the `@` reference popup per candidate kind. Each key takes \
+         the same style definition as other UI styles: `fg` and `bg` (a \
+         palette color name or a `#rrggbb` value) plus a `modifiers` array \
+         (`\"bold\"`, `\"italic\"`, `\"underlined\"`).\n"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| Key | Meaning | Falls back to |\n|---|---|---|\n\
+         | `file` | File and directory candidates | `accent` |\n\
+         | `skill` | Skill references | `todo_completed` |\n\
+         | `subagent` | Subagent references | `keybind_key` |\n\
+         | `model` | Model references | `diff_new` |\n"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Kinds registered by your own completion sources (via \
+        `maki.api.register_completion_source`) fall back to the plain item \
+        style until your theme defines them.\n"
+    )
+    .unwrap();
 }
 
 fn write_tool_output_section(out: &mut String) {

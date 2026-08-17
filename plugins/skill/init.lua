@@ -207,3 +207,38 @@ maki.api.register_tool({
     }
   end,
 })
+
+maki.api.register_completion_source("skill", {
+  get_items = function(_ctx)
+    local skills = discover_skills()
+    local items = {}
+    for name, skill in pairs(skills) do
+      items[#items + 1] = {
+        label = "skill:" .. name,
+        kind = "skill",
+        insertion = "@skill:" .. name,
+        description = skill.description or "",
+      }
+    end
+    return items
+  end,
+})
+
+local function expand_skill(ref)
+  local value = ref.value
+  local skills = discover_skills()
+  if skills[value] then
+    return "<skill:" .. value .. ">", nil
+  end
+  return nil, "unknown skill: " .. value
+end
+
+maki.api.register_expander("skill", expand_skill)
+maki.api.register_expander("s", expand_skill)
+
+-- `after_instructions` is a system-only slot, so this teaches the main agent
+-- what the token means without costing subagent prompts any tokens.
+maki.api.register_prompt_hint({
+  slot = "after_instructions",
+  content = "A `<skill:name>` token in a user message (typed as `@skill:name`) requests that skill: load it with the skill tool before answering.",
+})

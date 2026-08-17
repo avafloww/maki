@@ -9,6 +9,7 @@ use include_dir::{Dir, include_dir};
 use maki_agent::tools::ToolRegistry;
 use maki_config::{PluginsConfig, RawConfig};
 
+use crate::api::completion::{CompletionCtx, ItemSpec};
 use crate::api::keymap::KeymapReader;
 use crate::api::options::{PluginOptionSpecs, PluginOpts};
 use crate::api::util::command::{HintReader, LuaCommandReader, UiAction};
@@ -90,6 +91,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
     BundledPlugin {
         name: "task",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/task"),
+    },
+    BundledPlugin {
+        name: "model",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/model"),
     },
     BundledPlugin {
         name: "thinking",
@@ -431,6 +436,7 @@ impl PluginHost {
             tx: self.inner.tx.clone(),
             prio_tx: self.inner.prio_tx.clone(),
             modes: Arc::clone(&self.inner.modes),
+            completion: None,
         }
     }
 
@@ -464,6 +470,91 @@ pub struct EventHandle {
     /// Shared mode registry; `None`-less so plugins and the Rust agent see
     /// the same definitions. Test handles use an empty builtin set.
     modes: Arc<maki_agent::ModeRegistry>,
+    /// In-memory stand-in for the Lua completion/expander stores, used only by
+    /// tests that build an `App` without a running plugin host. `None` in
+    /// production, where the two RPC methods below talk to the Lua thread.
+    completion: Option<Arc<TestCompletionBackend>>,
+}
+
+/// In-memory completion/expander store for tests with no running Lua thread.
+/// Mirrors what the Lua-side stores offer, so `App` code is identical between
+/// production (RPC) and tests (direct lookup).
+pub struct TestCompletionBackend {
+    sources: std::sync::Mutex<HashMap<String, Vec<ItemSpec>>>,
+    expanders: std::sync::Mutex<ExpanderMap>,
+}
+
+type ExpanderFn = Box<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+type ExpanderMap = HashMap<String, ExpanderFn>;
+
+impl TestCompletionBackend {
+    pub fn new() -> Self {
+        Self {
+            sources: std::sync::Mutex::new(HashMap::new()),
+            expanders: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn register_source(&self, prefix: &str, items: Vec<ItemSpec>) {
+        self.sources
+            .lock()
+            .unwrap()
+            .insert(prefix.to_string(), items);
+    }
+
+    pub fn remove_source(&self, prefix: &str) {
+        self.sources.lock().unwrap().remove(prefix);
+    }
+
+    pub fn register_expander<F>(&self, prefix: &str, f: F)
+    where
+        F: Fn(&str) -> Result<String, String> + Send + Sync + 'static,
+    {
+        self.expanders
+            .lock()
+            .unwrap()
+            .insert(prefix.to_string(), Box::new(f));
+    }
+
+    pub fn remove_expander(&self, prefix: &str) {
+        self.expanders.lock().unwrap().remove(prefix);
+    }
+
+    fn collect(&self, _ctx: &CompletionCtx) -> Vec<ItemSpec> {
+        self.sources
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    fn expand(&self, text: &str) -> Result<String, String> {
+        let tokens = crate::api::completion::parse_at_tokens(text);
+        if tokens.is_empty() {
+            return Ok(text.to_string());
+        }
+        let expanders = self.expanders.lock().unwrap();
+        let mut out = String::with_capacity(text.len());
+        let mut last_end = 0;
+        for tok in &tokens {
+            out.push_str(&text[last_end..tok.range.start]);
+            match expanders.get(&tok.prefix) {
+                Some(f) => out.push_str(&f(&tok.value)?),
+                None => out.push_str(&text[tok.range.start..tok.range.end]),
+            }
+            last_end = tok.range.end;
+        }
+        out.push_str(&text[last_end..]);
+        Ok(out)
+    }
+}
+
+impl Default for TestCompletionBackend {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EventHandle {
@@ -472,6 +563,7 @@ impl EventHandle {
             tx,
             prio_tx: flume::unbounded().0,
             modes: Arc::new(maki_agent::ModeRegistry::builtin()),
+            completion: None,
         }
     }
 
@@ -492,6 +584,19 @@ impl EventHandle {
             tx: flume::unbounded().0,
             prio_tx: flume::unbounded().0,
             modes,
+            completion: None,
+        }
+    }
+
+    /// Test handle backed by an in-memory completion/expander store, so `@`
+    /// completion and submit expansion work without a running plugin host.
+    #[doc(hidden)]
+    pub fn with_completion_for_test(backend: Arc<TestCompletionBackend>) -> Self {
+        Self {
+            tx: flume::unbounded().0,
+            prio_tx: flume::unbounded().0,
+            modes: Arc::new(maki_agent::ModeRegistry::builtin()),
+            completion: Some(backend),
         }
     }
 
@@ -513,6 +618,7 @@ impl EventHandle {
             tx: shared.clone(),
             prio_tx: shared,
             modes: Arc::new(maki_agent::ModeRegistry::builtin()),
+            completion: None,
         }
     }
 
@@ -529,6 +635,48 @@ impl EventHandle {
         let (tx, rx) = flume::bounded(1);
         let _ = self.tx.send(Request::CollectPromptSlots { reply: tx });
         rx.recv().unwrap_or_default()
+    }
+
+    /// Gather `@`-completion candidates from every registered source, for the
+    /// popup opened with `ctx` (mode + available models). Returns empty when no
+    /// host is connected.
+    pub fn collect_completion_items(&self, ctx: &CompletionCtx) -> Vec<ItemSpec> {
+        if let Some(backend) = &self.completion {
+            return backend.collect(ctx);
+        }
+        let (tx, rx) = flume::bounded(1);
+        if self
+            .tx
+            .send(Request::CollectCompletionItems {
+                ctx: ctx.clone(),
+                reply: tx,
+            })
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.recv().unwrap_or_default()
+    }
+
+    /// Rewrite a finished prompt by dispatching each `@prefix:value` token to
+    /// its registered expander. A disconnected handle (no host) passes the text
+    /// through unchanged so plain prompts still submit.
+    pub fn expand_references(&self, text: &str) -> Result<String, String> {
+        if let Some(backend) = &self.completion {
+            return backend.expand(text);
+        }
+        let (tx, rx) = flume::bounded(1);
+        if self
+            .tx
+            .send(Request::ExpandReferences {
+                text: text.to_string(),
+                reply: tx,
+            })
+            .is_err()
+        {
+            return Ok(text.to_string());
+        }
+        rx.recv().unwrap_or_else(|_| Ok(text.to_string()))
     }
 
     pub async fn collect_prompt_slots_async(&self) -> ResolvedSlots {
@@ -721,6 +869,7 @@ mod tests {
             tx,
             prio_tx,
             modes: Arc::new(maki_agent::ModeRegistry::builtin()),
+            completion: None,
         };
         handle.run_command(
             Arc::from("myplugin"),

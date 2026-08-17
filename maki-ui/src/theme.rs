@@ -383,6 +383,18 @@ pub fn style_by_name(name: &str) -> Style {
         "warning" | "todo_in_progress" => t.todo_in_progress,
         "todo_pending" | "pending" => t.todo_pending,
         "todo_cancelled" | "cancelled" => t.todo_cancelled,
+        "completion.file" | "completion_file" => {
+            t.completion_kinds.get("file").copied().unwrap_or(t.item)
+        }
+        "completion.skill" | "completion_skill" => {
+            t.completion_kinds.get("skill").copied().unwrap_or(t.item)
+        }
+        "completion.subagent" | "completion_subagent" => {
+            t.completion_kinds.get("subagent").copied().unwrap_or(t.item)
+        }
+        "completion.model" | "completion_model" => {
+            t.completion_kinds.get("model").copied().unwrap_or(t.item)
+        }
         _ => Style::default(),
     }
 }
@@ -459,6 +471,11 @@ pub struct Theme {
     pub index_keyword: Style,
     pub shell_prefix: Style,
     pub progress_bar: Style,
+    /// Per-kind styles for `@`-completion candidates, keyed by the candidate's
+    /// `kind` string (e.g. "file", "skill", "subagent", "model"). Missing kinds
+    /// fall back to `item` at render time; the four built-ins are seeded from
+    /// `[completion]` TOML keys or sensible ui fallbacks.
+    pub completion_kinds: HashMap<String, Style>,
 
     pub syntax: syntect::highlighting::Theme,
 }
@@ -642,6 +659,29 @@ fn build_syntax_theme(
         settings,
         scopes,
     }
+}
+
+fn build_completion_kinds(
+    full_table: &toml::Table,
+    palette: &HashMap<String, Color>,
+    style: &impl Fn(&str) -> Style,
+) -> HashMap<String, Style> {
+    let completion_tbl = full_table.get("completion").and_then(|v| v.as_table());
+    let resolve = |kind: &str, fallback_key: &str| -> Style {
+        if let Some(def) = completion_tbl.and_then(|t| t.get(kind))
+            && let Ok(def) = StyleDef::deserialize(def.clone())
+        {
+            resolve_style(&def, palette)
+        } else {
+            style(fallback_key)
+        }
+    };
+    HashMap::from([
+        ("file".to_string(), resolve("file", "accent")),
+        ("skill".to_string(), resolve("skill", "todo_completed")),
+        ("subagent".to_string(), resolve("subagent", "keybind_key")),
+        ("model".to_string(), resolve("model", "diff_new")),
+    ])
 }
 
 impl Theme {
@@ -850,6 +890,7 @@ impl Theme {
                     s
                 }
             },
+            completion_kinds: build_completion_kinds(&full_table, &palette, &style),
             syntax,
         })
     }

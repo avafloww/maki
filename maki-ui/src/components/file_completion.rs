@@ -4,12 +4,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent};
-use maki_agent::skills::SkillInfo;
+use maki_lua::ItemSpec;
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Matcher, Nucleo, Utf32Str};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use tracing::warn;
@@ -23,16 +23,12 @@ const WALKER_CRASHED_MSG: &str = "File scanner crashed";
 const COL_GAP: usize = 2;
 const PENDING_DEBOUNCE_MS: u128 = 100;
 const MAX_MATERIALIZED: u32 = 640;
+const FILE_KIND: &str = "file";
 
-/// An `@` at `at_byte` begins a token only if nothing but whitespace precedes
-/// it (or it starts the text). Shared by the completion popup and the mention
-/// parser so both agree on what counts as a reference.
-pub(crate) fn at_is_token_start(text: &str, at_byte: usize) -> bool {
-    text[..at_byte]
-        .chars()
-        .next_back()
-        .is_none_or(char::is_whitespace)
-}
+/// `maki_lua::at_is_token_start` re-export so the popup and the (Lua-side)
+/// expander parser agree on what counts as a reference. Kept here as the
+/// canonical entry for `maki-ui` callers.
+pub(crate) use maki_lua::at_is_token_start;
 
 /// Byte range of the `@`-token under the cursor (including its leading `@`),
 /// or `None` when the most recent `@` does not begin a token (e.g. `foo@bar`).
@@ -53,45 +49,38 @@ pub fn at_token_range(line: &str, cursor_chars: usize) -> Option<(usize, usize)>
     None
 }
 
+/// A generic completion candidate. `label` is the fuzzy-match target and
+/// display text; `kind` drives rendering via `Theme::completion_kinds`;
+/// `insertion` replaces the whole `@`-token (including its leading `@`);
+/// `description` is shown beside the label when present.
 #[derive(Debug, Clone)]
-pub enum CompletionItem {
-    File { path: String },
-    Skill { name: String, description: String },
-    Subagent { name: String, description: String },
-    Model { spec: String },
+pub struct CompletionItem {
+    pub label: String,
+    pub kind: String,
+    pub insertion: String,
+    pub description: Option<String>,
 }
 
 impl CompletionItem {
     /// Text that replaces the whole `@`-token (including its leading `@`).
-    /// Subagent and model insertions append a trailing space so the popup
-    /// closes and the cursor is ready for the request body; file and skill
-    /// keep their existing no-space behavior.
     pub(crate) fn replacement(&self) -> String {
-        match self {
-            CompletionItem::File { path } => format!("@{path}"),
-            CompletionItem::Skill { name, .. } => format!("@skill:{name}"),
-            CompletionItem::Subagent { name, .. } => format!("@subagent:{name} "),
-            CompletionItem::Model { spec } => format!("@model:{spec} "),
-        }
+        self.insertion.clone()
     }
 
     fn display(&self) -> String {
-        match self {
-            CompletionItem::File { path } => path.clone(),
-            CompletionItem::Skill { name, description } => labeled("skill", name, description),
-            CompletionItem::Subagent { name, description } => {
-                labeled("subagent", name, description)
-            }
-            CompletionItem::Model { spec } => format!("model:{spec}"),
+        match &self.description {
+            Some(d) if !d.is_empty() => format!("{}  {}", self.label, d),
+            _ => self.label.clone(),
         }
     }
-}
 
-fn labeled(prefix: &str, name: &str, description: &str) -> String {
-    if description.is_empty() {
-        format!("{prefix}:{name}")
-    } else {
-        format!("{prefix}:{name}  {description}")
+    fn file(path: String) -> Self {
+        Self {
+            label: path.clone(),
+            kind: FILE_KIND.to_string(),
+            insertion: format!("@{path}"),
+            description: None,
+        }
     }
 }
 
@@ -112,9 +101,9 @@ pub enum CompletionAction {
 struct Session {
     nucleo: Nucleo<()>,
     matcher: Matcher,
-    skills: Vec<SkillInfo>,
-    subagents: Vec<(String, String)>,
-    models: Vec<String>,
+    /// Non-file candidates from Lua sources, as `(matchable label, item)`.
+    /// Re-fuzzy-matched against each new query in `sync_query`.
+    ref_items: Vec<(String, CompletionItem)>,
     ref_matches: Vec<Candidate>,
     file_matches: Vec<Candidate>,
     matches: Vec<Candidate>,
@@ -151,12 +140,12 @@ impl FileCompletionMenu {
         Self { session: None }
     }
 
+    /// Open the popup. `items` are the non-file candidates gathered from Lua
+    /// completion sources by the caller; the file walker is spawned for `cwd`.
     pub fn open(
         &mut self,
         cwd: &str,
-        skills: Vec<SkillInfo>,
-        models: Vec<String>,
-        plan_mode: bool,
+        items: Vec<ItemSpec>,
         query: &str,
         token_byte_range: (usize, usize),
     ) {
@@ -167,12 +156,23 @@ impl FileCompletionMenu {
             return;
         };
 
+        let ref_items = items
+            .into_iter()
+            .map(|spec| {
+                let item = CompletionItem {
+                    label: spec.label,
+                    kind: spec.kind,
+                    insertion: spec.insertion,
+                    description: spec.description,
+                };
+                (item.label.clone(), item)
+            })
+            .collect();
+
         let session = Session {
             nucleo,
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
-            skills,
-            subagents: subagent_candidates(plan_mode),
-            models,
+            ref_items,
             ref_matches: Vec::new(),
             file_matches: Vec::new(),
             matches: Vec::new(),
@@ -239,11 +239,7 @@ impl FileCompletionMenu {
         s.selected = 0;
         s.scroll_offset = 0;
 
-        s.ref_matches = fuzzy_match(
-            &mut s.matcher,
-            query,
-            ref_candidates(&s.skills, &s.subagents, &s.models),
-        );
+        s.ref_matches = fuzzy_match(&mut s.matcher, query, s.ref_items.iter().cloned());
         rebuild_combined(s);
     }
 
@@ -392,68 +388,6 @@ impl FileCompletionMenu {
     }
 }
 
-/// The subagent types the `task` plugin accepts (`plugins/task/init.lua`),
-/// each paired with a one-line description. `general` is blocked in plan mode
-/// and `plan_reviewer` is blocked outside it, so the offered list is filtered
-/// by mode at popup-open time.
-const SUBAGENTS: &[(&str, &str)] = &[
-    ("research", "Read-only search and summarize"),
-    ("general", "Can modify files"),
-    ("plan_reviewer", "Read-only plan audit (plan mode)"),
-];
-
-fn subagent_candidates(plan_mode: bool) -> Vec<(String, String)> {
-    SUBAGENTS
-        .iter()
-        .filter(|(name, _)| {
-            if plan_mode {
-                *name != "general"
-            } else {
-                *name != "plan_reviewer"
-            }
-        })
-        .map(|(name, description)| (name.to_string(), description.to_string()))
-        .collect()
-}
-
-/// Builds the matchable label for each non-file item, embedding the kind
-/// prefix (`skill:`, `subagent:`, `model:`) so the unified fuzzy filter can
-/// narrow by kind as the user types the prefix (e.g. `@subagent`, `@m:`)
-/// without a separate scoping mode. Files are matched by nucleo against the
-/// bare path, so they only survive when the query looks path-like.
-fn ref_candidates(
-    skills: &[SkillInfo],
-    subagents: &[(String, String)],
-    models: &[String],
-) -> Vec<(String, CompletionItem)> {
-    let mut out = Vec::new();
-    for (name, desc) in subagents {
-        out.push((
-            format!("subagent:{name}"),
-            CompletionItem::Subagent {
-                name: name.clone(),
-                description: desc.clone(),
-            },
-        ));
-    }
-    for spec in models {
-        out.push((
-            format!("model:{spec}"),
-            CompletionItem::Model { spec: spec.clone() },
-        ));
-    }
-    for s in skills {
-        out.push((
-            format!("skill:{}", s.name),
-            CompletionItem::Skill {
-                name: s.name.clone(),
-                description: s.description.clone(),
-            },
-        ));
-    }
-    out
-}
-
 fn fuzzy_match<I>(matcher: &mut Matcher, needle: &str, items: I) -> Vec<Candidate>
 where
     I: IntoIterator<Item = (String, CompletionItem)>,
@@ -504,7 +438,7 @@ fn refresh_file_matches(s: &mut Session) {
         };
 
         s.file_matches.push(Candidate {
-            item: CompletionItem::File { path },
+            item: CompletionItem::file(path),
             indices,
         });
     }
@@ -606,44 +540,28 @@ fn build_grid<'a>(
 
 fn cell_line<'a>(c: &Candidate, width: usize, selected: bool, t: &'a theme::Theme) -> Line<'a> {
     let base = if selected { t.item_selected } else { t.item };
+    let kind_style = t.completion_kinds.get(&c.item.kind).copied().unwrap_or(base);
     let text = c.item.display();
     let mut spans: Vec<Span<'a>> = Vec::new();
     let mut used = 0usize;
+    let mut in_match = false;
+    let mut run = String::new();
 
-    match &c.item {
-        CompletionItem::File { .. } => {
-            let hl = base
-                .fg(t.accent.fg.unwrap_or_default())
-                .add_modifier(Modifier::BOLD);
-            let mut in_match = false;
-            let mut run = String::new();
-            for (i, ch) in text.chars().enumerate() {
-                let cw = ch.width().unwrap_or(0);
-                if used + cw > width {
-                    break;
-                }
-                used += cw;
-                let is_match = c.indices.binary_search(&(i as u32)).is_ok();
-                if is_match != in_match && !run.is_empty() {
-                    spans.push(Span::styled(
-                        mem::take(&mut run),
-                        if in_match { hl } else { base },
-                    ));
-                }
-                in_match = is_match;
-                run.push(ch);
-            }
-            if !run.is_empty() {
-                spans.push(Span::styled(run, if in_match { hl } else { base }));
-            }
+    for (i, ch) in text.chars().enumerate() {
+        let cw = ch.width().unwrap_or(0);
+        if used + cw > width {
+            break;
         }
-        CompletionItem::Skill { .. }
-        | CompletionItem::Subagent { .. }
-        | CompletionItem::Model { .. } => {
-            let run: String = text.chars().take(width).collect();
-            used = run.chars().count();
-            spans.push(Span::styled(run, base));
+        used += cw;
+        let is_match = c.indices.binary_search(&(i as u32)).is_ok();
+        if is_match != in_match && !run.is_empty() {
+            spans.push(Span::styled(mem::take(&mut run), if in_match { kind_style } else { base }));
         }
+        in_match = is_match;
+        run.push(ch);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, if in_match { kind_style } else { base }));
     }
 
     if used < width {
@@ -665,27 +583,40 @@ mod tests {
     use ratatui::layout::Rect;
 
     use crate::text_buffer::TextBuffer;
+    use maki_lua::ItemSpec;
 
     use super::*;
     use test_case::test_case;
 
-    fn skill(name: &str) -> SkillInfo {
-        SkillInfo {
-            name: name.into(),
-            description: format!("desc {name}"),
+    fn item(label: &str, kind: &str, insertion: &str) -> ItemSpec {
+        ItemSpec {
+            label: label.into(),
+            kind: kind.into(),
+            insertion: insertion.into(),
+            description: None,
         }
     }
 
-    fn session_with_skills(skills: Vec<SkillInfo>) -> FileCompletionMenu {
+    fn session_with_items(items: Vec<ItemSpec>) -> FileCompletionMenu {
         let nucleo = Nucleo::new(Config::DEFAULT.match_paths(), Arc::new(|| {}), None, 1);
         let (_, done_rx) = flume::bounded(1);
         let mut menu = FileCompletionMenu::new();
+        let ref_items = items
+            .into_iter()
+            .map(|spec| {
+                let item = CompletionItem {
+                    label: spec.label,
+                    kind: spec.kind,
+                    insertion: spec.insertion,
+                    description: spec.description,
+                };
+                (item.label.clone(), item)
+            })
+            .collect();
         menu.session = Some(Session {
             nucleo,
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
-            skills,
-            subagents: Vec::new(),
-            models: Vec::new(),
+            ref_items,
             ref_matches: Vec::new(),
             file_matches: Vec::new(),
             matches: Vec::new(),
@@ -727,9 +658,7 @@ mod tests {
     fn insertion_replaces_token_keeps_single_at() {
         let mut buf = TextBuffer::new("foo @xyz".into());
         let range = at_token_range(&buf.lines()[0], 8).unwrap();
-        let item = CompletionItem::File {
-            path: "docs/read me.md".into(),
-        };
+        let item = CompletionItem::file("docs/read me.md".into());
         buf.replace_range_on_current_line(range.0, range.1, &item.replacement());
         assert_eq!(buf.value(), "foo @docs/read me.md");
     }
@@ -738,9 +667,11 @@ mod tests {
     fn skill_replacement_uses_skill_prefix() {
         let mut buf = TextBuffer::new("foo @".into());
         let range = at_token_range(&buf.lines()[0], 5).unwrap();
-        let item = CompletionItem::Skill {
-            name: "review".into(),
-            description: String::new(),
+        let item = CompletionItem {
+            label: "skill:review".into(),
+            kind: "skill".into(),
+            insertion: "@skill:review".into(),
+            description: None,
         };
         buf.replace_range_on_current_line(range.0, range.1, &item.replacement());
         assert_eq!(buf.value(), "foo @skill:review");
@@ -751,9 +682,7 @@ mod tests {
         let mut buf = TextBuffer::new("foo @xyz".into());
         let range = at_token_range(&buf.lines()[0], 8).unwrap();
         assert_eq!(range, (4, 8)); // `foo @xyz` -> token is `@xyz`
-        let item = CompletionItem::File {
-            path: "main.rs".into(),
-        };
+        let item = CompletionItem::file("main.rs".into());
         buf.replace_range_on_current_line(range.0, range.1, &item.replacement());
         assert_eq!(buf.value(), "foo @main.rs");
         assert_eq!(buf.x(), 12); // cursor just past the inserted `@main.rs`
@@ -761,59 +690,69 @@ mod tests {
 
     #[test]
     fn name_needle_matches_refs_in_unified_list() {
-        let mut menu = session_with_skills(vec![skill("review"), skill("tests")]);
+        let mut menu = session_with_items(vec![item("skill:review", "skill", "@skill:review")]);
         menu.sync_query("rev");
         let s = menu.session.as_ref().unwrap();
-        let names: Vec<_> = s.matches.iter().map(|c| c.item_display_name()).collect();
-        assert_eq!(names, vec!["review".to_string()]);
+        let labels: Vec<_> = s.matches.iter().map(|c| c.item.label.as_str()).collect();
+        assert_eq!(labels, vec!["skill:review"]);
     }
 
     #[test]
     fn skill_prefix_filters_to_skills_only() {
-        let mut menu = session_with_skills(vec![skill("review"), skill("tests")]);
+        let mut menu = session_with_items(vec![
+            item("skill:review", "skill", "@skill:review"),
+            item("skill:tests", "skill", "@skill:tests"),
+        ]);
         menu.sync_query("skill:");
         let s = menu.session.as_ref().unwrap();
-        assert!(s.matches.iter().all(|c| matches!(c.item, CompletionItem::Skill { .. })));
+        assert!(s.matches.iter().all(|c| c.item.kind == "skill"));
         assert_eq!(s.matches.len(), 2);
 
         menu.sync_query("skill:t");
         let s = menu.session.as_ref().unwrap();
-        let names: Vec<_> = s.matches.iter().map(|c| c.item_display_name()).collect();
-        assert_eq!(names, vec!["tests".to_string()]);
+        let labels: Vec<_> = s.matches.iter().map(|c| c.item.label.as_str()).collect();
+        assert_eq!(labels, vec!["skill:tests"]);
     }
 
     #[test]
     fn skills_match_without_prefix() {
-        let mut menu = session_with_skills(vec![skill("review")]);
+        let mut menu = session_with_items(vec![item("skill:review", "skill", "@skill:review")]);
         menu.sync_query("rev");
         let s = menu.session.as_ref().unwrap();
-        let offered: Vec<_> = s.matches.iter().map(|c| c.item_display_name()).collect();
-        assert!(offered.contains(&"review".to_string()));
+        let offered: Vec<_> = s.matches.iter().map(|c| c.item.label.as_str()).collect();
+        assert!(offered.contains(&"skill:review"));
     }
 
     #[test]
     fn subagent_replacement_has_prefix_and_trailing_space() {
-        let item = CompletionItem::Subagent {
-            name: "research".into(),
-            description: String::new(),
+        let item = CompletionItem {
+            label: "subagent:research".into(),
+            kind: "subagent".into(),
+            insertion: "@subagent:research ".into(),
+            description: None,
         };
         assert_eq!(item.replacement(), "@subagent:research ");
     }
 
     #[test]
     fn model_replacement_has_prefix_and_trailing_space() {
-        let item = CompletionItem::Model {
-            spec: "zai/glm-5".into(),
+        let item = CompletionItem {
+            label: "model:zai/glm-5".into(),
+            kind: "model".into(),
+            insertion: "@model:zai/glm-5 ".into(),
+            description: None,
         };
         assert_eq!(item.replacement(), "@model:zai/glm-5 ");
     }
 
     fn session_with_all() -> FileCompletionMenu {
-        let mut menu = session_with_skills(vec![skill("review")]);
-        let s = menu.session.as_mut().unwrap();
-        s.subagents = subagent_candidates(false);
-        s.models = vec!["zai/glm-5".into(), "anthropic/claude".into()];
-        menu
+        session_with_items(vec![
+            item("skill:review", "skill", "@skill:review"),
+            item("subagent:research", "subagent", "@subagent:research "),
+            item("subagent:general", "subagent", "@subagent:general "),
+            item("model:zai/glm-5", "model", "@model:zai/glm-5 "),
+            item("model:anthropic/claude", "model", "@model:anthropic/claude "),
+        ])
     }
 
     #[test]
@@ -821,9 +760,9 @@ mod tests {
         let mut menu = session_with_all();
         menu.sync_query("subagent:");
         let s = menu.session.as_ref().unwrap();
-        let names: Vec<_> = s.matches.iter().map(|c| c.item_display_name()).collect();
-        assert_eq!(names, vec!["research".to_string(), "general".to_string()]);
-        assert!(s.matches.iter().all(|c| matches!(c.item, CompletionItem::Subagent { .. })));
+        let labels: Vec<_> = s.matches.iter().map(|c| c.item.label.as_str()).collect();
+        assert_eq!(labels, vec!["subagent:research", "subagent:general"]);
+        assert!(s.matches.iter().all(|c| c.item.kind == "subagent"));
     }
 
     #[test]
@@ -831,9 +770,9 @@ mod tests {
         let mut menu = session_with_all();
         menu.sync_query("subagent");
         let s = menu.session.as_ref().unwrap();
-        let names: Vec<_> = s.matches.iter().map(|c| c.item_display_name()).collect();
-        assert_eq!(names, vec!["research".to_string(), "general".to_string()]);
-        assert!(s.matches.iter().all(|c| matches!(c.item, CompletionItem::Subagent { .. })));
+        let labels: Vec<_> = s.matches.iter().map(|c| c.item.label.as_str()).collect();
+        assert_eq!(labels, vec!["subagent:research", "subagent:general"]);
+        assert!(s.matches.iter().all(|c| c.item.kind == "subagent"));
     }
 
     #[test]
@@ -841,8 +780,8 @@ mod tests {
         let mut menu = session_with_all();
         menu.sync_query("a:rese");
         let s = menu.session.as_ref().unwrap();
-        let names: Vec<_> = s.matches.iter().map(|c| c.item_display_name()).collect();
-        assert_eq!(names, vec!["research".to_string()]);
+        let labels: Vec<_> = s.matches.iter().map(|c| c.item.label.as_str()).collect();
+        assert_eq!(labels, vec!["subagent:research"]);
     }
 
     #[test]
@@ -850,9 +789,9 @@ mod tests {
         let mut menu = session_with_all();
         menu.sync_query("model:");
         let s = menu.session.as_ref().unwrap();
-        let specs: Vec<_> = s.matches.iter().map(|c| c.item_display_name()).collect();
-        assert_eq!(specs, vec!["zai/glm-5".to_string(), "anthropic/claude".to_string()]);
-        assert!(s.matches.iter().all(|c| matches!(c.item, CompletionItem::Model { .. })));
+        let labels: Vec<_> = s.matches.iter().map(|c| c.item.label.as_str()).collect();
+        assert_eq!(labels, vec!["model:zai/glm-5", "model:anthropic/claude"]);
+        assert!(s.matches.iter().all(|c| c.item.kind == "model"));
     }
 
     #[test]
@@ -860,8 +799,8 @@ mod tests {
         let mut menu = session_with_all();
         menu.sync_query("m:claude");
         let s = menu.session.as_ref().unwrap();
-        let specs: Vec<_> = s.matches.iter().map(|c| c.item_display_name()).collect();
-        assert_eq!(specs, vec!["anthropic/claude".to_string()]);
+        let labels: Vec<_> = s.matches.iter().map(|c| c.item.label.as_str()).collect();
+        assert_eq!(labels, vec!["model:anthropic/claude"]);
     }
 
     #[test]
@@ -871,35 +810,9 @@ mod tests {
         let mut menu = session_with_all();
         menu.sync_query("s:");
         let s = menu.session.as_ref().unwrap();
-        let kinds: Vec<_> = s
-            .matches
-            .iter()
-            .map(|c| match &c.item {
-                CompletionItem::Skill { .. } => "skill",
-                CompletionItem::Subagent { .. } => "subagent",
-                _ => "other",
-            })
-            .collect();
+        let kinds: Vec<_> = s.matches.iter().map(|c| c.item.kind.as_str()).collect();
         assert!(kinds.contains(&"skill"));
         assert!(kinds.contains(&"subagent"));
-    }
-
-    #[test]
-    fn plan_mode_filters_subagent_candidates() {
-        assert_eq!(
-            subagent_candidates(false)
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect::<Vec<_>>(),
-            vec!["research", "general"]
-        );
-        assert_eq!(
-            subagent_candidates(true)
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect::<Vec<_>>(),
-            vec!["research", "plan_reviewer"]
-        );
     }
 
     #[test]
@@ -910,12 +823,7 @@ mod tests {
         let mut kinds = s
             .matches
             .iter()
-            .map(|c| match &c.item {
-                CompletionItem::File { .. } => "file",
-                CompletionItem::Skill { .. } => "skill",
-                CompletionItem::Subagent { .. } => "subagent",
-                CompletionItem::Model { .. } => "model",
-            })
+            .map(|c| c.item.kind.as_str())
             .collect::<Vec<_>>();
         kinds.sort();
         kinds.dedup();
@@ -928,19 +836,14 @@ mod tests {
         let s = menu.session.as_mut().unwrap();
         s.file_matches = (0..64)
             .map(|i| Candidate {
-                item: CompletionItem::File {
-                    path: format!("src/file{i}.rs"),
-                },
+                item: CompletionItem::file(format!("src/file{i}.rs")),
                 indices: Vec::new(),
             })
             .collect();
         menu.sync_query("");
         let s = menu.session.as_ref().unwrap();
         assert!(!s.matches.is_empty());
-        assert!(
-            matches!(s.matches[0].item, CompletionItem::File { .. }),
-            "files come before refs at a bare @"
-        );
+        assert_eq!(s.matches[0].item.kind, "file");
     }
 
     #[test]
@@ -948,28 +851,41 @@ mod tests {
         let mut menu = session_with_all();
         let s = menu.session.as_mut().unwrap();
         s.file_matches = vec![Candidate {
-            item: CompletionItem::File {
-                path: "novo_nordisk_report.csv".into(),
-            },
+            item: CompletionItem::file("novo_nordisk_report.csv".into()),
             indices: Vec::new(),
         }];
         menu.sync_query("sk");
         let s = menu.session.as_ref().unwrap();
         assert!(!s.matches.is_empty());
+        assert_eq!(s.matches[0].item.kind, "skill");
+    }
+
+    #[test]
+    fn candidate_carries_kind_for_theme_lookup() {
+        let mut menu = session_with_items(vec![item("skill:review", "skill", "@skill:review")]);
+        menu.sync_query("skill:");
+        let s = menu.session.as_ref().unwrap();
+        assert_eq!(s.matches[0].item.kind, "skill");
+        let t = theme::current();
+        // Every kind plugins can emit is seeded in the theme's lookup, so
+        // rendering never silently falls back to the generic item style.
+        for kind in ["file", "skill", "subagent", "model"] {
+            assert!(t.completion_kinds.contains_key(kind), "kind {kind} not seeded");
+        }
+        let expected = *t.completion_kinds.get("skill").expect("skill kind seeded");
+        let line = cell_line(&s.matches[0], 20, false, &t);
         assert!(
-            matches!(s.matches[0].item, CompletionItem::Skill { .. }),
-            "prefix-matched ref must rank before a non-prefix file"
+            line.spans.iter().any(|sp| sp.style == expected),
+            "matched text must render with the theme's skill kind style"
         );
     }
 
     fn menu_with_matches(count: usize) -> FileCompletionMenu {
-        let mut menu = session_with_skills(Vec::new());
+        let mut menu = session_with_items(Vec::new());
         let s = menu.session.as_mut().unwrap();
         s.matches = (0..count)
             .map(|i| Candidate {
-                item: CompletionItem::File {
-                    path: format!("file{i}"),
-                },
+                item: CompletionItem::file(format!("file{i}")),
                 indices: Vec::new(),
             })
             .collect();
@@ -994,7 +910,7 @@ mod tests {
         let mut menu = menu_with_matches(3);
         menu.session.as_mut().unwrap().visible = true;
         match menu.handle_key(key(KeyCode::Enter)) {
-            CompletionAction::Select(CompletionItem::File { path }) => assert_eq!(path, "file0"),
+            CompletionAction::Select(item) => assert_eq!(item.label, "file0"),
             other => panic!("expected Select, got {other:?}"),
         }
     }
@@ -1046,16 +962,5 @@ mod tests {
                 assert_eq!(rect.y, 10 - rect.height);
             })
             .unwrap();
-    }
-
-    impl Candidate {
-        fn item_display_name(&self) -> String {
-            match &self.item {
-                CompletionItem::File { path } => path.clone(),
-                CompletionItem::Skill { name, .. } => name.clone(),
-                CompletionItem::Subagent { name, .. } => name.clone(),
-                CompletionItem::Model { spec } => spec.clone(),
-            }
-        }
     }
 }
