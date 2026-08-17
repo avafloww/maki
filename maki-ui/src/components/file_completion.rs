@@ -82,6 +82,7 @@ struct Candidate {
     indices: Vec<u32>,
 }
 
+#[derive(Debug)]
 pub enum CompletionAction {
     Consumed,
     Select(CompletionItem),
@@ -466,7 +467,7 @@ fn row_line<'a>(c: &Candidate, max_width: usize, selected: bool, t: &'a theme::T
     let base = if selected { t.item_selected } else { t.item };
     let text = c.item.display();
     let mut must_break = false;
-    let mut spans = vec![Span::styled("   ".into(), base)];
+    let mut spans = vec![Span::styled("   ", base)];
     let mut remaining = max_width.saturating_sub(3);
 
     if let CompletionItem::File { .. } = c.item {
@@ -506,7 +507,7 @@ fn row_line<'a>(c: &Candidate, max_width: usize, selected: bool, t: &'a theme::T
             ));
         }
         if must_break {
-            spans.push(Span::styled("…".into(), base));
+            spans.push(Span::styled("…", base));
         }
     } else {
         let truncated: String = text.chars().take(remaining).collect();
