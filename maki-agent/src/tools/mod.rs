@@ -188,12 +188,24 @@ pub fn timeout_annotation(secs: u64) -> String {
 pub type LocalToolFn = Arc<dyn Fn(&Value) -> Result<String, String> + Send + Sync>;
 pub type LocalTools = Arc<HashMap<String, LocalToolFn>>;
 
+/// How the `question` tool gathers user input. The interactive maki TUI
+/// renders its own form; an ACP host renders an elicitation form; anything
+/// else must fail gracefully instead of blocking on a UI that is not there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuestionMode {
+    #[default]
+    Tui,
+    Elicitation,
+    Headless,
+}
+
 #[derive(Clone)]
 pub struct ToolContext {
     pub provider: Arc<dyn Provider>,
     pub model: Arc<Model>,
     pub event_tx: EventSender,
     pub mode: AgentMode,
+    pub question_mode: QuestionMode,
     /// The session this run belongs to. A subagent inherits its parent's,
     /// so a tool can always tell which conversation it is serving. `None`
     /// when there is no session at all, like the `maki index` one-shot.
@@ -429,6 +441,7 @@ pub fn interpreter_ctx(
         model: Arc::clone(&MODEL),
         event_tx: event_tx.clone(),
         mode: mode.clone(),
+        question_mode: QuestionMode::Headless,
         session_id: None,
         tool_use_id: None,
         user_response_rx,

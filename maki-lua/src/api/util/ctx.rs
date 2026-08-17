@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use maki_agent::AgentEvent;
 use maki_agent::agent::LoadedInstructions;
 use maki_agent::cancel::CancelToken;
 use maki_agent::tools::{
-    Deadline, FileReadTracker, LocalTools, ToolAudience, ToolContext, ToolLive,
+    Deadline, FileReadTracker, LocalTools, QuestionMode, ToolAudience, ToolContext, ToolLive,
 };
 use maki_config::{AgentConfig, ToolOutputLines};
 use maki_storage::id::SessionRef;
@@ -369,6 +370,55 @@ impl UserData for LuaCtx {
 
         methods.add_method("is_instruction_file", |_, _, name: String| {
             Ok(maki_agent::is_instruction_file(&name))
+        });
+
+        methods.add_method("question_mode", |lua, this, ()| {
+            let Some(agent) = this.agent() else {
+                return Ok(this.cap_err_pair("question_mode"));
+            };
+            let mode = match agent.question_mode {
+                QuestionMode::Tui => "tui",
+                QuestionMode::Elicitation => "elicitation",
+                QuestionMode::Headless => "headless",
+            };
+            Ok((Some(lua.create_string(mode)?), None))
+        });
+
+        // Asks the host for structured input (ACP `elicitation/create` form).
+        // Only available when the run was spawned with elicitation support;
+        // otherwise answers `(nil, err)` so the caller can fail gracefully.
+        methods.add_async_method("ask", |lua, this, questions: mlua::Table| async move {
+            let Some(agent) = this.agent().cloned() else {
+                return Ok(this.cap_err_pair("ask"));
+            };
+            if agent.question_mode != QuestionMode::Elicitation {
+                return Ok((None, Some("no elicitation-capable host".to_string())));
+            }
+            let questions_value =
+                match lua.from_value::<serde_json::Value>(LuaValue::Table(questions)) {
+                    Ok(v) => v,
+                    Err(_) => return Ok((None, Some("invalid questions".to_string()))),
+                };
+            if let Err(e) = agent.event_tx.send(AgentEvent::Question {
+                id: agent.tool_use_id.clone().unwrap_or_default(),
+                questions: questions_value,
+            }) {
+                return Ok((None, Some(e.to_string())));
+            }
+            let Some(rx) = &agent.user_response_rx else {
+                return Ok((None, Some("no user response channel".to_string())));
+            };
+            let guard = rx.lock().await;
+            let answer = agent.cancel.race(guard.recv_async()).await;
+            drop(guard);
+            match answer {
+                Ok(Ok(raw)) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                    Ok(payload) => Ok((Some(lua.to_value(&payload)?), None)),
+                    Err(e) => Ok((None, Some(format!("invalid question response: {e}")))),
+                },
+                Ok(Err(_)) => Ok((None, Some("question channel closed".to_string()))),
+                Err(_) => Ok((None, Some("cancelled".to_string()))),
+            }
         });
 
         methods.add_method_mut("finish", |lua, this, val: LuaValue| {

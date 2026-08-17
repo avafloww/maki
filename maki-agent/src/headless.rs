@@ -233,6 +233,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                     subagent_cancels: Arc::new(CancelMap::new()),
                     registry: Arc::clone(ToolRegistry::global_arc()),
                     audience: ToolAudience::MAIN,
+                    question_mode: crate::tools::QuestionMode::Headless,
                     model_policy: Arc::clone(&params.model_policy),
                 },
                 AgentRunParams {
@@ -298,6 +299,7 @@ pub struct InteractiveParams {
     pub workflow: bool,
     pub model_policy: Arc<ModelPolicy>,
     pub modes: Arc<crate::ModeRegistry>,
+    pub question_mode: crate::tools::QuestionMode,
 }
 
 pub struct InteractiveHandle {
@@ -463,6 +465,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                         subagent_cancels: Arc::new(CancelMap::new()),
                         registry: Arc::clone(ToolRegistry::global_arc()),
                         audience: ToolAudience::MAIN,
+                        question_mode: params.question_mode,
                         model_policy: Arc::clone(&params.model_policy),
                     },
                     AgentRunParams {

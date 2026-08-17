@@ -90,6 +90,7 @@ pub struct AgentParams {
     pub subagent_cancels: Arc<CancelMap<String>>,
     pub registry: Arc<crate::tools::ToolRegistry>,
     pub audience: ToolAudience,
+    pub question_mode: crate::tools::QuestionMode,
     pub model_policy: Arc<ModelPolicy>,
 }
 
@@ -134,6 +135,7 @@ pub struct Agent<'h> {
     subagent_cancels: Arc<crate::cancel::CancelMap<String>>,
     registry: Arc<crate::tools::ToolRegistry>,
     audience: ToolAudience,
+    question_mode: crate::tools::QuestionMode,
     workflow: bool,
     local_tools: LocalTools,
     model_policy: Arc<ModelPolicy>,
@@ -175,6 +177,7 @@ impl<'h> Agent<'h> {
             subagent_cancels: params.subagent_cancels,
             registry: params.registry,
             audience: params.audience,
+            question_mode: params.question_mode,
             workflow: false,
             local_tools: LocalTools::default(),
             model_policy: params.model_policy,
@@ -475,6 +478,7 @@ impl<'h> Agent<'h> {
             model: Arc::clone(&self.model),
             event_tx: self.event_tx.clone(),
             mode: self.mode.clone(),
+            question_mode: self.question_mode,
             session_id: self.session_id.clone(),
             tool_use_id: None,
             user_response_rx: self.user_response_rx.clone(),
@@ -724,6 +728,7 @@ mod tests {
                 subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
                 registry: Arc::new(crate::tools::ToolRegistry::new()),
                 audience: ToolAudience::MAIN,
+                question_mode: crate::tools::QuestionMode::Tui,
                 model_policy: Arc::new(ModelPolicy::default()),
             },
             AgentRunParams {

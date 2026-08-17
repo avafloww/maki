@@ -82,8 +82,38 @@ maki.api.register_tool({
     if #questions == 0 then
       return { llm_output = "error: at least one question is required", is_error = true }
     end
-    local result = QuestionForm.open(questions)
     local opts = QuestionHelpers.view_opts(ctx)
+    local mode, mode_err = ctx:question_mode()
+    if mode_err then
+      return { llm_output = "error: " .. mode_err, is_error = true }
+    end
+    if mode == "elicitation" then
+      -- ACP host renders the form (Zed): ask through the host, no TUI.
+      local payload, ask_err = ctx:ask(questions)
+      if ask_err then
+        return { llm_output = "error: " .. ask_err, is_error = true }
+      end
+      if payload.dismissed then
+        return {
+          llm_output = "(question dismissed by user)",
+          state = { dismissed = true },
+          body = QuestionHelpers.render_card(questions, nil, opts),
+        }
+      end
+      local answers = payload.answers or {}
+      return {
+        llm_output = QuestionHelpers.format_answers(questions, answers),
+        state = { answers = answers },
+        body = QuestionHelpers.render_card(questions, answers, opts),
+      }
+    end
+    if mode == "headless" then
+      return {
+        llm_output = "error: the question tool needs an interactive UI or an ACP host with elicitation support; ask the user in plain text instead",
+        is_error = true,
+      }
+    end
+    local result = QuestionForm.open(questions)
     if result.type == "dismiss" then
       return {
         llm_output = "(question dismissed by user)",

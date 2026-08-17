@@ -625,6 +625,7 @@ async fn session(
             subagent_cancels: Arc::new(CancelMap::new()),
             registry: Arc::clone(maki_agent::tools::ToolRegistry::global_arc()),
             audience,
+            question_mode: agent_ctx.question_mode,
             model_policy: Arc::clone(&agent_ctx.model_policy),
         },
         system: system.unwrap_or_default(),

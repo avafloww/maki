@@ -245,6 +245,7 @@ pub fn run(
             | AgentEvent::CompactionDone
             | AgentEvent::AuthRequired
             | AgentEvent::PermissionRequest { .. }
+            | AgentEvent::Question { .. }
             | AgentEvent::SubagentHistory { .. }
             | AgentEvent::ToolSnapshot { .. }
             | AgentEvent::ToolHeaderSnapshot { .. }

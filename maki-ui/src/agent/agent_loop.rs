@@ -8,7 +8,7 @@ use maki_agent::permissions::PermissionManager;
 use maki_agent::template;
 use maki_agent::template::Vars;
 use maki_agent::tools::{
-    DescriptionContext, FileReadTracker, ToolAudience, ToolFilter, ToolRegistry,
+    DescriptionContext, FileReadTracker, QuestionMode, ToolAudience, ToolFilter, ToolRegistry,
 };
 use maki_agent::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentParams, AgentRunParams, CancelMap,
@@ -278,6 +278,7 @@ impl AgentLoop {
                 subagent_cancels: Arc::clone(&self.subagent_cancels),
                 registry: Arc::clone(maki_agent::tools::ToolRegistry::global_arc()),
                 audience: ToolAudience::MAIN,
+                question_mode: QuestionMode::Tui,
                 model_policy: Arc::clone(&self.model_policy),
             },
             AgentRunParams {
