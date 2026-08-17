@@ -14,7 +14,11 @@ const PROJECT_SKILL_DIRS: &[&str] = &[
     ".opencode/skills",
     ".agents/skills",
 ];
-const GLOBAL_SKILL_DIRS: &[&str] = &[".claude/skills", ".config/opencode/skills", ".agents/skills"];
+const GLOBAL_SKILL_DIRS: &[&str] = &[
+    ".claude/skills",
+    ".config/opencode/skills",
+    ".agents/skills",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillInfo {
@@ -36,7 +40,11 @@ pub fn enumerate_skills(cwd: &Path) -> Vec<SkillInfo> {
     )
 }
 
-fn enumerate_skills_inner(cwd: &Path, config: Option<&Path>, home: Option<&Path>) -> Vec<SkillInfo> {
+fn enumerate_skills_inner(
+    cwd: &Path,
+    config: Option<&Path>,
+    home: Option<&Path>,
+) -> Vec<SkillInfo> {
     let mut skills: HashMap<String, SkillInfo> = HashMap::new();
 
     if let Some(config) = config {
@@ -74,9 +82,7 @@ fn scan_skill_dir(dir: &Path, skills: &mut HashMap<String, SkillInfo>) {
         if body.is_empty() {
             continue;
         }
-        let name = fm
-            .name
-            .unwrap_or_else(|| skill_name(&skill_dir));
+        let name = fm.name.unwrap_or_else(|| skill_name(&skill_dir));
         let info = SkillInfo {
             name: name.clone(),
             description: fm.description.unwrap_or_default(),
@@ -128,7 +134,11 @@ mod tests {
     #[test]
     fn scan_finds_skills() {
         let root = TempDir::new().unwrap();
-        write_skill(root.path(), ".maki/skills/basic", "---\nname: basic\n---\nDo things.");
+        write_skill(
+            root.path(),
+            ".maki/skills/basic",
+            "---\nname: basic\n---\nDo things.",
+        );
 
         let skills = enumerate_skills_inner(root.path(), None, None);
         assert_eq!(skills.len(), 1);
@@ -182,7 +192,11 @@ mod tests {
     #[test]
     fn empty_body_skipped() {
         let root = TempDir::new().unwrap();
-        write_skill(root.path(), ".maki/skills/empty", "---\nname: empty\n---\n   \n");
+        write_skill(
+            root.path(),
+            ".maki/skills/empty",
+            "---\nname: empty\n---\n   \n",
+        );
 
         let skills = enumerate_skills_inner(root.path(), None, None);
         assert!(skills.is_empty());
@@ -201,7 +215,10 @@ mod tests {
 
         let skills = enumerate_skills_inner(root.path(), None, None);
         let names: Vec<_> = skills.iter().map(|s| s.name.clone()).collect();
-        assert_eq!(names, vec!["alpha".to_string(), "mike".to_string(), "zebra".to_string()]);
+        assert_eq!(
+            names,
+            vec!["alpha".to_string(), "mike".to_string(), "zebra".to_string()]
+        );
     }
 
     #[test]
@@ -230,7 +247,11 @@ mod tests {
         let root = TempDir::new().unwrap();
         for (i, dir) in PROJECT_SKILL_DIRS.iter().enumerate() {
             let name = format!("skill-{i}");
-            write_skill(root.path(), &format!("{dir}/{name}"), &format!("---\nname: {name}\n---\nBody"));
+            write_skill(
+                root.path(),
+                &format!("{dir}/{name}"),
+                &format!("---\nname: {name}\n---\nBody"),
+            );
         }
 
         let skills = enumerate_skills_inner(root.path(), None, None);

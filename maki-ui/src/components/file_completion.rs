@@ -36,7 +36,10 @@ pub fn at_token_range(line: &str, cursor_chars: usize) -> Option<(usize, usize)>
         if bytes[i] != b'@' {
             continue;
         }
-        let token_start = before[..i].chars().next_back().map_or(true, char::is_whitespace);
+        let token_start = before[..i]
+            .chars()
+            .next_back()
+            .map_or(true, char::is_whitespace);
         if token_start {
             return Some((i, cursor_byte));
         }
@@ -135,8 +138,7 @@ impl FileCompletionMenu {
     ) {
         self.close();
 
-        let Some((nucleo, done_rx, cancel_clone)) =
-            super::file_picker::spawn_file_walker(cwd)
+        let Some((nucleo, done_rx, cancel_clone)) = super::file_picker::spawn_file_walker(cwd)
         else {
             return;
         };
@@ -174,9 +176,7 @@ impl FileCompletionMenu {
     }
 
     pub fn token_byte_range(&self) -> (usize, usize) {
-        self.session
-            .as_ref()
-            .map_or((0, 0), |s| s.token_byte_range)
+        self.session.as_ref().map_or((0, 0), |s| s.token_byte_range)
     }
 
     pub fn set_token_byte_range(&mut self, range: (usize, usize)) {
@@ -191,9 +191,13 @@ impl FileCompletionMenu {
         };
         s.skills_only = query.starts_with("skill:");
         let file_query = if s.skills_only { "" } else { query };
-        s.nucleo
-            .pattern
-            .reparse(0, file_query, CaseMatching::Smart, Normalization::Smart, false);
+        s.nucleo.pattern.reparse(
+            0,
+            file_query,
+            CaseMatching::Smart,
+            Normalization::Smart,
+            false,
+        );
         s.selected = 0;
         s.scroll_offset = 0;
 
@@ -480,7 +484,8 @@ fn row_line<'a>(c: &Candidate, max_width: usize, selected: bool, t: &'a theme::T
                 spans.push(Span::styled(
                     mem::take(&mut run),
                     if in_match {
-                        base.fg(t.accent.fg.unwrap_or_default()).add_modifier(Modifier::BOLD)
+                        base.fg(t.accent.fg.unwrap_or_default())
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         base
                     },
@@ -493,7 +498,8 @@ fn row_line<'a>(c: &Candidate, max_width: usize, selected: bool, t: &'a theme::T
             spans.push(Span::styled(
                 run,
                 if in_match {
-                    base.fg(t.accent.fg.unwrap_or_default()).add_modifier(Modifier::BOLD)
+                    base.fg(t.accent.fg.unwrap_or_default())
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     base
                 },
@@ -523,9 +529,9 @@ mod tests {
 
     use crossterm::event::{KeyEventKind, KeyEventState, KeyModifiers};
     use nucleo::{Config, Nucleo};
+    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
-    use ratatui::Terminal;
 
     use crate::text_buffer::TextBuffer;
 
@@ -613,7 +619,9 @@ mod tests {
         let mut buf = TextBuffer::new("foo @xyz".into());
         let range = at_token_range(&buf.lines()[0], 8).unwrap();
         assert_eq!(range, (4, 8)); // `foo @xyz` -> token is `@xyz`
-        let item = CompletionItem::File { path: "main.rs".into() };
+        let item = CompletionItem::File {
+            path: "main.rs".into(),
+        };
         buf.replace_range_on_current_line(range.0, range.1, &item.replacement());
         assert_eq!(buf.value(), "foo @main.rs");
         assert_eq!(buf.x(), 12); // cursor just past the inserted `@main.rs`
@@ -626,7 +634,10 @@ mod tests {
         let s = menu.session.as_ref().unwrap();
         assert!(!s.skills_only);
         assert_eq!(
-            s.skill_matches.iter().map(|c| c.item_display_name()).collect::<Vec<_>>(),
+            s.skill_matches
+                .iter()
+                .map(|c| c.item_display_name())
+                .collect::<Vec<_>>(),
             vec!["review".to_string()]
         );
     }
@@ -641,7 +652,11 @@ mod tests {
 
         menu.sync_query("skill:t");
         let s = menu.session.as_ref().unwrap();
-        let names = s.skill_matches.iter().map(|c| c.item_display_name()).collect::<Vec<_>>();
+        let names = s
+            .skill_matches
+            .iter()
+            .map(|c| c.item_display_name())
+            .collect::<Vec<_>>();
         assert_eq!(names, vec!["tests".to_string()]);
     }
 
@@ -659,7 +674,9 @@ mod tests {
         let s = menu.session.as_mut().unwrap();
         s.matches = (0..count)
             .map(|i| Candidate {
-                item: CompletionItem::File { path: format!("file{i}") },
+                item: CompletionItem::File {
+                    path: format!("file{i}"),
+                },
                 indices: Vec::new(),
             })
             .collect();
@@ -708,7 +725,10 @@ mod tests {
             CompletionAction::Passthrough
         ));
         let sel = menu.session.as_ref().unwrap().selected;
-        assert!(matches!(menu.handle_key(key(KeyCode::Down)), CompletionAction::Consumed));
+        assert!(matches!(
+            menu.handle_key(key(KeyCode::Down)),
+            CompletionAction::Consumed
+        ));
         assert_eq!(menu.session.as_ref().unwrap().selected, sel + 1);
     }
 
@@ -721,7 +741,12 @@ mod tests {
         s.started_at = Instant::now() - std::time::Duration::from_secs(1);
         let backend = TestBackend::new(40, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        let input_area = Rect { x: 0, y: 10, width: 40, height: 3 };
+        let input_area = Rect {
+            x: 0,
+            y: 10,
+            width: 40,
+            height: 3,
+        };
         terminal
             .draw(|frame| {
                 let rect = menu.view(frame, input_area).unwrap();

@@ -94,9 +94,7 @@ impl TextBuffer {
     }
 
     pub fn byte_to_char(s: &str, byte_idx: usize) -> usize {
-        s.char_indices()
-            .take_while(|(b, _)| *b < byte_idx)
-            .count()
+        s.char_indices().take_while(|(b, _)| *b < byte_idx).count()
     }
 
     /// Replaces the byte range `[start, end)` on the cursor's line and places

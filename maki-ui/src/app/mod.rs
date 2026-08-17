@@ -28,7 +28,9 @@ use crate::chat::{CANCELLED_TEXT, ChatEventResult, DONE_TEXT, ERROR_TEXT};
 use crate::clipboard::ClipboardState;
 use crate::components::btw_modal::BtwModal;
 use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
-use crate::components::file_completion::{CompletionAction, CompletionItem, FileCompletionMenu, at_token_range};
+use crate::components::file_completion::{
+    CompletionAction, CompletionItem, FileCompletionMenu, at_token_range,
+};
 use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
 use crate::components::help_modal::HelpModal;
 use crate::components::input::{InputAction, InputBox, Submission};
@@ -1083,7 +1085,8 @@ impl App {
             self.file_completion.sync_query(&query);
         } else {
             let skills = maki_agent::skills::enumerate_skills(Path::new(&cwd));
-            self.file_completion.open(&cwd, skills, &query, (start, end));
+            self.file_completion
+                .open(&cwd, skills, &query, (start, end));
         }
     }
 
