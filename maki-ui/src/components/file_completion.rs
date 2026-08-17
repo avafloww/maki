@@ -266,6 +266,8 @@ impl FileCompletionMenu {
             }
             KeyCode::Up => move_selection(s, -1),
             KeyCode::Down => move_selection(s, 1),
+            KeyCode::Left if !super::is_ctrl(&key) => move_column(s, -1),
+            KeyCode::Right if !super::is_ctrl(&key) => move_column(s, 1),
             _ if super::is_ctrl(&key) => return CompletionAction::Consumed,
             _ => return CompletionAction::Passthrough,
         }
@@ -472,6 +474,22 @@ fn move_selection(s: &mut Session, rows: isize) {
     let last_row = last / cols;
     let row = ((s.selected / cols) as isize + rows).clamp(0, last_row as isize) as usize;
     s.selected = (row * cols + col).min(last);
+    ensure_visible(s);
+}
+
+/// Moves one column left or right within the same grid row, clamped at the
+/// row's boundaries. The final row may hold fewer than `cols` items.
+fn move_column(s: &mut Session, delta: isize) {
+    if s.matches.is_empty() || s.cols < 2 {
+        return;
+    }
+    let cols = s.cols;
+    let last = s.matches.len() - 1;
+    let row = s.selected / cols;
+    let col = s.selected % cols;
+    let last_col = (last - row * cols).min(cols - 1);
+    let new_col = (col as isize + delta).clamp(0, last_col as isize) as usize;
+    s.selected = row * cols + new_col;
     ensure_visible(s);
 }
 
@@ -919,6 +937,46 @@ mod tests {
         s.selected = start;
         move_selection(s, delta);
         assert_eq!(s.selected, expected);
+    }
+
+    #[test_case(1, -1, 0   ; "left_steps_to_prev_column")]
+    #[test_case(0, -1, 0   ; "left_clamps_at_first_column")]
+    #[test_case(0, 1, 1    ; "right_steps_to_next_column")]
+    #[test_case(1, 1, 1    ; "right_clamps_at_row_end")]
+    #[test_case(4, 1, 4    ; "partial_last_row_clamps")]
+    fn move_column_behavior(start: usize, delta: isize, expected: usize) {
+        // 5 items in 2 columns: row 0 = 0,1; row 1 = 2,3; row 2 = 4.
+        let mut menu = menu_with_matches(5);
+        let s = menu.session.as_mut().unwrap();
+        s.cols = 2;
+        s.viewport_height = 10;
+        s.selected = start;
+        move_column(s, delta);
+        assert_eq!(s.selected, expected);
+    }
+
+    #[test]
+    fn left_right_consumed_and_step_columns() {
+        let mut menu = menu_with_matches(5);
+        let s = menu.session.as_mut().unwrap();
+        s.visible = true;
+        s.cols = 2;
+        assert!(matches!(
+            menu.handle_key(key(KeyCode::Right)),
+            CompletionAction::Consumed
+        ));
+        assert_eq!(menu.session.as_ref().unwrap().selected, 1);
+        // Row 0 is full (0,1); a further Right clamps in place.
+        assert!(matches!(
+            menu.handle_key(key(KeyCode::Right)),
+            CompletionAction::Consumed
+        ));
+        assert_eq!(menu.session.as_ref().unwrap().selected, 1);
+        assert!(matches!(
+            menu.handle_key(key(KeyCode::Left)),
+            CompletionAction::Consumed
+        ));
+        assert_eq!(menu.session.as_ref().unwrap().selected, 0);
     }
 
     #[test]
