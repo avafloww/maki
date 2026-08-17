@@ -363,6 +363,7 @@ fn install_session(
         srv.out_tx.clone(),
         Arc::clone(&pending),
         srv.elicitation,
+        handle.answer_tx.clone(),
     );
     srv.session = Some(SessionState {
         handle,
@@ -585,6 +586,7 @@ fn start_event_pump(
     out_tx: Sender<Value>,
     pending: PendingState,
     elicitation: bool,
+    answer_tx: Sender<String>,
 ) {
     smol::spawn(async move {
         let sid = SessionId::from(session_id.to_string());
@@ -639,6 +641,14 @@ fn start_event_pump(
                                 method: Arc::from(request.method()),
                                 params: Some(request),
                             },
+                        );
+                    } else {
+                        // A question we cannot render as a form (non-array
+                        // input, or a host without elicitation) still has a
+                        // tool waiting on `user_response_rx`; dismiss it so
+                        // the turn fails gracefully instead of hanging.
+                        let _ = answer_tx.send(
+                            serde_json::json!({ "dismissed": true }).to_string(),
                         );
                     }
                     continue;
@@ -844,6 +854,58 @@ mod tests {
             Some(r#"{"dismissed":true}"#.to_string()),
             "a broken answer must still unblock the waiting tool"
         );
+    }
+
+    #[test]
+    fn malformed_question_in_elicitation_mode_unblocks_the_tool() {
+        let (event_tx, event_rx) = flume::unbounded::<Envelope>();
+        let (out_tx, out_rx) = flume::unbounded::<Value>();
+        let (answer_tx, answer_rx) = flume::unbounded::<String>();
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        let session_id = SessionRef::from(MakiId::generate());
+
+        start_event_pump(
+            event_rx,
+            session_id,
+            out_tx,
+            Arc::clone(&pending),
+            true,
+            answer_tx,
+        );
+
+        event_tx
+            .send(Envelope {
+                event: AgentEvent::Question {
+                    id: "t1".to_string(),
+                    questions: serde_json::json!({ "not": "an array" }),
+                },
+                subagent: None,
+                run_id: 0,
+            })
+            .unwrap();
+
+        smol::block_on(async {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+            loop {
+                if let Ok(answer) = answer_rx.try_recv() {
+                    assert_eq!(
+                        answer,
+                        r#"{"dismissed":true}"#,
+                        "the pump must dismiss a question it cannot render, not drop it",
+                    );
+                    return;
+                }
+                assert!(
+                    out_rx.try_recv().is_err(),
+                    "no host request should be sent for an unrenderable question",
+                );
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the pump silently dropped a malformed question and left the tool hanging",
+                );
+                smol::Timer::after(std::time::Duration::from_millis(5)).await;
+            }
+        });
     }
 
     #[test]
