@@ -71,7 +71,10 @@ fn scan_skill_dir(dir: &Path, skills: &mut HashMap<String, SkillInfo>) {
         return;
     };
     for entry in entries.flatten() {
-        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+        // `file_type()` does not follow symlinks, so a skill dir symlinked
+        // from `~/.agents/skills` reads as a symlink, not a dir, and would be
+        // skipped. `metadata` follows the link to the target's metadata.
+        if !fs::metadata(entry.path()).is_ok_and(|m| m.is_dir()) {
             continue;
         }
         let skill_dir = entry.path();
@@ -256,5 +259,25 @@ mod tests {
 
         let skills = enumerate_skills_inner(root.path(), None, None);
         assert_eq!(skills.len(), PROJECT_SKILL_DIRS.len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_skill_dir_is_enumerated() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        // Real skill dir living outside the scanned skills dir...
+        let real = root.path().join("real/committing");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join(SKILL_FILE), "---\nname: committing\n---\nBody").unwrap();
+        // ...symlinked into a scanned project skills dir.
+        let link = root.path().join(".maki/skills/committing");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(&real, &link).unwrap();
+
+        let skills = enumerate_skills_inner(root.path(), None, None);
+        let names: Vec<_> = skills.iter().map(|s| s.name.clone()).collect();
+        assert!(names.contains(&"committing".to_string()));
     }
 }
