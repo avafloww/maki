@@ -139,8 +139,7 @@ pub fn ctx_with_provider(
     ctx.cancel = run_cancel;
     ctx.subagent_cancels = Arc::new(CancelMap::new());
     ctx.event_tx = event_tx;
-    let provider_dyn: Arc<dyn Provider> = Arc::clone(&provider);
-    ctx.provider = provider_dyn;
+    ctx.provider = provider;
     ctx.model = Arc::new(default_model());
     (ctx, rx, run_trigger)
 }
