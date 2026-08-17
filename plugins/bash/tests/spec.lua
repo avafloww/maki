@@ -35,7 +35,7 @@ local OPT = { auto_model = "test/model", auto_mode = true }
 case("defaults_off", function()
   local d = bh.defaults()
   eq(d.auto_mode, false)
-  eq(d.auto_model, "openrouter/deepseek/deepseek-v4-flash-0731")
+  eq(d.auto_model, nil, "no default model: unset means inherit the session model")
 end)
 
 case("toggle_state", function()
@@ -143,6 +143,13 @@ case("spawn_opts_wires_model_system_isolation_and_silence", function()
   eq(o.silent, true, "classifier must not relay its turn into the main session")
   eq(o.name, "bash-guardian")
   assert(o.local_tools.classifier_verdict ~= nil, "verdict tool is a local_tool")
+end)
+
+case("spawn_opts_inherits_session_model_when_unset", function()
+  local o = bh.spawn_opts({})
+  eq(o.model_spec, nil, "omitted model_spec makes maki.agent.session inherit the parent model")
+  eq(o.system, CLASSIFIER_SYSTEM)
+  eq(o.silent, true)
 end)
 
 th.report()

@@ -265,8 +265,8 @@ local opts = maki.api.register_options(output_limits.extend({
     desc = "Classify every bash command before executing it (accept/deny with reason).",
   },
   auto_model = {
-    default = "openrouter/deepseek/deepseek-v4-flash-0731",
-    desc = "Model spec for the bash auto-mode classifier.",
+    type = "string",
+    desc = "Model spec for the bash auto-mode classifier. Unset: inherits the current session model.",
   },
 }))
 

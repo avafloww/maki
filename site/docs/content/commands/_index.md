@@ -31,6 +31,7 @@ Type `/` in the input box to open the command palette.
 | `/workflow` | Toggle workflow mode (task callable inside code_execution) |
 | `/exit` | Exit the application |
 | `/reload` | Reload plugins and config |
+| `/automode` | Toggle bash auto mode (classifier gates every bash command) |
 | `/build` | Switch to build mode (full tool access) |
 | `/memory` | View, edit, and delete memory files |
 | `/plan` | Switch to plan mode (analyse and write only the plan file) |

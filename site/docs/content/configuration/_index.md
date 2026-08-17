@@ -61,6 +61,7 @@ All fields are optional. Typos in field names cause an error right away.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `always_yolo` | bool | `false` | Start every session with YOLO mode (skip permission prompts, deny rules still apply) |
+| `always_automode` | bool | `false` | Start every session with bash auto mode (classify every bash command) |
 | `always_fast` | bool | `false` | Start every session with Anthropic fast mode (Opus only; ignored otherwise) |
 | `always_workflow` | bool | `false` | Start every session with workflow mode (task callable inside code_execution) |
 | `always_thinking` | bool \| string | `false` | Start every session with extended thinking (true/"adaptive", "off", an effort level ("minimal" to "max"), or a token budget) |
@@ -156,6 +157,8 @@ maki.setup({
 
 | Field | Type | Default | Min | Description |
 |-------|------|---------|-----|-------------|
+| `auto_mode` | boolean | `false` | - | Classify every bash command before executing it (accept/deny with reason). |
+| `auto_model` | string | - | - | Model spec for the bash auto-mode classifier. Unset: inherits the current session model. |
 | `max_output_bytes` | integer | - | - | Override `agent.max_output_bytes` for this tool. |
 | `max_output_lines` | integer | - | - | Override `agent.max_output_lines` for this tool. |
 | `timeout_secs` | integer | `120` | 5 | Kill the command after this many seconds. A call's `timeout` param overrides it. |
