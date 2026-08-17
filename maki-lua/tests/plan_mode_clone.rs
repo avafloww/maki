@@ -73,6 +73,23 @@ fn directive_is_verbatim_clone() {
 }
 
 #[test]
+fn plan_toolset_includes_webfetch() {
+    // Byte-pin the whole toolset line: any add or remove is caught here.
+    must_contain(
+        MODE_OVERRIDE_SRC,
+        r#"tools = { "read", "grep", "glob", "webfetch", "write", "edit", "plan_submit", "task" }"#,
+        "plan toolset",
+    );
+    // A phrase unique to the directive sentence (the header comment also
+    // mentions webfetch, so the backticked name alone would not pin it).
+    must_contain(
+        MODE_OVERRIDE_SRC,
+        "fetching a page is a read",
+        "plan-mode directive",
+    );
+}
+
+#[test]
 fn reviewer_is_verbatim_clone() {
     for s in PI_TOOL_STRINGS {
         must_absent(TASK_SRC, s, "plan-reviewer prompt");
