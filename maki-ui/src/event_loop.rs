@@ -653,9 +653,13 @@ impl<'t> EventLoop<'t> {
                 cmd_rx,
             } => {
                 let app = self.focused_app();
+                let ring = app.bell_on_ask(config.needs_input);
                 app.float_mgr.open(buf, config, focus, event_tx, cmd_rx);
                 if focus {
                     app.transition_plan(crate::app::mode::PlanTrigger::InteractivePrompt);
+                }
+                if ring {
+                    ring_bell();
                 }
             }
             UiAction::Session { req, reply_tx } => {
@@ -1192,6 +1196,7 @@ impl<'t> EventLoop<'t> {
                 let _pause = self.input.pause();
                 terminal::suspend(self.terminal);
             }
+            Action::Bell => ring_bell(),
             Action::RefreshModels => self.refresh_models(),
             Action::RefreshUsage => self.refresh_usage(),
         }
@@ -1336,6 +1341,13 @@ fn scroll_delta(kind: MouseEventKind, lines: u32) -> i32 {
     } else {
         -(lines as i32)
     }
+}
+
+fn ring_bell() {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(b"\x07");
+    let _ = out.flush();
 }
 
 #[cfg(test)]

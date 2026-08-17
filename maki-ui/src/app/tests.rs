@@ -4779,3 +4779,74 @@ fn task_picker_rows_show_snippet() {
         entry.snippet
     );
 }
+
+const BELL_TOOL_NAME: &str = "bash";
+
+fn permission_request_event() -> AgentEvent {
+    AgentEvent::PermissionRequest {
+        id: "perm-1".into(),
+        tool: maki_config::ToolKey::native(BELL_TOOL_NAME),
+        scopes: vec!["execute".into()],
+    }
+}
+
+#[test]
+fn turn_complete_emits_bell() {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    let actions = app.update(done_event());
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::Bell)),
+        "default config should bell on turn complete"
+    );
+}
+
+#[test]
+fn turn_complete_bell_disabled() {
+    let mut app = test_app();
+    app.ui_config.bell.turn_complete = false;
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    let actions = app.update(done_event());
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::Bell)),
+        "disabled turn_complete should not bell"
+    );
+}
+
+#[test]
+fn permission_request_emits_bell() {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    let actions = app.update(agent_msg(permission_request_event()));
+    assert_eq!(
+        actions.iter().filter(|a| matches!(a, Action::Bell)).count(),
+        1,
+        "default config should bell once on permission request"
+    );
+}
+
+#[test]
+fn permission_request_bell_disabled() {
+    let mut app = test_app();
+    app.ui_config.bell.permission = false;
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    let actions = app.update(agent_msg(permission_request_event()));
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::Bell)),
+        "disabled permission should not bell"
+    );
+}
+
+#[test_case(true,  true  ; "ask_input_and_enabled")]
+#[test_case(true,  false ; "ask_input_but_disabled")]
+#[test_case(false, true  ; "no_input_but_enabled")]
+#[test_case(false, false ; "no_input_and_disabled")]
+fn bell_on_ask_predicate(needs_input: bool, ask: bool) {
+    let mut app = test_app();
+    app.ui_config.bell.ask = ask;
+    assert_eq!(app.bell_on_ask(needs_input), needs_input && ask);
+}

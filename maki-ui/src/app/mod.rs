@@ -1301,6 +1301,9 @@ impl App {
         if let ChatEventResult::PermissionRequest { id, tool, scopes } = result {
             self.permission_prompt
                 .open(id, tool, scopes, subagent_id.clone());
+            if self.ui_config.bell.permission {
+                return vec![Action::Bell];
+            }
             return vec![];
         }
 
@@ -1319,6 +1322,7 @@ impl App {
             return vec![];
         }
 
+        let mut actions = Vec::new();
         if chat_idx == 0 {
             match result {
                 ChatEventResult::Done => {
@@ -1330,6 +1334,9 @@ impl App {
                     self.fire_session_autocmd("TurnEnd", serde_json::json!({}));
                     if self.exit_on_done {
                         self.exit_request = ExitRequest::Success;
+                    }
+                    if self.ui_config.bell.turn_complete {
+                        actions.push(Action::Bell);
                     }
                 }
                 ChatEventResult::Error(message) => {
@@ -1354,7 +1361,7 @@ impl App {
                 ChatEventResult::Continue => {}
             }
         }
-        vec![]
+        actions
     }
 
     fn resolve_or_create_chat(&mut self, subagent: &SubagentInfo) -> usize {
@@ -1709,6 +1716,10 @@ impl App {
         self.permission_prompt.is_open()
             || self.pending_input != PendingInput::None
             || self.float_mgr.needs_input()
+    }
+
+    pub(crate) fn bell_on_ask(&self, needs_input: bool) -> bool {
+        needs_input && self.ui_config.bell.ask
     }
 
     /// True while `recoverable_queue` holds user text captured at an agent

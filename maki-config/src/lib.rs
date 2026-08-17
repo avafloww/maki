@@ -361,6 +361,7 @@ pub struct UiFileConfig {
     pub theme: Option<String>,
     pub clock_format: Option<ClockFormat>,
     pub tool_output_lines: Option<ToolOutputLinesFile>,
+    pub bell: Option<BellFileConfig>,
     pub max_input_lines: Option<u32>,
 }
 
@@ -382,6 +383,11 @@ impl UiFileConfig {
         match (self.tool_output_lines.as_mut(), overlay.tool_output_lines) {
             (Some(base), Some(over)) => base.merge(over),
             (None, Some(over)) => self.tool_output_lines = Some(over),
+            _ => {}
+        }
+        match (self.bell.as_mut(), overlay.bell) {
+            (Some(base), Some(over)) => base.merge(over),
+            (None, Some(over)) => self.bell = Some(over),
             _ => {}
         }
     }
@@ -416,6 +422,20 @@ impl ToolOutputLinesFile {
             web,
             other
         );
+    }
+}
+
+#[derive(Deserialize, Default, Debug)]
+#[serde(default, deny_unknown_fields)]
+pub struct BellFileConfig {
+    pub turn_complete: Option<bool>,
+    pub ask: Option<bool>,
+    pub permission: Option<bool>,
+}
+
+impl BellFileConfig {
+    fn merge(&mut self, overlay: BellFileConfig) {
+        merge_option!(self, overlay, turn_complete, ask, permission);
     }
 }
 
@@ -893,6 +913,9 @@ pub struct UiConfig {
 
     #[config(skip, default = "ToolOutputLines::default()")]
     pub tool_output_lines: ToolOutputLines,
+
+    #[config(skip, default = "BellConfig::default()")]
+    pub bell: BellConfig,
 }
 
 impl UiConfig {
@@ -914,6 +937,7 @@ impl UiConfig {
             clock_format: f.clock_format.unwrap_or_default(),
             theme: f.theme,
             tool_output_lines: ToolOutputLines::from_file(f.tool_output_lines),
+            bell: BellConfig::from_file(f.bell),
         }
     }
 
@@ -1022,6 +1046,44 @@ impl ToolOutputLines {
 }
 
 impl Default for ToolOutputLines {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BellConfig {
+    pub turn_complete: bool,
+    pub ask: bool,
+    pub permission: bool,
+}
+
+impl BellConfig {
+    pub const DEFAULT: Self = Self {
+        turn_complete: true,
+        ask: true,
+        permission: true,
+    };
+
+    pub const FIELD_DEFAULTS: &[(&'static str, bool)] = &[
+        ("turn_complete", Self::DEFAULT.turn_complete),
+        ("ask", Self::DEFAULT.ask),
+        ("permission", Self::DEFAULT.permission),
+    ];
+
+    fn from_file(f: Option<BellFileConfig>) -> Self {
+        let d = Self::DEFAULT;
+        let f = f.unwrap_or_default();
+        Self {
+            turn_complete: f.turn_complete.unwrap_or(d.turn_complete),
+            ask: f.ask.unwrap_or(d.ask),
+            permission: f.permission.unwrap_or(d.permission),
+        }
+    }
+}
+
+impl Default for BellConfig {
     fn default() -> Self {
         Self::DEFAULT
     }
@@ -2306,6 +2368,31 @@ mod tests {
             config.ui.tool_output_lines.index,
             ToolOutputLines::DEFAULT.index
         );
+    }
+
+    #[test]
+    fn bell_config_defaults() {
+        let bell = BellConfig::default();
+        assert!(bell.turn_complete);
+        assert!(bell.ask);
+        assert!(bell.permission);
+        let ui = UiConfig::default();
+        assert_eq!(ui.bell, BellConfig::DEFAULT);
+    }
+
+    #[test]
+    fn bell_config_parse_partial() {
+        let raw: RawConfig = toml::from_str("[ui.bell]\nturn_complete = false\n").unwrap();
+        let config = raw.into_config(false).unwrap();
+        assert!(!config.ui.bell.turn_complete);
+        assert!(config.ui.bell.ask);
+        assert!(config.ui.bell.permission);
+    }
+
+    #[test]
+    fn bell_config_parse_unknown_rejected() {
+        let result: Result<RawConfig, _> = toml::from_str("[ui.bell]\nloudness = true\n");
+        assert!(result.is_err());
     }
 
     #[test_case("provider", "connect_timeout_secs", 0 ; "provider_zero_connect_timeout")]

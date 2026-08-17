@@ -105,6 +105,16 @@ How many lines of output to show per tool in the UI. All values are `usize` with
 | `web` | 3 |
 | `other` | 3 |
 
+### `ui.bell`
+
+Ring the terminal bell (`\x07`) on these events. All values are `bool`, defaulting to `true`. Disable any of them to silence just that event.
+
+| Field | Default |
+|-------|---------|
+| `turn_complete` | true |
+| `ask` | true |
+| `permission` | true |
+
 ### `agent`
 
 | Field | Type | Default | Min | Description |

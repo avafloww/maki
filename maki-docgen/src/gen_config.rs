@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use maki_agent::tools::ToolRegistry;
 use maki_config::{
-    AgentConfig, ConfigField, DEFAULT_MAX_LOG_FILES, DEFAULT_MAX_OUTPUT_LINES,
+    AgentConfig, BellConfig, ConfigField, DEFAULT_MAX_LOG_FILES, DEFAULT_MAX_OUTPUT_LINES,
     DEFAULT_MOUSE_SCROLL_LINES, MIN_TOOL_OUTPUT_LINES, ProviderConfig, StorageConfig,
     TOP_LEVEL_FIELDS, ToolOutputLines, UiConfig,
 };
@@ -154,6 +154,23 @@ fn write_tool_output_section(out: &mut String) {
     writeln!(out).unwrap();
 }
 
+fn write_bell_section(out: &mut String) {
+    writeln!(out, "### `ui.bell`\n").unwrap();
+    writeln!(
+        out,
+        "Ring the terminal bell (`\\x07`) on these events. All values are \
+         `bool`, defaulting to `true`. Disable any of them to silence just \
+         that event.\n"
+    )
+    .unwrap();
+    writeln!(out, "| Field | Default |").unwrap();
+    writeln!(out, "|-------|---------|").unwrap();
+    for (name, default) in BellConfig::FIELD_DEFAULTS {
+        writeln!(out, "| `{name}` | {default} |",).unwrap();
+    }
+    writeln!(out).unwrap();
+}
+
 pub fn generate() -> String {
     let mut out = String::with_capacity(4096);
 
@@ -233,6 +250,7 @@ All fields are optional. Typos in field names cause an error right away.
     write_section(&mut out, "[ui]", UiConfig::FIELDS);
     write_theme_section(&mut out);
     write_tool_output_section(&mut out);
+    write_bell_section(&mut out);
     write_section(&mut out, "[agent]", AgentConfig::FIELDS);
     write_section(&mut out, "[provider]", ProviderConfig::FIELDS);
     write_section(&mut out, "[storage]", StorageConfig::FIELDS);
