@@ -7,7 +7,7 @@ group = "Reference"
 
 # Tools
 
-Maki ships with 25 built-in tools in this reference (23 on by default, 2 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
+Maki ships with 26 built-in tools in this reference (24 on by default, 2 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
 
 ## File Operations
 
@@ -148,6 +148,13 @@ Execute Python code in a sandboxed interpreter with tools as callable functions.
 |-----------|------|----------|---------|-------------|
 | `code` | string | yes |  | Python code to execute. Tools are async functions that return strings (not objects). You MUST await every call: `result = await read(path='/file', offset=1, limit=0)`. Use `await asyncio.gather(...)` for concurrency. |
 | `timeout` | integer | no | 30 | Script execution timeout in seconds |
+
+### `plan_submit` {#plan_submit}
+
+Submit the finished plan for user review in the interactive UI.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
 
 ### `question` {#question}
 

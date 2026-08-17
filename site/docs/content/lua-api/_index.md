@@ -5225,16 +5225,6 @@ end
 return M
 ```
 
-### `require("maki.plan_spec")`
-
-```lua
--- Shared plan specification, spliced verbatim into the plan-mode directive and
--- the review prompt so both always see the exact same document.
---
--- Ported from polytoken's default plan specification (plan_spec_default.md);
--- keep in sync with upstream.
-```
-
 ### `require("maki.partial")`
 
 ```lua
@@ -5247,6 +5237,16 @@ return M
 --- placeholder to drop. {reason} is a cancel-hook reason ("cancelled" |
 --- "timeout").
 function M.cut(view, out, reason, timeout_secs)
+```
+
+### `require("maki.plan_spec")`
+
+```lua
+-- Shared plan specification, spliced verbatim into the plan-mode directive and
+-- the review prompt so both always see the exact same document.
+--
+-- Ported from polytoken's default plan specification (plan_spec_default.md);
+-- keep in sync with upstream.
 ```
 
 ### `require("maki.scroll")`
