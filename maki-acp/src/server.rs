@@ -647,9 +647,8 @@ fn start_event_pump(
                         // input, or a host without elicitation) still has a
                         // tool waiting on `user_response_rx`; dismiss it so
                         // the turn fails gracefully instead of hanging.
-                        let _ = answer_tx.send(
-                            serde_json::json!({ "dismissed": true }).to_string(),
-                        );
+                        let _ =
+                            answer_tx.send(serde_json::json!({ "dismissed": true }).to_string());
                     }
                     continue;
                 }
@@ -889,8 +888,7 @@ mod tests {
             loop {
                 if let Ok(answer) = answer_rx.try_recv() {
                     assert_eq!(
-                        answer,
-                        r#"{"dismissed":true}"#,
+                        answer, r#"{"dismissed":true}"#,
                         "the pump must dismiss a question it cannot render, not drop it",
                     );
                     return;
