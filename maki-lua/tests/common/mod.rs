@@ -124,6 +124,14 @@ pub fn tool_names(tools: &Value) -> Vec<String> {
 pub fn ctx_with_replies(
     replies: Vec<StreamResponse>,
 ) -> (ToolContext, flume::Receiver<Envelope>, CancelTrigger) {
+    ctx_with_provider(Arc::new(CannedProvider::new(replies)))
+}
+
+/// Like [`ctx_with_replies`] but with a caller-held `provider` so the test can
+/// inspect its captured opts/tools after a run.
+pub fn ctx_with_provider(
+    provider: Arc<CannedProvider>,
+) -> (ToolContext, flume::Receiver<Envelope>, CancelTrigger) {
     let (run_trigger, run_cancel) = CancelToken::new();
     let (tx, rx) = flume::unbounded::<Envelope>();
     let event_tx = EventSender::new(tx, 0);
@@ -131,7 +139,7 @@ pub fn ctx_with_replies(
     ctx.cancel = run_cancel;
     ctx.subagent_cancels = Arc::new(CancelMap::new());
     ctx.event_tx = event_tx;
-    ctx.provider = Arc::new(CannedProvider::new(replies));
+    ctx.provider = Arc::clone(&provider);
     ctx.model = Arc::new(default_model());
     (ctx, rx, run_trigger)
 }
