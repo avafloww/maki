@@ -93,6 +93,19 @@ impl TextBuffer {
         }
     }
 
+    pub fn byte_to_char(s: &str, byte_idx: usize) -> usize {
+        s.char_indices().take_while(|(b, _)| *b < byte_idx).count()
+    }
+
+    /// Replaces the byte range `[start, end)` on the cursor's line and places
+    /// the cursor just after the inserted text.
+    pub fn replace_range_on_current_line(&mut self, start: usize, end: usize, replacement: &str) {
+        let line = &mut self.lines[self.cursor_y];
+        line.replace_range(start..end, replacement);
+        let start_chars = Self::byte_to_char(&self.lines[self.cursor_y], start);
+        self.raw_x = start_chars + replacement.chars().count();
+    }
+
     pub fn add_line(&mut self) {
         let bx = self.byte_x();
         let (left, right) = self.lines[self.cursor_y].split_at(bx);

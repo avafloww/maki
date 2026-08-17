@@ -82,6 +82,69 @@ pub struct FilePickerModal {
     session: Option<Session>,
 }
 
+/// Spawns the async file walker for a cwd, shared by the file picker and the
+/// `@` completion menu. Returns the nucleo, a done signal, and the cancel flag.
+pub(super) fn spawn_file_walker(
+    cwd: &str,
+) -> Option<(Nucleo<()>, flume::Receiver<()>, Arc<AtomicBool>)> {
+    let notify = Arc::new(|| {});
+    let nucleo = Nucleo::new(Config::DEFAULT.match_paths(), notify, None, 1);
+    let injector = nucleo.injector();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_clone = cancel.clone();
+    let (done_tx, done_rx) = flume::bounded(1);
+
+    let root = PathBuf::from(cwd);
+    if let Err(e) = thread::Builder::new()
+        .name("file-walker".into())
+        .spawn(move || {
+            let overrides = OverrideBuilder::new(&root)
+                .add("!.git")
+                .unwrap()
+                .build()
+                .unwrap();
+            WalkBuilder::new(&root)
+                .hidden(false)
+                .overrides(overrides)
+                .build_parallel()
+                .run(|| {
+                    let injector = injector.clone();
+                    let cancel = cancel.clone();
+                    let root = root.clone();
+                    Box::new(move |entry| {
+                        if cancel.load(Ordering::Relaxed) {
+                            return ignore::WalkState::Quit;
+                        }
+                        let Ok(entry) = entry else {
+                            return ignore::WalkState::Continue;
+                        };
+                        if !entry
+                            .file_type()
+                            .is_some_and(|ft| ft.is_file() || ft.is_dir() || ft.is_symlink())
+                        {
+                            return ignore::WalkState::Continue;
+                        }
+                        let path = entry.path().strip_prefix(&root).unwrap_or(entry.path());
+                        let mut name = path.to_string_lossy().into_owned();
+                        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                            name.push(std::path::MAIN_SEPARATOR);
+                        }
+                        injector.push((), |_, cols| {
+                            cols[0] = Utf32String::from(name.as_str());
+                        });
+                        ignore::WalkState::Continue
+                    })
+                });
+            let _ = done_tx.send(());
+        })
+    {
+        warn!("{WALKER_CRASHED_MSG}: failed to spawn thread: {e}");
+        return None;
+    }
+
+    Some((nucleo, done_rx, cancel_clone))
+}
+
 impl FilePickerModal {
     pub fn new() -> Self {
         Self { session: None }
@@ -90,60 +153,9 @@ impl FilePickerModal {
     pub fn open(&mut self, cwd: &str) {
         self.close();
 
-        let notify = Arc::new(|| {});
-        let nucleo = Nucleo::new(Config::DEFAULT.match_paths(), notify, None, 1);
-        let injector = nucleo.injector();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let cancel_clone = cancel.clone();
-        let (done_tx, done_rx) = flume::bounded(1);
-
-        let root = PathBuf::from(cwd);
-        if let Err(e) = thread::Builder::new()
-            .name("file-walker".into())
-            .spawn(move || {
-                let overrides = OverrideBuilder::new(&root)
-                    .add("!.git")
-                    .unwrap()
-                    .build()
-                    .unwrap();
-                WalkBuilder::new(&root)
-                    .hidden(false)
-                    .overrides(overrides)
-                    .build_parallel()
-                    .run(|| {
-                        let injector = injector.clone();
-                        let cancel = cancel.clone();
-                        let root = root.clone();
-                        Box::new(move |entry| {
-                            if cancel.load(Ordering::Relaxed) {
-                                return ignore::WalkState::Quit;
-                            }
-                            let Ok(entry) = entry else {
-                                return ignore::WalkState::Continue;
-                            };
-                            if !entry
-                                .file_type()
-                                .is_some_and(|ft| ft.is_file() || ft.is_dir() || ft.is_symlink())
-                            {
-                                return ignore::WalkState::Continue;
-                            }
-                            let path = entry.path().strip_prefix(&root).unwrap_or(entry.path());
-                            let mut name = path.to_string_lossy().into_owned();
-                            if entry.file_type().is_some_and(|ft| ft.is_dir()) {
-                                name.push(std::path::MAIN_SEPARATOR);
-                            }
-                            injector.push((), |_, cols| {
-                                cols[0] = Utf32String::from(name.as_str());
-                            });
-                            ignore::WalkState::Continue
-                        })
-                    });
-                let _ = done_tx.send(());
-            })
-        {
-            warn!("{WALKER_CRASHED_MSG}: failed to spawn thread: {e}");
+        let Some((nucleo, done_rx, cancel_clone)) = spawn_file_walker(cwd) else {
             return;
-        }
+        };
 
         self.session = Some(Session {
             nucleo,

@@ -27,6 +27,7 @@ pub mod command;
 pub mod diff;
 pub mod permissions;
 pub mod prompt;
+pub mod skills;
 pub mod template;
 pub mod tools;
 pub use tools::ToolFilter;

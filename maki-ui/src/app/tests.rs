@@ -4668,6 +4668,147 @@ fn run_builtin_file_picker_opens_modal() {
     assert!(app.file_picker.is_open());
 }
 
+// --- `@` completion popup (files + skills) ---------------------------------
+
+/// An app whose cwd points at a fresh temp dir, so walk results and skill
+/// discovery are deterministic no matter the machine.
+fn completion_app() -> (TempDir, App) {
+    let tmp = TempDir::new().unwrap();
+    let mut app = test_app();
+    std::sync::Arc::get_mut(&mut app.state.session)
+        .unwrap()
+        .set_cwd(tmp.path().to_string_lossy().into_owned());
+    (tmp, app)
+}
+
+fn write_completion_fixture(cwd: &Path, rel: &str, content: &str) {
+    let path = cwd.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+}
+
+/// Seeding a skill writes `SKILL.md` into a directory under `.maki/skills/`;
+/// the dir name deliberately differs from the frontmatter name so no colliding
+/// `skills/<name>/` directory shows up as a file candidate.
+fn seed_skill(cwd: &Path, name: &str) {
+    write_completion_fixture(
+        cwd,
+        ".maki/skills/sk/SKILL.md",
+        &format!("---\nname: {name}\n---\nWorkflows for {name}."),
+    );
+}
+
+/// Lets the completion popup's walker finish and nucleo converge, waiting until
+/// the popup is actually offering a selectable item.
+fn converge_completion(app: &mut App) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let _ = app.file_completion.tick();
+        if app.file_completion.has_selectable() {
+            return;
+        }
+        std::thread::yield_now();
+    }
+    panic!("@-completion popup never offered a selectable item");
+}
+
+#[test]
+fn typing_at_opens_popup() {
+    let (_tmp, mut app) = completion_app();
+    app.update(Msg::Key(key(KeyCode::Char('@'))));
+    assert!(app.file_completion.is_active());
+    assert_eq!(app.input_box.buffer.value(), "@");
+}
+
+#[test]
+fn no_token_no_popup() {
+    let (_tmp, mut app) = completion_app();
+    app.update(Msg::Key(key(KeyCode::Char('h'))));
+    app.update(Msg::Key(key(KeyCode::Char('i'))));
+    assert!(!app.file_completion.is_active());
+}
+
+#[test]
+fn esc_closes_leaves_text() {
+    let (_tmp, mut app) = completion_app();
+    app.update(Msg::Key(key(KeyCode::Char('@'))));
+    assert!(app.file_completion.is_active());
+    app.update(Msg::Key(key(KeyCode::Esc)));
+    assert!(!app.file_completion.is_active());
+    assert_eq!(app.input_box.buffer.value(), "@");
+}
+
+#[test]
+fn enter_inserts_skill() {
+    let (tmp, mut app) = completion_app();
+    seed_skill(tmp.path(), "review");
+    for c in "@skill:rev".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    converge_completion(&mut app);
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert_eq!(app.input_box.buffer.value(), "@skill:review");
+}
+
+#[test]
+fn skills_complete_without_prefix() {
+    let (tmp, mut app) = completion_app();
+    seed_skill(tmp.path(), "review");
+    for c in "@rev".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    converge_completion(&mut app);
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert_eq!(app.input_box.buffer.value(), "@skill:review");
+}
+
+#[test]
+fn enter_inserts_file_verbatim() {
+    let (tmp, mut app) = completion_app();
+    write_completion_fixture(tmp.path(), "docs/read me.md", "content");
+    for c in "@read".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    converge_completion(&mut app);
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert_eq!(app.input_box.buffer.value(), "@docs/read me.md");
+}
+
+#[test]
+fn popup_closes_when_token_removed() {
+    let (_tmp, mut app) = completion_app();
+    app.update(Msg::Key(key(KeyCode::Char('@'))));
+    app.update(Msg::Key(key(KeyCode::Char('x'))));
+    assert!(app.file_completion.is_active());
+    // Backspace the `x`, then the `@`: the token is gone and the popup closes.
+    app.update(Msg::Key(key(KeyCode::Backspace)));
+    assert_eq!(app.input_box.buffer.value(), "@");
+    assert!(app.file_completion.is_active());
+    app.update(Msg::Key(key(KeyCode::Backspace)));
+    assert_eq!(app.input_box.buffer.value(), "");
+    assert!(!app.file_completion.is_active());
+}
+
+#[test]
+fn command_palette_takes_precedence() {
+    let (_tmp, mut app) = completion_app();
+    // `/thinking ` takes an argument, so the palette stays matched while an
+    // `@` token is added to that argument space.
+    for c in "/thinking ".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    assert!(app.command_palette.is_active());
+    app.update(Msg::Key(key(KeyCode::Char('@'))));
+    assert!(
+        app.command_palette.is_active(),
+        "palette stays matched on /thinking"
+    );
+    assert!(
+        !app.file_completion.is_active(),
+        "@ popup suppressed while palette is up"
+    );
+}
+
 // --- Async subagent routing (AC.8, AC.9, AC.10) ------------------------------
 
 /// A subagent tab whose `SubagentInfo` carries both an answer and an input
