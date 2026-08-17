@@ -100,9 +100,10 @@ maki.setup({
 ```
 
 - `mode_plan_override` replaces the built-in `plan` mode with a verbatim clone
-  of polytoken's plan directive (via the `plan` plugin override). It focuses the
-  model on producing a reviewable artifact, restricts writes to the plan file,
-  swaps the toolset to read tools plus `write`/`edit`/`plan_submit`, and adds
+  of polytoken's plan directive (via the `plan` plugin override). It focuses
+  the model on producing a reviewable artifact, restricts writes to the plan
+  file, swaps the toolset to read tools plus `webfetch`,
+  `write`/`edit`/`plan_submit`, and adds
   `/plan` and `/build` slash commands. The directive and the plan reviewer splice
   one shared plan specification, so both always see the exact same document.
 - `plan_submit_tool` is a mode-scoped tool: it prints the finished plan inline
