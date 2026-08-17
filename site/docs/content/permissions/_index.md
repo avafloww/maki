@@ -168,7 +168,7 @@ For MCP tools, both allow and deny decisions generalize to `*` (the entire tool)
 
 ## Auto Mode (bash)
 
-Auto mode puts a separate-context classifier model in front of **every** bash command. A silent, throwaway session (empty history, its own model) reviews the command against a safety policy and returns accept or deny with a one-line reason. Approved commands run as usual. A clean deny rejects the command with that reason. Auto mode never asks you for permission: the classifier owns the gate, and if it fails (spawn, timeout, or a malformed verdict) the command is denied fail-closed with the classifier error.
+Auto mode puts a separate-context classifier model in front of **every** bash command. A silent, throwaway session (empty history, its own model unless `auto_model` pins one) reviews the command against a safety policy and returns accept or deny with a one-line reason. Approved commands run as usual. A clean deny rejects the command with that reason. Auto mode never asks you for permission: the classifier owns the gate, and if it fails (spawn, timeout, or a malformed verdict) the command is denied fail-closed with the classifier error.
 
 The classifier sees only the command and working directory in a silent throwaway session. Its turn is never relayed into your main conversation, so nothing about the main run leaks into its decision and its reasoning does not clutter the thread. The default system prompt is the codex-guardian policy (bundled, `auto_classifier_prompt.lua`).
 
@@ -180,7 +180,6 @@ maki.setup({
     plugins = {
         bash = {
             auto_mode = true,
-            auto_model = "openrouter/deepseek/deepseek-v4-flash-0731",
         },
     },
 })
@@ -197,7 +196,7 @@ The tri-state verdict is strict:
 Two things to watch:
 
 - A clean deny rejects the command. If the classifier is too strict, tune the prompt or disable auto mode.
-- If `auto_model` is missing or unconfigured, every command is denied fail-closed, so effectively nothing runs.
+- `auto_model` is optional. Unset, the classifier runs on the same model as the current session; set it to pin a dedicated classifier model (a cheap one keeps the gate fast).
 
 ## YOLO Mode
 

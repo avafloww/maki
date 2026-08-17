@@ -177,7 +177,7 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 
 ### `task_spawn` {#task_spawn}
 
-Start a background subagent and return its task_id immediately. The main agent stays unblocked. The result is returned automatically when the subagent finishes, so wait for the reply instead of polling task_get. Queue messages with task_send and finish with task_despawn.
+Start a background subagent and return its task_id immediately. The main agent stays unblocked. The result is returned automatically when the subagent finishes, so wait for the reply instead of polling task_get. Queue messages with task_send and finish with task_despawn. Also callable from a code_execution script as a Python async function.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -189,7 +189,7 @@ Start a background subagent and return its task_id immediately. The main agent s
 
 ### `task_get` {#task_get}
 
-Poll a background subagent. Returns { status = "running" | "done" | "closed", result?, error? }. Normally unnecessary: a spawned subagent's result arrives automatically, so wait for that reply instead of polling task_get. Does not block the main agent.
+Poll a background subagent. Returns { status = "running" | "done" | "closed", result?, error? }. Normally unnecessary: a spawned subagent's result arrives automatically, so wait for that reply instead of polling task_get. Does not block the main agent. Also callable from a code_execution script as a Python async function.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -197,7 +197,7 @@ Poll a background subagent. Returns { status = "running" | "done" | "closed", re
 
 ### `task_send` {#task_send}
 
-Queue a message to a background subagent. A done subagent processes it as a new turn. Returns { queued = true } immediately.
+Queue a message to a background subagent. A done subagent processes it as a new turn. Returns { queued = true } immediately. Also callable from a code_execution script as a Python async function.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -206,7 +206,7 @@ Queue a message to a background subagent. A done subagent processes it as a new 
 
 ### `task_despawn` {#task_despawn}
 
-Cancel a background subagent, flush its chat transcript, and release its concurrency slot. Returns { ok = true }.
+Cancel a background subagent, flush its chat transcript, and release its concurrency slot. Returns { ok = true }. Also callable from a code_execution script as a Python async function.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

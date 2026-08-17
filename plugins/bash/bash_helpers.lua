@@ -9,7 +9,6 @@ local classifier_system = require("auto_classifier_prompt")
 
 local M = {}
 
-local DEFAULT_AUTO_MODEL = "openrouter/deepseek/deepseek-v4-flash-0731"
 local VERDICT_TOOL_NAME = "classifier_verdict"
 local VERDICT_ACK = "Verdict recorded."
 
@@ -20,7 +19,7 @@ function M.set_auto_mode(v)
 end
 
 function M.defaults()
-  return { auto_mode = false, auto_model = DEFAULT_AUTO_MODEL }
+  return { auto_mode = false }
 end
 
 -- Strict tri-state decoder: anything that is not `{approved: boolean}` (with an
@@ -90,14 +89,17 @@ end
 -- The classifier-session table passed to `maki.agent.session`. Factored out so
 -- tests can assert the model/system/isolation wiring without a real provider.
 function M.spawn_opts(opts)
-  return {
-    model_spec = opts.auto_model,
+  local out = {
     system = classifier_system,
     local_tools = { [VERDICT_TOOL_NAME] = classifier_verdict_tool },
     name = "bash-guardian",
     mcp = false,
     silent = true,
   }
+  if opts.auto_model then
+    out.model_spec = opts.auto_model
+  end
+  return out
 end
 
 -- One classifier call. `spawn` is injectable for tests; it returns the pair
