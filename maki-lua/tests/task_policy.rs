@@ -684,7 +684,6 @@ local real_session = maki.agent.session
 maki.agent.session = function(ctx, opts)
   recorder.sessions = recorder.sessions + 1
   opts.inherit_provider = true
-  opts.tools = nil
   return real_session(ctx, opts)
 end
 
@@ -697,7 +696,7 @@ maki.agent.system_prompt = function(ctx, opts)
 end
 
 maki.agent.tools = function(ctx, opts)
-  return {}
+  return nil
 end
 
 maki.api.register_tool({

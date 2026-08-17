@@ -28,7 +28,6 @@ const SESSION_WRAPPER: &str = r#"
 local real_session = maki.agent.session
 maki.agent.session = function(ctx, opts)
   opts.inherit_provider = true
-  opts.tools = nil
   return real_session(ctx, opts)
 end
 maki.agent.resolve_model = function(ctx, opts)
@@ -39,7 +38,7 @@ maki.agent.system_prompt = function(ctx, opts)
 end
 "#;
 
-const TOOLS_STUB: &str = "maki.agent.tools = function(ctx, opts) return {} end\n";
+const TOOLS_STUB: &str = "maki.agent.tools = function(ctx, opts) return nil end\n";
 
 /// A read tool visible to `research_sub` and a write tool visible only to
 /// `general_sub`, so the real `maki.agent.tools` can demonstrate the reviewer's
