@@ -20,7 +20,7 @@ pub use loader::{EventHandle, PluginHost, TestCompletionBackend};
 pub use plugin_permissions::{Permission, PluginPermissions};
 pub use runtime::{KILL_GRACE, RestoreItem, WARM_TOOL_CAP};
 
-pub use api::completion::{CompletionCtx, ItemSpec, at_is_token_start};
+pub use api::completion::{AtToken, CompletionCtx, ItemSpec, at_is_token_start, parse_at_tokens};
 
 pub mod test_support {
     use crate::api::keymap::{KeymapEntry, KeymapWriter};

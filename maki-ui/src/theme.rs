@@ -471,6 +471,12 @@ pub struct Theme {
     pub index_keyword: Style,
     pub shell_prefix: Style,
     pub progress_bar: Style,
+    /// Style for detected (known) `@`-reference tokens in the input; falls back
+    /// to `accent`.
+    pub at_ref: Style,
+    /// Style for undetected (unknown) `@`-reference tokens in the input; falls
+    /// back to `error`.
+    pub at_ref_invalid: Style,
     /// Per-kind styles for `@`-completion candidates, keyed by the candidate's
     /// `kind` string (e.g. "file", "skill", "subagent", "model"). Missing kinds
     /// fall back to `item` at render time; the four built-ins are seeded from
@@ -891,6 +897,22 @@ impl Theme {
                     s
                 }
             },
+            at_ref: {
+                let s = style("at_ref");
+                if s == Style::default() {
+                    style("accent")
+                } else {
+                    s
+                }
+            },
+            at_ref_invalid: {
+                let s = style("at_ref_invalid");
+                if s == Style::default() {
+                    style("error")
+                } else {
+                    s
+                }
+            },
             completion_kinds: build_completion_kinds(&full_table, &palette, &style),
             syntax,
         })
@@ -1172,6 +1194,49 @@ skill = { fg = "cyan" }
             theme.completion_kinds.get("subagent"),
             Some(file),
             "unlisted kinds keep the accent fallback"
+        );
+    }
+
+    #[test]
+    fn at_ref_styles_fall_back_to_accent_and_error() {
+        let toml = r##"
+[palette]
+foreground = "#f8f8f2"
+background = "#282a36"
+accent = "#ff79c6"
+red = "#ff5555"
+
+[ui]
+accent = { fg = "accent" }
+error = { fg = "red" }
+"##;
+        let theme = Theme::from_toml(toml).unwrap();
+        assert_eq!(theme.at_ref, theme.accent);
+        assert_eq!(theme.at_ref_invalid, theme.error);
+    }
+
+    #[test]
+    fn at_ref_styles_take_ui_values() {
+        let toml = r##"
+[palette]
+foreground = "#f8f8f2"
+background = "#282a36"
+accent = "#ff79c6"
+cyan = "#8be9fd"
+purple = "#bd93f9"
+
+[ui]
+accent = { fg = "accent" }
+at_ref = { fg = "cyan" }
+at_ref_invalid = { fg = "purple", modifiers = ["underlined"] }
+"##;
+        let theme = Theme::from_toml(toml).unwrap();
+        assert_eq!(theme.at_ref, Style::new().fg(Color::Rgb(0x8b, 0xe9, 0xfd)));
+        assert_eq!(
+            theme.at_ref_invalid,
+            Style::new()
+                .fg(Color::Rgb(0xbd, 0x93, 0xf9))
+                .add_modifier(Modifier::UNDERLINED)
         );
     }
 

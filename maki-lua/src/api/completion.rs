@@ -131,16 +131,16 @@ lua_table! {
 
 /// A parsed `@prefix:value` token: the lowercase prefix, the value, and its
 /// byte range in the source text (including the leading `@`).
-pub(crate) struct AtToken {
-    pub(crate) prefix: String,
-    pub(crate) value: String,
-    pub(crate) range: std::ops::Range<usize>,
+pub struct AtToken {
+    pub prefix: String,
+    pub value: String,
+    pub range: std::ops::Range<usize>,
 }
 
 /// Scan `text` for `@`-tokens at token boundaries. A token is `@prefix:value`
 /// running to the next whitespace; tokens without a `:` or an empty value are
 /// not references and are skipped here (they pass through unchanged).
-pub(crate) fn parse_at_tokens(text: &str) -> Vec<AtToken> {
+pub fn parse_at_tokens(text: &str) -> Vec<AtToken> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < text.len() {

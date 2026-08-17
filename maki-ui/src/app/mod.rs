@@ -63,7 +63,7 @@ use maki_agent::{
 };
 use maki_config::{ModelPolicy, UiConfig};
 use maki_lua::{
-    BuiltinAction, CompletionCtx, EventHandle, HintReader, HintSnapshot, KeymapReader,
+    BuiltinAction, CompletionCtx, EventHandle, HintReader, HintSnapshot, ItemSpec, KeymapReader,
     LuaCommandReader, WinView,
 };
 use maki_providers::{ContentBlock, Message, Model, Role, ThinkingConfig, add_cost};
@@ -981,6 +981,7 @@ impl App {
             }
             CommandAction::Complete(text) => {
                 self.command_palette.sync(&text);
+                self.refresh_at_ref_labels(&text);
                 self.input_box.set_input(text);
                 self.input_box.buffer.move_to_end();
                 return vec![];
@@ -1057,6 +1058,38 @@ impl App {
         }
     }
 
+    /// Store the labels the completion sources currently offer in the input,
+    /// replacing any previous set: the sources' full item list *is* the known
+    /// set for the current mode and models, so the input can style `@`-tokens
+    /// as detected or undetected.
+    fn store_at_ref_labels(&mut self, items: &[ItemSpec]) {
+        self.input_box.at_ref_labels = items
+            .iter()
+            .map(|i| i.label.clone())
+            .collect();
+    }
+
+    /// Refresh the input's known `@`-label set after external text (restore,
+    /// rewind, command completion, editor edit) may have put a token in the
+    /// input. Skips the Lua round-trip when the text has no `@`-token.
+    pub(crate) fn refresh_at_ref_labels(&mut self, text: &str) {
+        if maki_lua::parse_at_tokens(text).is_empty() {
+            return;
+        }
+        let models = self
+            .available_models
+            .load_full()
+            .map(|arc| (*arc).clone())
+            .unwrap_or_default();
+        let items = self
+            .lua_event_handle
+            .collect_completion_items(&CompletionCtx {
+                mode: self.state.mode.id_key(),
+                models,
+            });
+        self.store_at_ref_labels(&items);
+    }
+
     /// Opens, refreshes, or closes the `@` completion popup to match the token
     /// under the input cursor. Suppressed while the command palette or an
     /// overlay owns the screen.
@@ -1097,6 +1130,7 @@ impl App {
                 models,
             };
             let items = self.lua_event_handle.collect_completion_items(&ctx);
+            self.store_at_ref_labels(&items);
             self.file_completion
                 .open(&cwd, items, &query, (start, end));
         }
