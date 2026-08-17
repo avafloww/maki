@@ -248,7 +248,8 @@ impl CommandPalette {
         );
 
         for item in Self::items(custom_commands, mcp_prompts, lua_commands) {
-            if matches!(item.command_type, CommandType::Builtin(_)) && overridden.contains(&item.name)
+            if matches!(item.command_type, CommandType::Builtin(_))
+                && overridden.contains(&item.name)
             {
                 continue;
             }

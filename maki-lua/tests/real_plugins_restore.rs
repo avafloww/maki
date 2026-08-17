@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use maki_agent::AgentEvent;
-use maki_agent::tools::ToolRegistry;
 use maki_agent::ToolOutput;
+use maki_agent::tools::ToolRegistry;
 use maki_config::ToolOutputLines;
 use maki_lua::PluginHost;
 use maki_providers::StreamResponse;
@@ -411,8 +411,10 @@ fn exec_verdict(host: &PluginHost, reg: &ToolRegistry, input: Value) -> Verdict 
     Verdict { is_error, output }
 }
 
-const CLASSIFY_DENY_STUB: &str = r#"bh.classify_verdict = function(...) return "deny", "stub deny reason", nil end"#;
-const CLASSIFY_ERROR_STUB: &str = r#"bh.classify_verdict = function(...) return "error", nil, "stub boom" end"#;
+const CLASSIFY_DENY_STUB: &str =
+    r#"bh.classify_verdict = function(...) return "deny", "stub deny reason", nil end"#;
+const CLASSIFY_ERROR_STUB: &str =
+    r#"bh.classify_verdict = function(...) return "error", nil, "stub boom" end"#;
 
 #[test]
 fn auto_mode_deny_rejects_command_without_running_jobstart() {
@@ -435,7 +437,10 @@ fn auto_mode_deny_rejects_command_without_running_jobstart() {
 fn auto_mode_error_denies_fail_closed_without_prompting() {
     let (host, reg) = bash_host_with_classifier(CLASSIFY_ERROR_STUB);
     let result = exec_verdict(&host, &reg, json!({ "command": "echo never-runs-2" }));
-    assert!(result.is_error, "a classifier error must fail closed (deny)");
+    assert!(
+        result.is_error,
+        "a classifier error must fail closed (deny)"
+    );
     assert!(
         result.output.contains("denied by auto-mode"),
         "a classifier error must not prompt and never auto-run: {}",
@@ -488,7 +493,10 @@ end
 }
 
 fn verdict_tool_use(approved: bool, reason: &str) -> StreamResponse {
-    common::canned_tool_use("classifier_verdict", json!({ "approved": approved, "reason": reason }))
+    common::canned_tool_use(
+        "classifier_verdict",
+        json!({ "approved": approved, "reason": reason }),
+    )
 }
 
 /// Run the real bash handler against a canned-provider ctx and return its
@@ -530,17 +538,30 @@ fn automode_deny_blocks_and_approve_runs() {
         verdict_tool_use(false, "stub deny reason"),
         common::canned_reply("done"),
     ]));
-    let err = exec_bash_real(&host, &reg, Arc::clone(&deny), json!({ "command": "echo denied-side-effect" }))
-        .expect_err("a deny must fail the tool");
+    let err = exec_bash_real(
+        &host,
+        &reg,
+        Arc::clone(&deny),
+        json!({ "command": "echo denied-side-effect" }),
+    )
+    .expect_err("a deny must fail the tool");
     assert!(err.contains("denied"), "{err}");
-    assert!(err.contains("stub deny reason"), "deny carries the reason: {err}");
+    assert!(
+        err.contains("stub deny reason"),
+        "deny carries the reason: {err}"
+    );
 
     let approve = Arc::new(common::CannedProvider::new(vec![
         verdict_tool_use(true, "ok"),
         common::canned_reply("done"),
     ]));
-    let out = exec_bash_real(&host, &reg, Arc::clone(&approve), json!({ "command": "echo approved-side-effect" }))
-        .expect("an approve must run the command");
+    let out = exec_bash_real(
+        &host,
+        &reg,
+        Arc::clone(&approve),
+        json!({ "command": "echo approved-side-effect" }),
+    )
+    .expect("an approve must run the command");
     assert_eq!(bash_output(out), "approved-side-effect");
 }
 
@@ -553,8 +574,13 @@ fn automode_error_fails_closed_without_prompting() {
         common::canned_tool_use("classifier_verdict", json!({ "approved": "not-a-bool" })),
         common::canned_reply("done"),
     ]));
-    let err = exec_bash_real(&host, &reg, Arc::clone(&provider), json!({ "command": "echo never-runs" }))
-        .expect_err("a classifier error must deny");
+    let err = exec_bash_real(
+        &host,
+        &reg,
+        Arc::clone(&provider),
+        json!({ "command": "echo never-runs" }),
+    )
+    .expect_err("a classifier error must deny");
     assert!(err.contains("denied by auto-mode"), "{err}");
 }
 
@@ -567,8 +593,13 @@ fn automode_error_fails_closed_without_prompting() {
 fn automode_toggle_flows_through_ui() {
     let (host_off, reg_off) = bash_host_with_real_classifier_auto(false);
     let idle = Arc::new(common::CannedProvider::new(vec![]));
-    let out = exec_bash_real(&host_off, &reg_off, Arc::clone(&idle), json!({ "command": "echo auto-off-runs" }))
-        .expect("with auto mode off the plain path runs");
+    let out = exec_bash_real(
+        &host_off,
+        &reg_off,
+        Arc::clone(&idle),
+        json!({ "command": "echo auto-off-runs" }),
+    )
+    .expect("with auto mode off the plain path runs");
     assert_eq!(bash_output(out), "auto-off-runs");
     assert!(
         idle.captured_thinking().is_empty(),
@@ -580,7 +611,12 @@ fn automode_toggle_flows_through_ui() {
         verdict_tool_use(false, "denied with auto on"),
         common::canned_reply("done"),
     ]));
-    let err = exec_bash_real(&host_on, &reg_on, Arc::clone(&deny), json!({ "command": "echo should-be-denied" }))
-        .expect_err("with auto mode on the classifier gates the command");
+    let err = exec_bash_real(
+        &host_on,
+        &reg_on,
+        Arc::clone(&deny),
+        json!({ "command": "echo should-be-denied" }),
+    )
+    .expect_err("with auto mode on the classifier gates the command");
     assert!(err.contains("denied with auto on"), "{err}");
 }

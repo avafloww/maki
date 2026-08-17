@@ -4,9 +4,9 @@
 
 use std::sync::Arc;
 
+use maki_agent::tools::ToolContext;
 use maki_agent::tools::ToolRegistry;
 use maki_agent::tools::test_support::stub_ctx;
-use maki_agent::tools::ToolContext;
 use maki_agent::{AgentMode, ToolOutput};
 use maki_lua::PluginHost;
 use serde_json::{Value, json};
@@ -795,8 +795,12 @@ fn task_policy_structured_output_real_driver() {
     let (ctx, _rx, _trigger) = common::ctx_with_provider(Arc::clone(&provider));
 
     let (reg, _host) = load_real_driver_host("build");
-    let out = run_task(&reg, &ctx, task_input(SCENARIO_HAPPY, Some(answer_schema())))
-        .expect("structured task failed");
+    let out = run_task(
+        &reg,
+        &ctx,
+        task_input(SCENARIO_HAPPY, Some(answer_schema())),
+    )
+    .expect("structured task failed");
     let parsed: Value = serde_json::from_str(&out).expect("result is not json");
     assert_eq!(parsed, json!({ "answer": "42" }));
 
@@ -807,4 +811,3 @@ fn task_policy_structured_output_real_driver() {
         "session tools must include structured_output: {names:?}"
     );
 }
-

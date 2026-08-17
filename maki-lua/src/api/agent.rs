@@ -484,7 +484,9 @@ async fn session(
         }
         None => DEFAULT_SESSION_AUDIENCE,
     };
-    let inherit_provider: bool = opts.get::<Option<bool>>("inherit_provider")?.unwrap_or(false);
+    let inherit_provider: bool = opts
+        .get::<Option<bool>>("inherit_provider")?
+        .unwrap_or(false);
     let fast: bool = opts
         .get::<Option<bool>>("fast")?
         .unwrap_or(agent_ctx.opts.fast);
@@ -1018,7 +1020,7 @@ async fn prompt(
     let input_tx = this.input_tx.clone();
     let done_rx = this.done_rx.clone();
     drop(this);
-if let Err(e) = input_tx.send(message) {
+    if let Err(e) = input_tx.send(message) {
         return Ok((None, Some(e.to_string())));
     }
     match done_rx.recv_async().await {
@@ -1211,7 +1213,10 @@ mod tests {
         ))
         .unwrap();
 
-        assert!(Arc::ptr_eq(&provider, &parent_provider), "must reuse parent provider");
+        assert!(
+            Arc::ptr_eq(&provider, &parent_provider),
+            "must reuse parent provider"
+        );
         assert_eq!(model.spec(), parent_model, "must reuse parent model");
     }
 

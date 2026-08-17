@@ -9,11 +9,11 @@
 
 use std::sync::Arc;
 
-use maki_agent::tools::ToolRegistry;
 use maki_agent::AgentEvent;
+use maki_agent::tools::ToolRegistry;
 use maki_lua::PluginHost;
 use maki_providers::Role;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 mod common;
 use common::{ctx_with_canned_provider, exec_tool, production_like_ctx};
@@ -79,7 +79,10 @@ fn subagent_outlives_the_run_that_spawned_it() {
 
     let before = exec_tool(&reg, &ctx, "probe_status", json!({})).unwrap();
     eprintln!("status (before run end) -> {before}");
-    assert_ne!(before["status"], "closed", "subagent must be alive after spawn");
+    assert_ne!(
+        before["status"], "closed",
+        "subagent must be alive after spawn"
+    );
 
     run_trigger.cancel();
 
@@ -92,8 +95,7 @@ fn subagent_outlives_the_run_that_spawned_it() {
         }
     }
     assert_ne!(
-        status["status"],
-        "closed",
+        status["status"], "closed",
         "a spawned subagent must not be closed by its parent run ending normally: {status}"
     );
 }
@@ -108,8 +110,13 @@ fn subagent_completion_surfaces_reply_to_parent() {
     let (ctx, parent_rx, _run_trigger) = ctx_with_canned_provider();
 
     exec_tool(&reg, &ctx, "probe_spawn", json!({})).expect("spawn failed");
-    exec_tool(&reg, &ctx, "probe_send", json!({ "message": "do the thing" }))
-        .expect("send failed");
+    exec_tool(
+        &reg,
+        &ctx,
+        "probe_send",
+        json!({ "message": "do the thing" }),
+    )
+    .expect("send failed");
 
     // Pump the executor and drain the parent event channel until the subagent's
     // completed run surfaces its history.

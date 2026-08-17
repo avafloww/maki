@@ -87,14 +87,14 @@ Switching modes fires the autocmd `ModeChanged` with data `{ mode = "<id>" }`.
 
 ## Example: a plan-review workflow
 
-The repositories ship two opt-in example plugins that put this together. They
-are bundled but disabled by default; enable the ones you want from `init.lua`:
+The repositories ship two example plugins that put this together. They are
+bundled and enabled by default; disable the ones you don't want from `init.lua`:
 
 ```lua
 maki.setup({
   plugins = {
-    mode_plan_override = { enabled = true },
-    plan_submit_tool = { enabled = true },
+    mode_plan_override = { enabled = false },
+    plan_submit_tool = { enabled = false },
   },
 })
 ```

@@ -562,7 +562,7 @@ impl<'t> EventLoop<'t> {
         }
     }
 
-/// Only the focused session is drawn, so only it can owe a frame; focusing
+    /// Only the focused session is drawn, so only it can owe a frame; focusing
     /// another is an event, and events always repaint. Background sessions
     /// still drain their floats, or a plugin writing to a window nobody is
     /// looking at would lose the output.

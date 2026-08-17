@@ -2054,12 +2054,22 @@ mod tests {
         mgr.open(make_buf(&["panel"]), panel_cfg, false, tx_panel, rx_panel);
 
         let (tx_modal, rx_modal, _, _cmd_tx_modal) = make_channels();
-        mgr.open(make_buf(&["modal"]), make_config(), true, tx_modal, rx_modal);
+        mgr.open(
+            make_buf(&["modal"]),
+            make_config(),
+            true,
+            tx_modal,
+            rx_modal,
+        );
         assert_eq!(mgr.focused_id, Some(1));
 
         mgr.close();
 
-        assert_eq!(mgr.windows.len(), 1, "panel window must survive overlay close");
+        assert_eq!(
+            mgr.windows.len(),
+            1,
+            "panel window must survive overlay close"
+        );
         assert_eq!(mgr.panel_reqs().len(), 1, "panel dock stays rendered");
         assert!(
             mgr.windows[0].config.split == Split::Panel,

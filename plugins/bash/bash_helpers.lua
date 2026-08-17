@@ -54,8 +54,12 @@ end
 -- the verbatim command in a bash block plus the working directory.
 function M.build_classifier_message(command, cwd)
   return "The agent requests permission to run this command:\n\n```bash\n"
-    .. command .. "\n```\n\nWorking directory: " .. (cwd or "")
-    .. "\n\nApprove or deny using the " .. VERDICT_TOOL_NAME .. " tool."
+    .. command
+    .. "\n```\n\nWorking directory: "
+    .. (cwd or "")
+    .. "\n\nApprove or deny using the "
+    .. VERDICT_TOOL_NAME
+    .. " tool."
 end
 
 local classifier_verdict_tool = {

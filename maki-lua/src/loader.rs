@@ -717,7 +717,7 @@ mod tests {
     fn run_command_sends_correct_request() {
         let (prio_tx, prio_rx) = flume::bounded(8);
         let (tx, _rx) = flume::bounded(8);
-let handle = EventHandle {
+        let handle = EventHandle {
             tx,
             prio_tx,
             modes: Arc::new(maki_agent::ModeRegistry::builtin()),

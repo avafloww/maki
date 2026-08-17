@@ -146,10 +146,7 @@ impl StatusBar {
 
         if let Some(name) = ctx.chat_name {
             if ctx.is_subagent {
-                left_spans.push(Span::styled(
-                    subagent_label(name),
-                    theme::current().accent,
-                ));
+                left_spans.push(Span::styled(subagent_label(name), theme::current().accent));
             } else {
                 left_spans.push(Span::styled(
                     format!(" [{name}]"),
@@ -511,10 +508,7 @@ mod tests {
         term.draw(|frame| bar.view(frame, frame.area(), &ctx))
             .unwrap();
         let buf = term.backend().buffer();
-        buf.content
-            .iter()
-            .map(|c| c.symbol())
-            .collect::<String>()
+        buf.content.iter().map(|c| c.symbol()).collect::<String>()
     }
 
     #[test]

@@ -12,7 +12,7 @@ use arc_swap::ArcSwap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use maki_agent::permissions::PermissionManager;
 use maki_agent::{
-DoneReason, ImageMediaType, McpConfigErrors, McpServerInfo, McpServerStatus, McpSnapshot,
+    DoneReason, ImageMediaType, McpConfigErrors, McpServerInfo, McpServerStatus, McpSnapshot,
     McpSnapshotReader, ModeDefSpec, ToolDoneEvent, ToolOutput, ToolStartEvent, TurnCompleteEvent,
 };
 use maki_config::{PermissionsConfig, UiConfig};
@@ -3445,7 +3445,8 @@ fn plan_submit_mode_disables_auto_open() {
         .unwrap();
 
     let mut app = test_app();
-    app.lua_event_handle = maki_lua::EventHandle::disconnected_for_test_with_modes(Arc::new(registry));
+    app.lua_event_handle =
+        maki_lua::EventHandle::disconnected_for_test_with_modes(Arc::new(registry));
     app.status = Status::Streaming;
     app.run_id = 1;
     app.state.mode = Mode::Plan;

@@ -491,7 +491,7 @@ fn write_section(out: &mut String, section: &ProviderSection) {
         let _ = writeln!(out, "\n{OPENCODE_FREE_MODELS_NOTE}");
     }
 
-if section.kind == ProviderKind::OpenAi {
+    if section.kind == ProviderKind::OpenAi {
         let _ = writeln!(out, "\n{OPENAI_AUTH_NOTE}");
     }
     if section.kind == ProviderKind::Xai {

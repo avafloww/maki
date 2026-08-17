@@ -167,7 +167,12 @@ pub fn production_like_ctx() -> (ToolContext, CancelTrigger) {
     (ctx, run_trigger)
 }
 
-pub fn exec_tool_text(reg: &ToolRegistry, ctx: &ToolContext, name: &str, input: Value) -> Result<String, String> {
+pub fn exec_tool_text(
+    reg: &ToolRegistry,
+    ctx: &ToolContext,
+    name: &str,
+    input: Value,
+) -> Result<String, String> {
     let inv = reg
         .get(name)
         .unwrap_or_else(|| panic!("tool {name} not registered"))
@@ -183,7 +188,12 @@ pub fn exec_tool_text(reg: &ToolRegistry, ctx: &ToolContext, name: &str, input: 
         .map_err(|e| e.to_string())
 }
 
-pub fn exec_tool(reg: &ToolRegistry, ctx: &ToolContext, name: &str, input: Value) -> Result<Value, String> {
+pub fn exec_tool(
+    reg: &ToolRegistry,
+    ctx: &ToolContext,
+    name: &str,
+    input: Value,
+) -> Result<Value, String> {
     let out = exec_tool_text(reg, ctx, name, input)?;
     serde_json::from_str(&out).map_err(|e| format!("invalid json {out:?}: {e}"))
 }
