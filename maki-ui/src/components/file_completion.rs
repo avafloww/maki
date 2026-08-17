@@ -101,6 +101,9 @@ pub enum CompletionAction {
 struct Session {
     nucleo: Nucleo<()>,
     matcher: Matcher,
+    /// The current query, kept so the file and ref pipelines compute
+    /// highlight indices through one shared implementation.
+    query: String,
     /// Non-file candidates from Lua sources, as `(matchable label, item)`.
     /// Re-fuzzy-matched against each new query in `sync_query`.
     ref_items: Vec<(String, CompletionItem)>,
@@ -172,6 +175,7 @@ impl FileCompletionMenu {
         let session = Session {
             nucleo,
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
+            query: query.to_string(),
             ref_items,
             ref_matches: Vec::new(),
             file_matches: Vec::new(),
@@ -236,6 +240,7 @@ impl FileCompletionMenu {
             Normalization::Smart,
             false,
         );
+        s.query = query.to_string();
         s.selected = 0;
         s.scroll_offset = 0;
 
@@ -388,26 +393,27 @@ impl FileCompletionMenu {
     }
 }
 
+/// Character indices of `query` fuzzy-matched within `label`, for
+/// highlighting. `None` when the query does not match. One shared
+/// implementation for the file and ref pipelines, so prefix and fuzzy
+/// highlights always agree.
+fn highlight_indices(matcher: &mut Matcher, label: &str, query: &str) -> Option<Vec<u32>> {
+    let mut needle_buf = Vec::new();
+    let needle = Utf32Str::new(query, &mut needle_buf);
+    let mut hay_buf = Vec::new();
+    let hay = Utf32Str::new(label, &mut hay_buf);
+    let mut indices = Vec::new();
+    matcher.fuzzy_indices(hay, needle, &mut indices).map(|_| indices)
+}
+
 fn fuzzy_match<I>(matcher: &mut Matcher, needle: &str, items: I) -> Vec<Candidate>
 where
     I: IntoIterator<Item = (String, CompletionItem)>,
 {
-    let mut needle_buf = Vec::new();
-    let needle_utf32 = Utf32Str::new(needle, &mut needle_buf);
-    let mut indices = Vec::new();
     let mut out = Vec::new();
     for (label, item) in items {
-        let mut hay_buf = Vec::new();
-        let hay = Utf32Str::new(label.as_str(), &mut hay_buf);
-        indices.clear();
-        if matcher
-            .fuzzy_indices(hay, needle_utf32, &mut indices)
-            .is_some()
-        {
-            out.push(Candidate {
-                item,
-                indices: mem::take(&mut indices),
-            });
+        if let Some(indices) = highlight_indices(matcher, &label, needle) {
+            out.push(Candidate { item, indices });
         }
     }
     out
@@ -419,24 +425,13 @@ fn refresh_file_matches(s: &mut Session) {
 
     s.file_matches.clear();
 
-    let pattern = snapshot.pattern();
-    let has_pattern = !pattern.column_pattern(0).atoms.is_empty();
-    let mut indices_buf = Vec::new();
-
     for item in snapshot.matched_items(0..count) {
         let col = &item.matcher_columns[0];
         let path = col.to_string();
-
-        let indices = if has_pattern {
-            indices_buf.clear();
-            pattern
-                .column_pattern(0)
-                .indices(col.slice(..), &mut s.matcher, &mut indices_buf);
-            mem::take(&mut indices_buf)
-        } else {
-            Vec::new()
-        };
-
+        // Nucleo already decided this file matches; the shared index helper
+        // only refines which characters to highlight, so a defensive `None`
+        // just means "matches, no highlight".
+        let indices = highlight_indices(&mut s.matcher, &path, &s.query).unwrap_or_default();
         s.file_matches.push(Candidate {
             item: CompletionItem::file(path),
             indices,
@@ -541,6 +536,14 @@ fn build_grid<'a>(
 fn cell_line<'a>(c: &Candidate, width: usize, selected: bool, t: &'a theme::Theme) -> Line<'a> {
     let base = if selected { t.item_selected } else { t.item };
     let kind_style = t.completion_kinds.get(&c.item.kind).copied().unwrap_or(base);
+    // Matched characters keep the kind foreground but also carry the
+    // selection background, so the highlight is not cut out of the selected
+    // row.
+    let match_style = if selected {
+        Style { bg: base.bg, ..kind_style }
+    } else {
+        kind_style
+    };
     let text = c.item.display();
     let mut spans: Vec<Span<'a>> = Vec::new();
     let mut used = 0usize;
@@ -555,13 +558,13 @@ fn cell_line<'a>(c: &Candidate, width: usize, selected: bool, t: &'a theme::Them
         used += cw;
         let is_match = c.indices.binary_search(&(i as u32)).is_ok();
         if is_match != in_match && !run.is_empty() {
-            spans.push(Span::styled(mem::take(&mut run), if in_match { kind_style } else { base }));
+            spans.push(Span::styled(mem::take(&mut run), if in_match { match_style } else { base }));
         }
         in_match = is_match;
         run.push(ch);
     }
     if !run.is_empty() {
-        spans.push(Span::styled(run, if in_match { kind_style } else { base }));
+        spans.push(Span::styled(run, if in_match { match_style } else { base }));
     }
 
     if used < width {
@@ -616,6 +619,7 @@ mod tests {
         menu.session = Some(Session {
             nucleo,
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
+            query: String::new(),
             ref_items,
             ref_matches: Vec::new(),
             file_matches: Vec::new(),
@@ -939,6 +943,81 @@ mod tests {
             CompletionAction::Consumed
         ));
         assert_eq!(menu.session.as_ref().unwrap().selected, sel + 1);
+    }
+
+    #[test]
+    fn highlight_indices_shared_for_prefix_and_fuzzy() {
+        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+        // Prefix: the needle anchors at the start of the label.
+        assert_eq!(
+            highlight_indices(&mut matcher, "skill:review", "sk"),
+            Some(vec![0, 1])
+        );
+        // Fuzzy: the needle is scattered through the label.
+        assert_eq!(
+            highlight_indices(&mut matcher, "skill:review", "rev"),
+            Some(vec![6, 7, 8])
+        );
+        assert!(highlight_indices(&mut matcher, "skill:review", "zzz").is_none());
+    }
+
+    #[test]
+    fn selected_row_match_spans_keep_selection_background() {
+        let mut menu = session_with_items(vec![item("skill:review", "skill", "@skill:review")]);
+        menu.sync_query("sk");
+        let c = menu.session.as_ref().unwrap().matches[0].clone();
+        assert_eq!(c.indices, vec![0, 1], "prefix query must highlight the leading chars");
+
+        let t = theme::load_by_name("lunared").expect("lunared is a bundled theme");
+        let line = cell_line(&c, 40, true, &t);
+        let kind = t.completion_kinds.get("skill").copied().unwrap_or(t.item);
+        let expected_match = Style { bg: t.item_selected.bg, ..kind };
+
+        // Matched chars keep the kind foreground AND the selection background.
+        let match_span = line
+            .spans
+            .iter()
+            .find(|sp| sp.content.as_ref() == "sk")
+            .expect("matched prefix span present");
+        assert_eq!(match_span.style, expected_match);
+        // Unmatched chars keep the plain selection style.
+        let rest_span = line
+            .spans
+            .iter()
+            .find(|sp| sp.content.as_ref() == "ill:review")
+            .expect("remainder span present");
+        assert_eq!(rest_span.style, t.item_selected);
+    }
+
+    #[test]
+    fn selected_row_fuzzy_match_spans_keep_selection_background() {
+        let mut menu = session_with_items(vec![item("skill:review", "skill", "@skill:review")]);
+        menu.sync_query("rev");
+        let c = menu.session.as_ref().unwrap().matches[0].clone();
+        assert_eq!(
+            c.indices, vec![6, 7, 8],
+            "fuzzy query must highlight the scattered chars"
+        );
+
+        let t = theme::load_by_name("lunared").expect("lunared is a bundled theme");
+        let line = cell_line(&c, 40, true, &t);
+        let kind = t.completion_kinds.get("skill").copied().unwrap_or(t.item);
+        let expected_match = Style { bg: t.item_selected.bg, ..kind };
+
+        // The scattered match still carries the selection background, so it is
+        // not cut out of the selected row.
+        let match_span = line
+            .spans
+            .iter()
+            .find(|sp| sp.content.as_ref() == "rev")
+            .expect("matched span present");
+        assert_eq!(match_span.style, expected_match);
+        let lead_span = line
+            .spans
+            .iter()
+            .find(|sp| sp.content.as_ref() == "skill:")
+            .expect("leading span present");
+        assert_eq!(lead_span.style, t.item_selected);
     }
 
     #[test]
