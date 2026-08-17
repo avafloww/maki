@@ -4682,18 +4682,10 @@ fn completion_app() -> (TempDir, App) {
 }
 
 fn write_completion_fixture(cwd: &Path, rel: &str, content: &str) {
-    let path = cwd.join(rel);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, content).unwrap();
-}
-
-/// Lets the completion popup's walker finish and the popup go visible.
-fn converge_completion(app: &mut App) {
-    for _ in 0..40 {
-        let _ = app.file_completion.tick();
-        std::thread::yield_now();
-    }
-}
+     let path = cwd.join(rel);
+     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+     std::fs::write(path, content).unwrap();
+ }
 
 /// Seeding a skill writes `SKILL.md` into a directory under `.maki/skills/`;
 /// the dir name deliberately differs from the frontmatter name so no colliding

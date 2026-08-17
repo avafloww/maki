@@ -177,6 +177,7 @@ impl FileCompletionMenu {
         self.session.is_some()
     }
 
+    #[cfg(test)]
     pub fn has_selectable(&self) -> bool {
         self.session
             .as_ref()
@@ -485,12 +486,12 @@ fn build_grid<'a>(
     for r in 0..view_rows {
         let row = s.scroll_offset + r;
         let mut spans = Vec::new();
-        for j in 0..cols {
+        for (j, width) in col_widths.iter().enumerate() {
             let idx = row * cols + j;
             if idx < len {
-                spans.extend(cell_line(&s.matches[idx], col_widths[j], idx == s.selected, t).spans);
+                spans.extend(cell_line(&s.matches[idx], *width, idx == s.selected, t).spans);
             } else {
-                spans.push(Span::raw(" ".repeat(col_widths[j])));
+                spans.push(Span::raw(" ".repeat(*width)));
             }
             if j + 1 < cols {
                 spans.push(Span::raw(" ".repeat(COL_GAP)));
