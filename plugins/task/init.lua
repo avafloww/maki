@@ -447,7 +447,7 @@ local function handler(input, ctx)
 
     sess:close()
 
-if prompt_err then
+    if prompt_err then
       -- A result alongside the error means the run was cut short after
       -- streaming some text, and half a transcript beats a bare error.
       if result and result.text and result.text ~= "" then
