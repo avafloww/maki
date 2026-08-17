@@ -90,10 +90,10 @@ fn reviewer_input(description: &str) -> Value {
 
 fn wait_task_done(reg: &ToolRegistry, ctx: &ToolContext, task_id: &str) -> Value {
     for _ in 0..400 {
-        if let Ok(out) = exec_tool(reg, ctx, "task_get", json!({ "task_id": task_id })) {
-            if out["status"] == "done" || out["status"] == "closed" {
-                return out;
-            }
+        if let Ok(out) = exec_tool(reg, ctx, "task_get", json!({ "task_id": task_id }))
+            && (out["status"] == "done" || out["status"] == "closed")
+        {
+            return out;
         }
         smol::block_on(async { smol::Timer::after(Duration::from_millis(5)).await });
     }

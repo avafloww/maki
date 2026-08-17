@@ -4,6 +4,12 @@
 //! hands back deterministic single-turn replies and records the `RequestOptions`
 //! (thinking) and the tools JSON each spawned session received, so tests can
 //! assert what actually reached the "model".
+//!
+//! Each `tests/*.rs` binary compiles its own copy of this module, so a helper
+//! used by one binary but not another looks dead to that other binary. Allow it:
+//! the module is a shared helper, not every item is used by every consumer.
+
+#![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
 

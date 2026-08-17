@@ -724,18 +724,17 @@ fn load_real_driver_host(mode: &str) -> (Arc<ToolRegistry>, PluginHost) {
 }
 
 fn probe_real(reg: &ToolRegistry, ctx: &ToolContext) -> Value {
-    let out = common::exec_tool(reg, ctx, "probe", json!({})).expect("probe failed");
-    out
+    common::exec_tool(reg, ctx, "probe", json!({})).expect("probe failed")
 }
 
 /// Poll `task_get` (each poll drives the smol executor, letting the background
 /// subagent driver advance) until the task is done or closed.
 fn wait_task_done(reg: &ToolRegistry, ctx: &ToolContext, task_id: &str) -> Value {
     for _ in 0..400 {
-        if let Ok(out) = common::exec_tool(reg, ctx, "task_get", json!({ "task_id": task_id })) {
-            if out["status"] == "done" || out["status"] == "closed" {
-                return out;
-            }
+        if let Ok(out) = common::exec_tool(reg, ctx, "task_get", json!({ "task_id": task_id }))
+            && (out["status"] == "done" || out["status"] == "closed")
+        {
+            return out;
         }
         smol::block_on(async { smol::Timer::after(Duration::from_millis(5)).await });
     }
