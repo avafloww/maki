@@ -4682,10 +4682,10 @@ fn completion_app() -> (TempDir, App) {
 }
 
 fn write_completion_fixture(cwd: &Path, rel: &str, content: &str) {
-     let path = cwd.join(rel);
-     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-     std::fs::write(path, content).unwrap();
- }
+    let path = cwd.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+}
 
 /// Seeding a skill writes `SKILL.md` into a directory under `.maki/skills/`;
 /// the dir name deliberately differs from the frontmatter name so no colliding
