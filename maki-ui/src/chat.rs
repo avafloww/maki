@@ -137,6 +137,7 @@ impl Chat {
             AgentEvent::PermissionRequest { id, tool, scopes } => {
                 return ChatEventResult::PermissionRequest { id, tool, scopes };
             }
+            AgentEvent::Question { .. } => {}
             AgentEvent::AuthRequired => {
                 return ChatEventResult::AuthRequired;
             }

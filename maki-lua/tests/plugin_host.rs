@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use maki_agent::ToolOutput;
 use maki_agent::tools::{
-    DescriptionContext, ExecFuture, HeaderFuture, HeaderResult, ParseError, Tool, ToolContext,
-    ToolExecResult, ToolInvocation, ToolLive, ToolRegistry, ToolSource, timeout_annotation,
+    DescriptionContext, ExecFuture, HeaderFuture, HeaderResult, ParseError, QuestionMode, Tool,
+    ToolContext, ToolExecResult, ToolInvocation, ToolLive, ToolRegistry, ToolSource,
+    timeout_annotation,
 };
 use maki_config::{AlwaysThinking, PluginsConfig, ToolOutputLines};
 use maki_lua::{PluginError, PluginHost, WARM_TOOL_CAP};
@@ -3544,6 +3545,76 @@ fn call_tool_resolves_lua_tool_and_reports_unknown() {
     assert_eq!(out, "hello");
     host.unload("call_tool_plugin").unwrap();
     host.unload("echo_plugin").unwrap();
+}
+
+#[test]
+fn question_tool_elicits_from_the_host_in_elicitation_mode() {
+    let (reg, _host) = builtins_host();
+
+    let input = json!({
+        "questions": [
+            { "question": "Pick one", "options": [{ "label": "a" }, { "label": "b" }] },
+            { "question": "Pick many", "multiSelect": true, "options": [{ "label": "x" }, { "label": "y" }] },
+        ]
+    });
+
+    let (answer_tx, answer_rx) = flume::unbounded::<String>();
+    let (event_tx, _event_rx) = flume::unbounded::<maki_agent::Envelope>();
+    let mut ctx = maki_agent::tools::test_support::stub_ctx_with(
+        &maki_agent::AgentMode::Build,
+        Some(&maki_agent::EventSender::new(event_tx, 0)),
+        None,
+    );
+    ctx.question_mode = QuestionMode::Elicitation;
+    ctx.user_response_rx = Some(Arc::new(async_lock::Mutex::new(answer_rx)));
+    answer_tx
+        .send(r#"{"answers": [["a"], ["x", "y"]]}"#.to_string())
+        .unwrap();
+
+    let out = exec_with_ctx(&reg, "question", input, &ctx).unwrap();
+    assert_eq!(out, "Q1: a\nQ2: x, y");
+}
+
+#[test]
+fn question_tool_dismissed_by_the_host() {
+    let (reg, _host) = builtins_host();
+
+    let (answer_tx, answer_rx) = flume::unbounded::<String>();
+    let (event_tx, _event_rx) = flume::unbounded::<maki_agent::Envelope>();
+    let mut ctx = maki_agent::tools::test_support::stub_ctx_with(
+        &maki_agent::AgentMode::Build,
+        Some(&maki_agent::EventSender::new(event_tx, 0)),
+        None,
+    );
+    ctx.question_mode = QuestionMode::Elicitation;
+    ctx.user_response_rx = Some(Arc::new(async_lock::Mutex::new(answer_rx)));
+    answer_tx
+        .send(r#"{"dismissed": true}"#.to_string())
+        .unwrap();
+
+    let out = exec_with_ctx(
+        &reg,
+        "question",
+        json!({ "questions": [{ "question": "Pick one" }] }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(out, "(question dismissed by user)");
+}
+
+#[test]
+fn question_tool_fails_gracefully_without_a_host() {
+    let (reg, _host) = builtins_host();
+
+    let ctx = maki_agent::tools::test_support::stub_ctx(&maki_agent::AgentMode::Build);
+    let err = exec_with_ctx(
+        &reg,
+        "question",
+        json!({ "questions": [{ "question": "Pick one" }] }),
+        &ctx,
+    )
+    .expect_err("headless question must fail, not hang");
+    assert!(err.contains("interactive UI"), "got: {err}");
 }
 
 #[test]

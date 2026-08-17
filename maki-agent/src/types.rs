@@ -597,6 +597,12 @@ pub enum AgentEvent {
         tool: ToolKey,
         scopes: Vec<String>,
     },
+    /// The `question` tool needs structured input from the user through the
+    /// host (e.g. an ACP elicitation form) instead of the maki TUI.
+    Question {
+        id: String,
+        questions: serde_json::Value,
+    },
     AuthRequired,
     Nudge,
     SubagentHistory {

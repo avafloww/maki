@@ -21,7 +21,7 @@ use maki_agent::headless::{self, InteractiveHandle, InteractiveParams};
 use maki_agent::mcp;
 use maki_agent::permissions::PermissionAnswer;
 use maki_agent::prompt::ResolvedSlots;
-use maki_agent::tools::QUESTION_TOOL_NAME;
+use maki_agent::tools::{QUESTION_TOOL_NAME, QuestionMode};
 use maki_agent::{
     AgentConfig, AgentEvent, AgentInput, AgentMode, DoneReason, Envelope, PermissionsConfig,
     ToolOutput,
@@ -494,6 +494,7 @@ pub fn run(params: SdkParams) -> Result<()> {
         timeouts,
         prompt_slots: Arc::new(prompt_slots),
         excluded_tools: vec![QUESTION_TOOL_NAME],
+        question_mode: QuestionMode::Headless,
         mcp_handle,
         initial_wd: cwd.clone(),
         session_id,
@@ -965,6 +966,7 @@ impl EventPump {
             | AgentEvent::CompactionDone
             | AgentEvent::AuthRequired
             | AgentEvent::SubagentHistory { .. }
+            | AgentEvent::Question { .. }
             | AgentEvent::ToolSnapshot { .. }
             | AgentEvent::ToolHeaderSnapshot { .. }
             | AgentEvent::LiveToolBuf { .. }

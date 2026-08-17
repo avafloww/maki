@@ -6,13 +6,14 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol_schema::{
-    AgentNotification, AgentRequest, AgentResponse, ContentBlock, CurrentModeUpdate,
-    EmbeddedResourceResource, Error as AcpError, ImageContent, JsonRpcMessage, LoadSessionRequest,
-    McpServer, NewSessionRequest, Notification, PromptRequest, PromptResponse, Request, RequestId,
-    RequestPermissionRequest, RequestPermissionResponse, Response, SessionId, SessionModeId,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, StopReason,
-    TextContent, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+    AgentNotification, AgentRequest, AgentResponse, ContentBlock, CreateElicitationResponse,
+    CurrentModeUpdate, EmbeddedResourceResource, Error as AcpError, ImageContent, InitializeRequest,
+    JsonRpcMessage, LoadSessionRequest, McpServer, NewSessionRequest, Notification, PromptRequest,
+    PromptResponse, Request, RequestId, RequestPermissionRequest, RequestPermissionResponse,
+    Response, SessionId, SessionModeId, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+    SetSessionModeResponse, StopReason, TextContent, ToolCallId, ToolCallUpdate,
+    ToolCallUpdateFields,
 };
 use color_eyre::eyre::Context;
 use flume::{Receiver, Sender};
@@ -20,6 +21,7 @@ use maki_agent::headless::{self, InteractiveHandle, InteractiveParams};
 use maki_agent::mcp::config::{RawHttpFields, RawStdioFields, RawTransport};
 use maki_agent::mcp::{self, McpHandle};
 use maki_agent::permissions::PermissionAnswer;
+use maki_agent::tools::QuestionMode;
 use maki_agent::types::AgentEvent;
 use maki_agent::{AgentInput, AgentMode, Envelope, ImageMediaType, ImageSource};
 use maki_config::MAX_SERVER_NAME_LEN;
@@ -40,12 +42,13 @@ const FIRST_OUTGOING_REQUEST_ID: i64 = 1000;
 /// session cannot match a request of the session that replaced it.
 static NEXT_OUTGOING_REQUEST_ID: AtomicI64 = AtomicI64::new(FIRST_OUTGOING_REQUEST_ID);
 
-/// What the client still owes us. Only one permission can be outstanding: the
-/// agent holds the answer channel while it waits for one.
+/// What the client still owes us. Only one permission or elicitation can be
+/// outstanding: the agent holds the answer channel while it waits for one.
 #[derive(Default)]
 struct Pending {
     prompt: Option<RequestId>,
     permission: Option<i64>,
+    elicitation: Option<i64>,
 }
 
 type PendingState = Arc<Mutex<Pending>>;
@@ -64,6 +67,8 @@ struct Server {
     model_policy: Arc<maki_config::ModelPolicy>,
     modes: Arc<maki_agent::ModeRegistry>,
     session: Option<SessionState>,
+    /// Whether the client advertised form elicitation support at `initialize`.
+    elicitation: bool,
 }
 
 impl Server {
@@ -92,6 +97,7 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
         model_policy: Arc::clone(&params.model_policy),
         modes: Arc::clone(&params.modes),
         session: None,
+        elicitation: false,
     };
 
     let stdin = smol::Unblock::new(std::io::stdin());
@@ -150,10 +156,18 @@ async fn handle_request(
     params: &AcpParams,
 ) {
     let result = match method {
-        "initialize" => Ok(AgentResponse::InitializeResponse(
-            methods::initialize_response(),
-        )),
-"session/new" => new_session(srv, raw, params).await,
+        "initialize" => {
+            srv.elicitation = parse_params::<InitializeRequest>(raw).is_ok_and(|req| {
+                req.client_capabilities
+                    .elicitation
+                    .as_ref()
+                    .is_some_and(|c| c.form.is_some())
+            });
+            Ok(AgentResponse::InitializeResponse(
+                methods::initialize_response(),
+            ))
+        }
+        "session/new" => new_session(srv, raw, params).await,
         "session/load" => load_session(srv, raw, params).await,
         "session/prompt" => match handle_prompt(srv, raw, &id) {
             Ok(()) => return,
@@ -174,7 +188,7 @@ async fn new_session(
     let req: NewSessionRequest = parse_params(raw)?;
     close_session(srv).await;
     let mcp = start_mcp(&req.cwd, &req.mcp_servers).await;
-    let handle = spawn_session(params, req.cwd, None, Vec::new(), mcp.clone());
+    let handle = spawn_session(params, req.cwd, None, Vec::new(), mcp.clone(), srv.elicitation);
     let spec = params.model.spec();
     let resp = methods::new_session_response(handle.session_id.as_str(), &srv.modes)
         .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
@@ -200,7 +214,7 @@ async fn load_session(
     for update in translate::replay_history(&history) {
         session_update(&srv.out_tx, &sid, update);
     }
-    let handle = spawn_session(params, req.cwd, Some(session_ref), history, mcp.clone());
+    let handle = spawn_session(params, req.cwd, Some(session_ref), history, mcp.clone(), srv.elicitation);
     let spec = params.model.spec();
     let resp = methods::load_session_response(&srv.modes)
         .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
@@ -214,6 +228,7 @@ fn spawn_session(
     session_id: Option<SessionRef>,
     history: Vec<Message>,
     mcp_handle: Option<McpHandle>,
+    elicitation: bool,
 ) -> InteractiveHandle {
     headless::spawn_interactive(InteractiveParams {
         model: params.model.clone(),
@@ -232,6 +247,11 @@ fn spawn_session(
         append_system_prompt: params.append_system_prompt.clone(),
         workflow: false,
         model_policy: Arc::clone(&params.model_policy),
+        question_mode: if elicitation {
+            QuestionMode::Elicitation
+        } else {
+            QuestionMode::Headless
+        },
     })
 }
 
@@ -328,6 +348,7 @@ fn install_session(
         handle.session_id.clone(),
         srv.out_tx.clone(),
         Arc::clone(&pending),
+        srv.elicitation,
     );
     srv.session = Some(SessionState {
         handle,
@@ -439,7 +460,9 @@ fn handle_notification(srv: &Server, method: &str) {
             if let Some(session) = &srv.session {
                 // Any answer still in flight belongs to the cancelled turn, so
                 // forget its id and let it be dropped on arrival.
-                session.pending.lock().unwrap().permission = None;
+                let mut pending = session.pending.lock().unwrap();
+                pending.permission = None;
+                pending.elicitation = None;
                 let _ = session.handle.cancel_tx.try_send(());
             }
         }
@@ -452,21 +475,40 @@ fn handle_incoming_response(srv: &Server, raw: &Value) {
     let Some(id) = raw.get("id").and_then(Value::as_i64) else {
         return;
     };
-    if session
-        .pending
-        .lock()
-        .unwrap()
-        .permission
-        .take_if(|pending| *pending == id)
-        .is_none()
-    {
-        warn!(id, "response for an unknown request id");
-        return;
+    let answer = {
+        let mut pending = session.pending.lock().unwrap();
+        if pending
+            .elicitation
+            .take_if(|pending| *pending == id)
+            .is_some()
+        {
+            Some(elicitation_answer(raw))
+        } else if pending
+            .permission
+            .take_if(|pending| *pending == id)
+            .is_some()
+        {
+            Some(permission_answer(raw).encode())
+        } else {
+            warn!(id, "response for an unknown request id");
+            None
+        }
+    };
+    if let Some(answer) = answer {
+        let _ = session.handle.answer_tx.send(answer);
     }
-    let _ = session
-        .handle
-        .answer_tx
-        .send(permission_answer(raw).encode());
+}
+
+/// A response we cannot read still has to answer the tool, or it waits on an
+/// elicitation that will never come.
+fn elicitation_answer(raw: &Value) -> String {
+    match raw
+        .get("result")
+        .map(|result| serde_json::from_value::<CreateElicitationResponse>(result.clone()))
+    {
+        Some(Ok(resp)) => crate::elicitation::response_payload(resp),
+        _ => serde_json::json!({ "dismissed": true }).to_string(),
+    }
 }
 
 /// A response we cannot read still has to answer the agent, or the tool waits
@@ -528,6 +570,7 @@ fn start_event_pump(
     session_id: SessionRef,
     out_tx: Sender<Value>,
     pending: PendingState,
+    elicitation: bool,
 ) {
     smol::spawn(async move {
         let sid = SessionId::from(session_id.to_string());
@@ -566,6 +609,24 @@ fn start_event_pump(
                             params: Some(request),
                         },
                     );
+                    continue;
+                }
+                AgentEvent::Question { id, questions } => {
+                    if elicitation
+                        && let Some(request) = crate::elicitation::build_form(&questions, &sid, &id)
+                    {
+                        let request = AgentRequest::CreateElicitationRequest(request);
+                        let request_id = NEXT_OUTGOING_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+                        pending.lock().unwrap().elicitation = Some(request_id);
+                        send(
+                            &out_tx,
+                            Request {
+                                id: RequestId::Number(request_id),
+                                method: Arc::from(request.method()),
+                                params: Some(request),
+                            },
+                        );
+                    }
                     continue;
                 }
                 AgentEvent::Done { reason, .. } => {

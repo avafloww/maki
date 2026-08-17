@@ -495,9 +495,7 @@ async fn session(
         try_pair!(build_session_provider(&model_spec, inherit_provider, &agent_ctx).await);
     // A standalone task shows its model via SubagentInfo on the header;
     // a dispatching caller (batch) gets the same thing as a live annotation.
-    if !silent
-        && let Some(sink) = &agent_ctx.live_sink
-    {
+    if !silent && let Some(sink) = &agent_ctx.live_sink {
         let _ = sink.send(ToolLive::Annotation(model.spec()));
     }
 
@@ -625,6 +623,7 @@ async fn session(
             subagent_cancels: Arc::new(CancelMap::new()),
             registry: Arc::clone(maki_agent::tools::ToolRegistry::global_arc()),
             audience,
+            question_mode: agent_ctx.question_mode,
             model_policy: Arc::clone(&agent_ctx.model_policy),
         },
         system: system.unwrap_or_default(),
