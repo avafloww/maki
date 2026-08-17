@@ -884,6 +884,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn completion_kind_highlights_do_not_collapse_into_item_colour() {
+        let t = theme::load_by_name("lunared").expect("lunared is a bundled theme");
+        // A kind highlight equal to the base item colour renders as plain
+        // unhighlighted text, hiding prefix matches whose label starts with
+        // the kind name.
+        for kind in ["file", "skill", "subagent", "model"] {
+            let style = t.completion_kinds.get(kind).expect("kind seeded");
+            assert_ne!(style.fg, t.item.fg, "{kind} highlight equals the item colour");
+        }
+    }
+
     fn menu_with_matches(count: usize) -> FileCompletionMenu {
         let mut menu = session_with_items(Vec::new());
         let s = menu.session.as_mut().unwrap();

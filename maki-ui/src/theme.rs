@@ -667,20 +667,21 @@ fn build_completion_kinds(
     style: &impl Fn(&str) -> Style,
 ) -> HashMap<String, Style> {
     let completion_tbl = full_table.get("completion").and_then(|v| v.as_table());
-    let resolve = |kind: &str, fallback_key: &str| -> Style {
-        if let Some(def) = completion_tbl.and_then(|t| t.get(kind))
-            && let Ok(def) = StyleDef::deserialize(def.clone())
-        {
-            resolve_style(&def, palette)
-        } else {
-            style(fallback_key)
-        }
+    let resolve = |kind: &str| -> Style {
+        completion_tbl
+            .and_then(|t| t.get(kind))
+            .and_then(|def| StyleDef::deserialize(def.clone()).ok())
+            .map(|def| resolve_style(&def, palette))
+            // Every kind falls back to `accent` (the file highlight) so the
+            // match highlight is visible on every theme; a `[completion]`
+            // entry is how a theme differentiates kinds.
+            .unwrap_or_else(|| style("accent"))
     };
     HashMap::from([
-        ("file".to_string(), resolve("file", "accent")),
-        ("skill".to_string(), resolve("skill", "todo_completed")),
-        ("subagent".to_string(), resolve("subagent", "keybind_key")),
-        ("model".to_string(), resolve("model", "diff_new")),
+        ("file".to_string(), resolve("file")),
+        ("skill".to_string(), resolve("skill")),
+        ("subagent".to_string(), resolve("subagent")),
+        ("model".to_string(), resolve("model")),
     ])
 }
 
@@ -1120,6 +1121,58 @@ comment = "#6272a4"
         let theme = Theme::from_toml(toml).unwrap();
         assert!(!theme.syntax.scopes.is_empty());
         assert_eq!(theme.background, Color::Rgb(0x28, 0x2a, 0x36));
+    }
+
+    #[test]
+    fn completion_kinds_fall_back_to_accent_without_table() {
+        let toml = r##"
+[palette]
+foreground = "#f8f8f2"
+background = "#282a36"
+accent = "#ff79c6"
+
+[ui]
+accent = { fg = "accent" }
+"##;
+        let theme = Theme::from_toml(toml).unwrap();
+        let file = theme.completion_kinds.get("file").expect("file kind seeded");
+        // Every kind shares the file highlight so the match is visible on any
+        // theme; per-kind colors are a `[completion]` opt-in.
+        for kind in ["skill", "subagent", "model"] {
+            assert_eq!(
+                theme.completion_kinds.get(kind),
+                Some(file),
+                "{kind} must fall back to the accent highlight"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_table_overrides_kind_fallback() {
+        let toml = r##"
+[palette]
+foreground = "#f8f8f2"
+background = "#282a36"
+accent = "#ff79c6"
+cyan = "#8be9fd"
+
+[ui]
+accent = { fg = "accent" }
+
+[completion]
+skill = { fg = "cyan" }
+"##;
+        let theme = Theme::from_toml(toml).unwrap();
+        let file = theme.completion_kinds.get("file").expect("file kind seeded");
+        assert_eq!(
+            theme.completion_kinds.get("skill"),
+            Some(&Style::new().fg(Color::Rgb(0x8b, 0xe9, 0xfd)))
+        );
+        assert_eq!(
+            theme.completion_kinds.get("subagent"),
+            Some(file),
+            "unlisted kinds keep the accent fallback"
+        );
     }
 
     #[test]

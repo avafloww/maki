@@ -94,9 +94,9 @@ Theme files can also carry an optional `[completion]` table that recolors the `@
 | Key | Meaning | Falls back to |
 |---|---|---|
 | `file` | File and directory candidates | `accent` |
-| `skill` | Skill references | `todo_completed` |
-| `subagent` | Subagent references | `keybind_key` |
-| `model` | Model references | `diff_new` |
+| `skill` | Skill references | `accent` |
+| `subagent` | Subagent references | `accent` |
+| `model` | Model references | `accent` |
 
 Kinds registered by your own completion sources (via `maki.api.register_completion_source`) fall back to the plain item style until your theme defines them.
 

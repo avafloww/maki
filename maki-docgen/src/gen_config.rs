@@ -149,9 +149,9 @@ fn write_theme_section(out: &mut String) {
         out,
         "| Key | Meaning | Falls back to |\n|---|---|---|\n\
          | `file` | File and directory candidates | `accent` |\n\
-         | `skill` | Skill references | `todo_completed` |\n\
-         | `subagent` | Subagent references | `keybind_key` |\n\
-         | `model` | Model references | `diff_new` |\n"
+         | `skill` | Skill references | `accent` |\n\
+         | `subagent` | Subagent references | `accent` |\n\
+         | `model` | Model references | `accent` |\n"
     )
     .unwrap();
     writeln!(
