@@ -4806,8 +4806,14 @@ fn command_palette_takes_precedence() {
     }
     assert!(app.command_palette.is_active());
     app.update(Msg::Key(key(KeyCode::Char('@'))));
-    assert!(app.command_palette.is_active(), "palette stays matched on /compact");
-    assert!(!app.file_completion.is_active(), "@ popup suppressed while palette is up");
+    assert!(
+        app.command_palette.is_active(),
+        "palette stays matched on /compact"
+    );
+    assert!(
+        !app.file_completion.is_active(),
+        "@ popup suppressed while palette is up"
+    );
 }
 
 // --- Async subagent routing (AC.8, AC.9, AC.10) ------------------------------

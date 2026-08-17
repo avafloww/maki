@@ -326,9 +326,7 @@ impl FileCompletionMenu {
         s.viewport_height = view_rows;
         ensure_visible(s);
 
-        let budget = (input_area.width as usize)
-            .saturating_sub(COL_GAP * (cols - 1))
-            / cols;
+        let budget = (input_area.width as usize).saturating_sub(COL_GAP * (cols - 1)) / cols;
         let col_widths: Vec<usize> = (0..cols)
             .map(|j| {
                 s.matches
@@ -511,7 +509,9 @@ fn cell_line<'a>(c: &Candidate, width: usize, selected: bool, t: &'a theme::Them
 
     match &c.item {
         CompletionItem::File { .. } => {
-            let hl = base.fg(t.accent.fg.unwrap_or_default()).add_modifier(Modifier::BOLD);
+            let hl = base
+                .fg(t.accent.fg.unwrap_or_default())
+                .add_modifier(Modifier::BOLD);
             let mut in_match = false;
             let mut run = String::new();
             for (i, ch) in text.chars().enumerate() {
@@ -522,7 +522,10 @@ fn cell_line<'a>(c: &Candidate, width: usize, selected: bool, t: &'a theme::Them
                 used += cw;
                 let is_match = c.indices.binary_search(&(i as u32)).is_ok();
                 if is_match != in_match && !run.is_empty() {
-                    spans.push(Span::styled(mem::take(&mut run), if in_match { hl } else { base }));
+                    spans.push(Span::styled(
+                        mem::take(&mut run),
+                        if in_match { hl } else { base },
+                    ));
                 }
                 in_match = is_match;
                 run.push(ch);
