@@ -12,12 +12,12 @@ use maki_agent::tools::{
 };
 use maki_agent::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentParams, AgentRunParams, CancelMap,
-    CancelToken, CancelTrigger, Envelope, EventSender, History, Instructions, McpCommand,
-    PromptRole, SessionMailbox, SharedMessages, ToolOutputLines,
+    CancelToken, CancelTrigger, DoneReason, Envelope, EventSender, History, Instructions,
+    McpCommand, PromptRole, SessionMailbox, SharedMessages, ToolOutputLines,
 };
 use maki_config::ModelPolicy;
 use maki_lua::EventHandle;
-use maki_providers::{AgentError, Message, Model, TokenUsage};
+use maki_providers::{AgentError, Message, Model};
 use maki_storage::id::SessionRef;
 use serde_json::Value;
 use tracing::error;
@@ -114,20 +114,16 @@ impl AgentLoop {
         prompt_slots: &maki_agent::prompt::ResolvedSlots,
         model: &Model,
     ) -> String {
-        let mut system = self
-            .system_prompt
-            .override_text
-            .clone()
-            .unwrap_or_else(|| {
-                agent::build_system_prompt(
-                    &self.vars,
-                    &self.lua_handle.mode_registry(),
-                    mode,
-                    &self.instructions.text,
-                    prompt_slots,
-                    model,
-                )
-            });
+        let mut system = self.system_prompt.override_text.clone().unwrap_or_else(|| {
+            agent::build_system_prompt(
+                &self.vars,
+                &self.lua_handle.mode_registry(),
+                mode,
+                &self.instructions.text,
+                prompt_slots,
+                model,
+            )
+        });
         if let Some(append) = &self.system_prompt.append_text {
             system.push('\n');
             system.push_str(append);
@@ -302,11 +298,11 @@ impl AgentLoop {
 
         self.clear_cancel_trigger(run_id);
 
-        if matches!(result, Err(AgentError::Cancelled)) {
+        if matches!(result, Ok(DoneReason::Cancelled)) {
             self.min_run_id = run_id + 1;
         }
 
-        result
+        result.map(|_| ())
     }
 
     /// Base tools only. MCP definitions are injected per request by
@@ -335,7 +331,8 @@ impl AgentLoop {
     /// the model. Everything else matches the live prompt.
     fn publish_btw_system(&self, prompt_slots: &maki_agent::prompt::ResolvedSlots) {
         let slot = self.model_slot.load();
-        let system = self.build_system_with(&maki_agent::AgentMode::Build, prompt_slots, &slot.model);
+        let system =
+            self.build_system_with(&maki_agent::AgentMode::Build, prompt_slots, &slot.model);
         self.btw_system.store(Arc::new(system));
     }
 
@@ -350,22 +347,11 @@ impl AgentLoop {
     }
 
     fn emit_error(&self, run_id: u64, error: AgentError) {
+        error!(error = %error, "agent error");
         let event_tx = EventSender::new(self.agent_tx.clone(), run_id);
-        match error {
-            AgentError::Cancelled => {
-                let _ = event_tx.send(AgentEvent::Done {
-                    usage: TokenUsage::default(),
-                    num_turns: 0,
-                    stop_reason: None,
-                });
-            }
-            e => {
-                error!(error = %e, "agent error");
-                let _ = event_tx.send(AgentEvent::Error {
-                    message: e.user_message(),
-                });
-            }
-        }
+        let _ = event_tx.send(AgentEvent::Error {
+            message: error.user_message(),
+        });
     }
 }
 

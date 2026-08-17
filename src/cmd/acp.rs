@@ -62,8 +62,6 @@ pub fn run(
     setup::install_panic_log_hook();
     setup::warn_ignored_provider_fields();
 
-    let (mcp_handle, _mcp_config_errors) = smol::block_on(maki_agent::mcp::start_connected(&cwd));
-
     let prompt_slots = plugin_host.event_handle().collect_prompt_slots();
     let modes = plugin_host.event_handle().mode_registry();
 
@@ -73,7 +71,6 @@ pub fn run(
         permissions_config: config.permissions,
         timeouts,
         initial_wd: cwd,
-        mcp_handle,
         prompt_slots: Arc::new(prompt_slots),
         modes,
         yolo,

@@ -16,9 +16,9 @@ pub use mcp::{
 pub use modes::{ModeDef, ModeDefSpec, ModeError, ModeId, ModeRegistry};
 pub(crate) mod task_set;
 pub use agent::{
-    Agent, AgentParams, AgentRunParams, History, HistorySnapshot, Instructions, LoadedInstructions,
-    SharedMessages, UNAVAILABLE_RESULT, close_dangling_tool_calls, find_subdirectory_instructions,
-    is_instruction_file,
+    Agent, AgentParams, AgentRunParams, EMPTY_RESPONSE_MARKER, History, HistorySnapshot,
+    Instructions, LoadedInstructions, SharedMessages, UNAVAILABLE_RESULT,
+    close_dangling_tool_calls, find_subdirectory_instructions, is_instruction_file,
 };
 pub use cancel::{CancelMap, CancelToken, CancelTrigger};
 pub use mailbox::{MailboxError, SessionMailbox};
@@ -39,9 +39,9 @@ pub use maki_providers::AgentError;
 use maki_providers::Message;
 pub use maki_providers::{ImageMediaType, ImageSource, ThinkingConfig};
 pub use types::{
-    AgentEvent, BufferSnapshot, Envelope, EventSender, GrepFileEntry, GrepLine, GrepMatchGroup,
-    InstructionBlock, NO_FILES_FOUND, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle,
-    SubagentInfo, TextOutput, ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent,
+    AgentEvent, BufferSnapshot, DoneReason, Envelope, EventSender, GrepFileEntry, GrepLine,
+    GrepMatchGroup, InstructionBlock, NO_FILES_FOUND, SharedBuf, SnapshotLine, SnapshotSpan,
+    SpanStyle, SubagentInfo, TextOutput, ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent,
     TurnCompleteEvent,
 };
 

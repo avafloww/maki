@@ -5,10 +5,14 @@
 use std::sync::Arc;
 
 use maki_agent::AgentEvent;
+use maki_agent::ToolOutput;
 use maki_agent::tools::ToolRegistry;
 use maki_config::ToolOutputLines;
 use maki_lua::PluginHost;
+use maki_providers::StreamResponse;
 use serde_json::{Value, json};
+
+mod common;
 
 const BASH_SRC: &str = include_str!("../../plugins/bash/init.lua");
 const GREP_SRC: &str = include_str!("../../plugins/grep/init.lua");
@@ -357,17 +361,19 @@ fn index_dir_renders_identically_live_and_restored() {
 fn bash_host_with_classifier(stub_code: &str) -> (PluginHost, Arc<ToolRegistry>) {
     let reg = Arc::new(ToolRegistry::new());
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
-    // Load the real plugin first: its `bh.set_auto_mode(opts.auto_mode)`
-    // defaults auto mode off at load time. Patch afterwards so the stubs and
-    // the forced-on toggle persist for the handler's calls.
-    host.load_source("bash", BASH_SRC).unwrap();
-    let patch = format!(
+    // The classifier stub and the auto toggle must reach the same `bash_helpers`
+    // instance the handler captured. Every `load_source` gets a fresh per-env
+    // require cache, so a separate plugin chunk wouldn't share the module; run
+    // them as one source instead. The setup comes after `BASH_SRC` because it
+    // defaults auto mode off via `bh.set_auto_mode(opts.auto_mode)`.
+    let classifier_setup = format!(
         r#"local bh = require("bash_helpers")
 bh.set_auto_mode(true)
 {stub_code}
 "#
     );
-    host.load_source("bash_classifier_patch", &patch).unwrap();
+    host.load_source("bash", &format!("{BASH_SRC}\n{classifier_setup}"))
+        .unwrap();
     (host, reg)
 }
 
@@ -405,8 +411,10 @@ fn exec_verdict(host: &PluginHost, reg: &ToolRegistry, input: Value) -> Verdict 
     Verdict { is_error, output }
 }
 
-const CLASSIFY_DENY_STUB: &str = r#"bh.classify_verdict = function(...) return "deny", "stub deny reason", nil end"#;
-const CLASSIFY_ERROR_STUB: &str = r#"bh.classify_verdict = function(...) return "error", nil, "stub boom" end"#;
+const CLASSIFY_DENY_STUB: &str =
+    r#"bh.classify_verdict = function(...) return "deny", "stub deny reason", nil end"#;
+const CLASSIFY_ERROR_STUB: &str =
+    r#"bh.classify_verdict = function(...) return "error", nil, "stub boom" end"#;
 
 #[test]
 fn auto_mode_deny_rejects_command_without_running_jobstart() {
@@ -429,10 +437,186 @@ fn auto_mode_deny_rejects_command_without_running_jobstart() {
 fn auto_mode_error_denies_fail_closed_without_prompting() {
     let (host, reg) = bash_host_with_classifier(CLASSIFY_ERROR_STUB);
     let result = exec_verdict(&host, &reg, json!({ "command": "echo never-runs-2" }));
-    assert!(result.is_error, "a classifier error must fail closed (deny)");
+    assert!(
+        result.is_error,
+        "a classifier error must fail closed (deny)"
+    );
     assert!(
         result.output.contains("denied by auto-mode"),
         "a classifier error must not prompt and never auto-run: {}",
         result.output
     );
+}
+
+// Phase 4 (real driver): the classifier agent session runs for real against a
+// canned provider (via `inherit_provider`), instead of a synchronous Lua stub.
+// This is what lets the approve path be observed at all: after the classifier
+// approves, the bash handler falls through to the real jobstart loop.
+
+/// Load the real bash plugin with auto mode on and `bh.classify_verdict` wrapped
+/// so the classifier session is the real `maki.agent.session` reusing the parent
+/// (canned) provider via `inherit_provider`. The plugin's gating logic runs
+/// unchanged; only the spawn is forwarded.
+fn bash_host_with_real_classifier() -> (PluginHost, Arc<ToolRegistry>) {
+    bash_host_with_real_classifier_auto(true)
+}
+
+/// Like [`bash_host_with_real_classifier`] but with auto mode initialized to
+/// `auto_on`. The bash plugin defaults auto mode OFF, so a separate host with
+/// `auto_on = false` models the state after `/automode` toggled it off. (Each
+/// `load_source` gets its own per-env require cache, so toggling `bash_helpers`
+/// from a separate chunk would hit a different singleton than the handler
+/// captured; two hosts avoid that footgun.)
+fn bash_host_with_real_classifier_auto(auto_on: bool) -> (PluginHost, Arc<ToolRegistry>) {
+    let reg = Arc::new(ToolRegistry::new());
+    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let classifier_setup = format!(
+        r#"
+local bh = require("bash_helpers")
+bh.set_auto_mode({auto})
+local real_classify = bh.classify_verdict
+local real_session = maki.agent.session
+local function canned_spawn(ctx, opts)
+  local so = bh.spawn_opts(opts)
+  so.inherit_provider = true
+  return real_session(ctx, so)
+end
+bh.classify_verdict = function(command, cwd, opts, ctx)
+  return real_classify(command, cwd, opts, ctx, canned_spawn)
+end
+"#,
+        auto = if auto_on { "true" } else { "false" },
+    );
+    host.load_source("bash", &format!("{BASH_SRC}\n{classifier_setup}"))
+        .unwrap();
+    (host, reg)
+}
+
+fn verdict_tool_use(approved: bool, reason: &str) -> StreamResponse {
+    common::canned_tool_use(
+        "classifier_verdict",
+        json!({ "approved": approved, "reason": reason }),
+    )
+}
+
+/// Run the real bash handler against a canned-provider ctx and return its
+/// `output` (`Ok` for the jobstart path, `Err` for the gate's deny/error paths).
+fn exec_bash_real(
+    host: &PluginHost,
+    reg: &ToolRegistry,
+    provider: Arc<common::CannedProvider>,
+    input: Value,
+) -> Result<ToolOutput, String> {
+    let (mut ctx, _rx, _trigger) = common::ctx_with_provider(Arc::clone(&provider));
+    ctx.tool_output_lines = view_lines();
+    let inv = reg
+        .get("bash")
+        .expect("bash tool registered")
+        .tool
+        .parse(&input)
+        .expect("parse failed");
+    let result = smol::block_on(async { inv.execute(&ctx).await });
+    host.load_source("auto_barrier", "").unwrap();
+    result.output
+}
+
+fn bash_output(out: ToolOutput) -> String {
+    match out {
+        ToolOutput::Plain(s) | ToolOutput::Markdown(s) => s.text,
+        other => panic!("unexpected output: {other:?}"),
+    }
+}
+
+/// Deny blocks the command (carrying the classifier reason); approve falls
+/// through to the real jobstart loop and the command runs. The approve path is
+/// the one the stub suite could not observe.
+#[test]
+fn automode_deny_blocks_and_approve_runs() {
+    let (host, reg) = bash_host_with_real_classifier();
+
+    let deny = Arc::new(common::CannedProvider::new(vec![
+        verdict_tool_use(false, "stub deny reason"),
+        common::canned_reply("done"),
+    ]));
+    let err = exec_bash_real(
+        &host,
+        &reg,
+        Arc::clone(&deny),
+        json!({ "command": "echo denied-side-effect" }),
+    )
+    .expect_err("a deny must fail the tool");
+    assert!(err.contains("denied"), "{err}");
+    assert!(
+        err.contains("stub deny reason"),
+        "deny carries the reason: {err}"
+    );
+
+    let approve = Arc::new(common::CannedProvider::new(vec![
+        verdict_tool_use(true, "ok"),
+        common::canned_reply("done"),
+    ]));
+    let out = exec_bash_real(
+        &host,
+        &reg,
+        Arc::clone(&approve),
+        json!({ "command": "echo approved-side-effect" }),
+    )
+    .expect("an approve must run the command");
+    assert_eq!(bash_output(out), "approved-side-effect");
+}
+
+/// A classifier error (here: a verdict the tool rejects, so none is captured)
+/// fails closed — denied, no prompt, no run.
+#[test]
+fn automode_error_fails_closed_without_prompting() {
+    let (host, reg) = bash_host_with_real_classifier();
+    let provider = Arc::new(common::CannedProvider::new(vec![
+        common::canned_tool_use("classifier_verdict", json!({ "approved": "not-a-bool" })),
+        common::canned_reply("done"),
+    ]));
+    let err = exec_bash_real(
+        &host,
+        &reg,
+        Arc::clone(&provider),
+        json!({ "command": "echo never-runs" }),
+    )
+    .expect_err("a classifier error must deny");
+    assert!(err.contains("denied by auto-mode"), "{err}");
+}
+
+/// With auto mode OFF the bash handler runs the plain path and never consults
+/// the classifier; with auto mode ON a subsequent command is gated by it. Two
+/// hosts model the `/automode` toggle state (each `load_source` has its own
+/// require cache, so the toggle is expressed as the host's initial auto state
+/// rather than a cross-chunk mutation).
+#[test]
+fn automode_toggle_flows_through_ui() {
+    let (host_off, reg_off) = bash_host_with_real_classifier_auto(false);
+    let idle = Arc::new(common::CannedProvider::new(vec![]));
+    let out = exec_bash_real(
+        &host_off,
+        &reg_off,
+        Arc::clone(&idle),
+        json!({ "command": "echo auto-off-runs" }),
+    )
+    .expect("with auto mode off the plain path runs");
+    assert_eq!(bash_output(out), "auto-off-runs");
+    assert!(
+        idle.captured_thinking().is_empty(),
+        "classifier must not run with auto mode off"
+    );
+
+    let (host_on, reg_on) = bash_host_with_real_classifier_auto(true);
+    let deny = Arc::new(common::CannedProvider::new(vec![
+        verdict_tool_use(false, "denied with auto on"),
+        common::canned_reply("done"),
+    ]));
+    let err = exec_bash_real(
+        &host_on,
+        &reg_on,
+        Arc::clone(&deny),
+        json!({ "command": "echo should-be-denied" }),
+    )
+    .expect_err("with auto mode on the classifier gates the command");
+    assert!(err.contains("denied with auto on"), "{err}");
 }

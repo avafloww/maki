@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use async_lock::Mutex as AsyncMutex;
 use futures::future::{Either, select};
 use maki_agent::agent::tool_dispatch::{self, Emit};
-use maki_agent::cancel::{CancelMap, CancelSlot};
+use maki_agent::cancel::{CancelMap, CancelSlot, CancelToken};
 use maki_agent::tools::interpreter_bridge;
 use maki_agent::tools::registry::ToolRegistry;
 use maki_agent::tools::schema::sanitize_tool_input_schema;
@@ -18,8 +18,8 @@ use maki_agent::tools::{
     ToolContext, ToolFilter, ToolLive,
 };
 use maki_agent::{
-    Agent, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, Envelope, EventSender,
-    History, McpSession, SubagentInfo, ToolDoneEvent,
+    Agent, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, DoneReason,
+    EMPTY_RESPONSE_MARKER, Envelope, EventSender, History, McpSession, SubagentInfo, ToolDoneEvent,
 };
 use maki_lua_macro::{lua_class, lua_fn, lua_table};
 use maki_providers::model::ModelTier;
@@ -35,12 +35,39 @@ use crate::api::ui::buf::BufHandle;
 use crate::api::util::convert::{json_to_lua, lua_to_json, lua_tool_result};
 use crate::api::util::ctx::{AgentContext, LuaCtx};
 use crate::api::util::pair::{Pair, err_pair, try_pair};
+use crate::runtime::CANCELLED_MSG;
 
 const SESSION_CLOSED_ERR: &str = "session closed";
 const DEFAULT_SESSION_AUDIENCE: ToolAudience = ToolAudience::GENERAL_SUB;
 
 /// A per-session structured-output commit slot.
 type CommitSlot = Arc<Mutex<Option<JsonValue>>>;
+
+/// Build the `(model, provider)` pair that backs a `maki.agent.session` spawn.
+/// `inherit_provider` (or an absent `model_spec`) reuses the parent model and
+/// provider so a test-side wrapper can drive a real spawned session through a
+/// caller-provided provider without network. Otherwise build a provider for the
+/// given `model_spec`.
+async fn build_session_provider(
+    model_spec: &Option<String>,
+    inherit_provider: bool,
+    agent_ctx: &AgentContext,
+) -> Result<(Model, Arc<dyn provider::Provider>), String> {
+    if inherit_provider || model_spec.is_none() {
+        Ok((
+            Model::clone(&agent_ctx.model),
+            Arc::clone(&agent_ctx.provider),
+        ))
+    } else {
+        let spec = model_spec.as_deref().expect("model_spec present");
+        let mut m = Model::from_spec_with_policy(spec, &agent_ctx.model_policy)
+            .map_err(|e| e.to_string())?;
+        let p = provider::from_model_async(&mut m, agent_ctx.timeouts)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok((m, Arc::from(p)))
+    }
+}
 
 /// Per-session structured-output commit slots, keyed by the session's ui_id.
 /// `maki.agent.report_task_result` routes a commit to whichever session is
@@ -219,7 +246,10 @@ async fn system_prompt(
     ctx: mlua::UserDataRef<LuaCtx>,
     opts: Table,
 ) -> LuaResult<Pair<String>> {
-    let agent = try_pair!(dispatch_ctx(&ctx, "system_prompt"));
+    let slots = Arc::clone(&try_pair!(dispatch_ctx(&ctx, "system_prompt")).prompt_slots);
+    // Nothing may hold the ctx borrow across the wait: a cancel hook firing
+    // meanwhile needs `ctx:finish`, which takes it mutably.
+    drop(ctx);
     let prompt_id_str: String = opts.get("prompt_id")?;
     let prompt_id = match prompt_id_str.as_str() {
         "research" => maki_agent::prompt::PromptId::Research,
@@ -240,7 +270,7 @@ async fn system_prompt(
         _ => return Err(mlua::Error::runtime("instructions must be bool or string")),
     };
 
-    let assembled = maki_agent::prompt::assemble(prompt_id, &agent.prompt_slots, &instructions);
+    let assembled = maki_agent::prompt::assemble(prompt_id, &slots, &instructions);
     Ok((Some(vars.apply(&assembled).into_owned()), None))
 }
 
@@ -415,6 +445,10 @@ async fn call_tool(
 ///     `"max"`), or a budget integer (token count). Inherits parent setting
 ///     if omitted.
 ///   `fast` (boolean?) - use fast mode. Inherits parent setting if omitted.
+///   `inherit_provider` (boolean?) - reuse the parent model and provider instead
+///     of building one from `model_spec`. Used by tests (and tools that want to
+///     thread a caller-provided provider) to drive a real spawned session without
+///     hitting the network. `model_spec` is ignored when this is `true`. Default: `false`.
 ///   `silent` (boolean?) - do not relay the session's turns, annotations, or
 ///     usage into the parent session's UI or event stream. The session still
 ///     completes and `:prompt()` still returns its result (including a commit
@@ -450,29 +484,21 @@ async fn session(
         }
         None => DEFAULT_SESSION_AUDIENCE,
     };
+    let inherit_provider: bool = opts
+        .get::<Option<bool>>("inherit_provider")?
+        .unwrap_or(false);
     let fast: bool = opts
         .get::<Option<bool>>("fast")?
         .unwrap_or(agent_ctx.opts.fast);
     let mcp_enabled: bool = opts.get::<Option<bool>>("mcp")?.unwrap_or(true);
     let silent: bool = opts.get::<Option<bool>>("silent")?.unwrap_or(false);
 
-    let (model, provider): (Model, Arc<dyn provider::Provider>) = if let Some(ref spec) = model_spec
-    {
-        let mut m = try_pair!(Model::from_spec_with_policy(spec, &agent_ctx.model_policy));
-        let p = try_pair!(provider::from_model_async(&mut m, agent_ctx.timeouts).await);
-        (m, Arc::from(p))
-    } else {
-        (
-            Model::clone(&agent_ctx.model),
-            Arc::clone(&agent_ctx.provider),
-        )
-    };
+    let (model, provider): (Model, Arc<dyn provider::Provider>) =
+        try_pair!(build_session_provider(&model_spec, inherit_provider, &agent_ctx).await);
     // A standalone task shows its model via SubagentInfo on the header;
     // a dispatching caller (batch) gets the same thing as a live annotation.
-    if !silent {
-        if let Some(sink) = &agent_ctx.live_sink {
-            let _ = sink.send(ToolLive::Annotation(model.spec()));
-        }
+    if !silent && let Some(sink) = &agent_ctx.live_sink {
+        let _ = sink.send(ToolLive::Annotation(model.spec()));
     }
 
     let mut tools_json: JsonValue = match tools_val {
@@ -560,7 +586,13 @@ async fn session(
         .tool_use_id
         .clone()
         .unwrap_or_else(|| format!("session-{}", MakiId::generate()));
-    let (child_trigger, child_cancel) = agent_ctx.cancel.child();
+    // The subagent's cancel is independent of the parent run's cancel: it is
+    // triggered only through the shared `subagent_cancels` map (task_despawn,
+    // CancelSubagent, global CancelAll). Deriving it from `agent_ctx.cancel`
+    // (the run's token, which the UI fires at normal run end by dropping the
+    // run's CancelTrigger) would close every in-flight subagent as soon as the
+    // spawning run finishes.
+    let (child_trigger, child_cancel) = CancelToken::new();
     // Several sessions can share one `ui_id`, so keep the slot and retire
     // only ours on close instead of clearing the whole key.
     let cancel_slot = agent_ctx
@@ -621,6 +653,7 @@ async fn session(
         start: Instant::now(),
         commit,
         input_tx: Some(input_tx.clone()),
+        replied: false,
         closed: false,
     };
 
@@ -771,21 +804,42 @@ struct SubagentDriver {
     /// Queue used to submit further messages to this subagent (also carried
     /// on `SubagentInfo` so the UI can route tab submits to it).
     input_tx: Option<flume::Sender<String>>,
+    /// Whether a completed run has already surfaced its history to the parent,
+    /// so `close` does not re-emit a duplicate reply to the main agent.
+    replied: bool,
     closed: bool,
 }
 
 impl SubagentDriver {
+    /// Surface this subagent's transcript to the parent so its latest reply
+    /// reaches the main agent. Idempotent: only the first completed run after a
+    /// spawn delivers a reply; `close` uses the same guard to avoid re-queueing
+    /// the same text when the user eventually despawns the subagent.
+    fn emit_history(&mut self) {
+        if self.replied {
+            return;
+        }
+        self.replied = true;
+        let _ = self.parent_event_tx.send(AgentEvent::SubagentHistory {
+            tool_use_id: self.ui_id.clone(),
+            messages: self.history.as_slice().to_vec(),
+        });
+    }
+
     fn close(&mut self) {
         if self.closed {
             return;
         }
         self.closed = true;
         self.parent_cancels.retire(&self.ui_id, self.cancel_slot);
-        let messages = std::mem::replace(&mut self.history, History::new(Vec::new())).into_vec();
-        let _ = self.parent_event_tx.send(AgentEvent::SubagentHistory {
-            tool_use_id: self.ui_id.clone(),
-            messages,
-        });
+        if !self.replied {
+            let messages =
+                std::mem::replace(&mut self.history, History::new(Vec::new())).into_vec();
+            let _ = self.parent_event_tx.send(AgentEvent::SubagentHistory {
+                tool_use_id: self.ui_id.clone(),
+                messages,
+            });
+        }
         info!(
             name = %self.name,
             duration_ms = self.start.elapsed().as_millis() as u64,
@@ -846,7 +900,8 @@ impl SubagentDriver {
             prompt: None,
         };
         let error = match agent.run(input).await {
-            Ok(()) => None,
+            Ok(DoneReason::Cancelled) => Some(CANCELLED_MSG.to_owned()),
+            Ok(_) => None,
             Err(e) => Some(e.to_string()),
         };
         drop(agent);
@@ -866,7 +921,9 @@ impl SubagentDriver {
             .rfind(|m| matches!(m.role, Role::Assistant))
             .and_then(|m| {
                 m.content.iter().find_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.as_str()),
+                    ContentBlock::Text { text } if text != EMPTY_RESPONSE_MARKER => {
+                        Some(text.as_str())
+                    }
                     _ => None,
                 })
             })
@@ -908,6 +965,7 @@ async fn subagent_driver(
         }
         *status.lock().unwrap() = SubagentStatus::Done(result.clone());
         let _ = done_tx.send(result);
+        driver.emit_history();
     }
     unregister_commit_slot(&driver.ui_id);
     driver.close();
@@ -944,7 +1002,9 @@ impl Drop for LuaSession {
 /// tools).
 ///
 /// @param message string User message to send.
-/// @return (table?, string?) Result table on success, or `(nil, err)` on failure.
+/// @return (table?, string?) Result table on success, or `(nil, err)` on
+/// failure. A run cut short after streaming some text hands you both: the
+/// error and a `{ text = <what it streamed> }` table.
 /// @example
 /// local r, err = sess:prompt("What files are in this project?")
 /// if err then error(err) end
@@ -970,7 +1030,14 @@ async fn prompt(
 
 fn build_prompt_result(lua: &Lua, result: SubagentRunResult) -> LuaResult<Pair<Table>> {
     if let Some(e) = &result.error {
-        return Ok((None, Some(e.clone())));
+        let tbl = if result.text.is_empty() {
+            None
+        } else {
+            let t = lua.create_table()?;
+            t.set("text", result.text)?;
+            Some(t)
+        };
+        return Ok((tbl, Some(e.clone())));
     }
     let tbl = lua.create_table()?;
     tbl.set("text", result.text)?;
@@ -1120,11 +1187,47 @@ fn call_local_tool(
 
 #[cfg(test)]
 mod tests {
-    use maki_agent::TurnCompleteEvent;
+    use maki_agent::tools::test_support::stub_ctx;
+    use maki_agent::{DoneReason, TurnCompleteEvent};
     use maki_providers::Message;
     use serde_json::json;
 
     use super::*;
+
+    /// `inherit_provider` must select the reuse branch even when `model_spec`
+    /// is present, so a test-side wrapper can drive a real spawned session
+    /// through the parent provider instead of building one from the spec
+    /// (which would hit the network).
+    #[test]
+    fn inherit_provider_selects_reuse_branch_over_model_spec() {
+        let ctx = stub_ctx(&AgentMode::Build);
+        let parent_model = ctx.model.spec();
+        let parent_provider = Arc::clone(&ctx.provider);
+        let agent = AgentContext::from(&ctx);
+
+        let (model, provider) = smol::block_on(build_session_provider(
+            &Some("anthropic/claude-opus-4-20250514".into()),
+            true,
+            &agent,
+        ))
+        .unwrap();
+
+        assert!(
+            Arc::ptr_eq(&provider, &parent_provider),
+            "must reuse parent provider"
+        );
+        assert_eq!(model.spec(), parent_model, "must reuse parent model");
+    }
+
+    #[test]
+    fn absent_model_spec_reuses_parent_provider() {
+        let ctx = stub_ctx(&AgentMode::Build);
+        let parent_provider = Arc::clone(&ctx.provider);
+        let agent = AgentContext::from(&ctx);
+
+        let (_, provider) = smol::block_on(build_session_provider(&None, false, &agent)).unwrap();
+        assert!(Arc::ptr_eq(&provider, &parent_provider));
+    }
 
     fn call(src: &str, input: JsonValue) -> Result<String, String> {
         let lua = Lua::new();
@@ -1212,7 +1315,7 @@ mod tests {
             AgentEvent::Done {
                 usage: DONE_USAGE,
                 num_turns: 2,
-                stop_reason: None,
+                reason: DoneReason::EndTurn,
             },
         ] {
             sub_tx.send(envelope(event)).unwrap();

@@ -26,6 +26,8 @@ pub const DEFAULT_MAX_INPUT_LINES: u32 = 20;
 
 pub const MIN_MAX_INPUT_LINES: u32 = 1;
 
+pub const MAX_SERVER_NAME_LEN: usize = 64;
+
 pub const DEFAULT_MAX_CONTINUATION_TURNS: u32 = 3;
 pub const DEFAULT_COMPACTION_BUFFER: CompactionBuffer = CompactionBuffer::Percent(20);
 
@@ -63,6 +65,8 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "index",
     "list",
     "memory",
+    "mode_plan_override",
+    "plan_submit_tool",
     "question",
     "read",
     "sessions",
@@ -78,7 +82,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
 
 /// Bundled but not enabled by default. Users opt in with
 /// `plugins.<name> = { enabled = true }` in `maki.setup`.
-pub const OPT_IN_BUILTINS: &[&str] = &["mode_plan_override", "plan_submit_tool"];
+pub const OPT_IN_BUILTINS: &[&str] = &[];
 
 /// These used to be their own `tools.<name>` tables and are now edit plugin
 /// options; the config layer uses this list to reject the old form with a
@@ -1352,7 +1356,7 @@ fn push_rules(
 
 pub fn is_valid_server_name(name: &str) -> bool {
     !name.is_empty()
-        && name.len() <= 64
+        && name.len() <= MAX_SERVER_NAME_LEN
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 

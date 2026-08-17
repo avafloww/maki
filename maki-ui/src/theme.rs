@@ -190,6 +190,10 @@ pub static BUNDLED_THEMES: &[ThemeEntry] = &[
         toml: include_str!("themes/kanagawa.toml"),
     },
     ThemeEntry {
+        name: "lunared",
+        toml: include_str!("themes/lunared.toml"),
+    },
+    ThemeEntry {
         name: "material_darker",
         toml: include_str!("themes/material_darker.toml"),
     },

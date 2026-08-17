@@ -441,6 +441,53 @@ end
 
 ---
 
+### `maki.api.run_command()` {#maki-api-run_command}
+
+```lua
+maki.api.run_command({cmdline})
+```
+
+Runs a slash command by name, exactly as typing it in the input would.
+Works for built-ins, custom `/project:` and `/user:` commands, MCP
+prompts, and commands other plugins registered.
+
+Use it to alias a command you like under a name you prefer, instead of
+reimplementing what it does. See `maki.ui.action` for the same idea
+applied to keybound UI actions.
+
+Pass the whole command line, arguments included: `"/cd ~/src"`. The
+leading slash is optional. Names match exactly apart from case, so a typo
+reports an error instead of running the closest command, and a cycle of
+aliases stops with one too.
+
+This returns as soon as the command has been dispatched, not when it
+finishes, so aliasing something long-running like `/compact` does not
+block your handler.
+
+**Parameters:**
+
+- `{cmdline}` (`string`) Command line, e.g. `"/new"` or `"/cd ~/src"`.
+
+**Returns:** (`boolean|nil`, `string|nil`) `true` once dispatched, or nil and an error message for an unknown command.
+
+**Example:**
+
+```lua
+-- /resume as an alias for the built-in session picker:
+maki.api.register_command({
+  name = "/resume",
+  description = "Alias for /sessions",
+  handler = function()
+    local ok, err = maki.api.run_command("/sessions")
+    if not ok then
+      maki.ui.flash("could not run /sessions: " .. err)
+    end
+  end,
+})
+```
+
+---
+
 ### `maki.api.create_autocmd()` {#maki-api-create_autocmd}
 
 ```lua
@@ -820,6 +867,10 @@ and tool set.
     `"max"`), or a budget integer (token count). Inherits parent setting
     if omitted.
   - `fast` (`boolean?`) use fast mode. Inherits parent setting if omitted.
+  - `inherit_provider` (`boolean?`) reuse the parent model and provider instead
+    of building one from `model_spec`. Used by tests (and tools that want to
+    thread a caller-provided provider) to drive a real spawned session without
+    hitting the network. `model_spec` is ignored when this is `true`. Default: `false`.
   - `silent` (`boolean?`) do not relay the session's turns, annotations, or
     usage into the parent session's UI or event stream. The session still
     completes and `:prompt()` still returns its result (including a commit
@@ -893,7 +944,9 @@ tools).
 
 - `{message}` (`string`) User message to send.
 
-**Returns:** (`table?`, `string?`) Result table on success, or `(nil, err)` on failure.
+**Returns:** (`table?`, `string?`) Result table on success, or `(nil, err)` on
+failure. A run cut short after streaming some text hands you both: the
+error and a `{ text = <what it streamed> }` table.
 
 **Example:**
 
@@ -1144,11 +1197,16 @@ permit:release()
 maki.async.on_cancel({fn})
 ```
 
-Register {fn} to run as soon as the current task is cancelled, without
-waiting for whatever it is doing to finish. Use it to paint the
-cancelled state: a handler waiting on children (`gather`, `call_tool`)
-stays parked until they wind down, so anything after the wait is too
-late to reach the screen.
+Register {fn} to run as soon as the current task is cancelled or hits
+its deadline, without waiting for whatever it is doing to finish. Use
+it to paint the cancelled state: a handler waiting on children
+(`gather`, `call_tool`) stays parked until they wind down, so anything
+after the wait is too late to reach the screen.
+
+The callback receives the reason (`"cancelled"` or `"timeout"`) and may
+still call `ctx:finish`; the host prefers that reply over the generic
+cancelled/timeout error. Mark it `is_error = true` and end it with a
+marker, so the model knows the output it gets is cut short.
 
 The callback runs outside your coroutine, so it must not yield. It
 fires at most once, immediately if the task is already cancelled. An
@@ -1157,13 +1215,14 @@ other hooks still run.
 
 **Parameters:**
 
-- `{fn}` (`function`) Zero-argument function to run on cancel.
+- `{fn}` (`function`) Function to run on cancel; receives the reason string.
 
 **Example:**
 
 ```lua
-maki.async.on_cancel(function()
-  view:append({ { "cancelled", "tool_error" } })
+maki.async.on_cancel(function(reason)
+  view:append({ { reason, "tool_error" } })
+  ctx:finish({ llm_output = partial .. "\n[cancelled; output is partial]", is_error = true })
 end)
 maki.async.gather(children)
 ```
@@ -4391,6 +4450,9 @@ Valid names: `"file_picker"`, `"search"`, `"tasks"`, `"help"`,
 `"plan_toggle"`, `"plan_editor"`, `"plan_submit"`, `"edit_input"`,
 `"pop_queue"`, `"prev_chat"`, `"next_chat"`.
 
+For slash commands rather than keybound actions, see
+`maki.api.run_command`.
+
 **Parameters:**
 
 - `{name}` (`string`) Action name, e.g. `"file_picker"`.
@@ -5171,6 +5233,20 @@ return M
 --
 -- Ported from polytoken's default plan specification (plan_spec_default.md);
 -- keep in sync with upstream.
+```
+
+### `require("maki.partial")`
+
+```lua
+-- When a tool is cut short, it still hands back what it printed. The marker
+-- tells the model that output is real but unfinished. One home for the
+-- wording and the painting, so every tool says it the same way.
+
+--- Close {view} on the marker and build the tool reply. {out} is everything
+--- the tool streamed, already truncated; empty means the view still shows a
+--- placeholder to drop. {reason} is a cancel-hook reason ("cancelled" |
+--- "timeout").
+function M.cut(view, out, reason, timeout_secs)
 ```
 
 ### `require("maki.scroll")`

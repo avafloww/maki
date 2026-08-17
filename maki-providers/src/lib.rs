@@ -16,11 +16,12 @@ pub use providers::Timeouts;
 pub use providers::catalog::ProviderData;
 pub use providers::catalog::{
     catalog_provider, catalog_provider_if_available, catalog_providers,
-    catalog_providers_if_available, model_meta_if_available,
+    catalog_providers_if_available, model_meta_if_available, warm_catalog,
 };
 pub use providers::copilot::auth as copilot_auth;
 pub use providers::dynamic;
 pub use providers::openai::auth as openai_auth;
+pub use providers::xai::auth as xai_auth;
 pub use types::{
     ContentBlock, Effort, EffortDialect, IMAGE_OMITTED_NOTE, ImageMediaType, ImageSource, Message,
     MessageKind, ProviderEvent, ProviderUsage, RequestOptions, Role, StopReason, StreamResponse,

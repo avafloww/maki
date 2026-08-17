@@ -49,6 +49,7 @@ use crate::components::{
     Action, DisplayMessage, DisplayRole, ExitRequest, Overlay, RetryInfo, Status, is_ctrl,
 };
 use crate::image;
+use crate::repaint::{Cadence, Dirty, Watch};
 use crate::selection::{SelectionState, SelectionZone, ZoneRegistry};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
@@ -58,7 +59,9 @@ use maki_agent::{
     SharedMessages, SubagentInfo,
 };
 use maki_config::{ModelPolicy, UiConfig};
-use maki_lua::{BuiltinAction, EventHandle, HintReader, KeymapReader, LuaCommandReader, WinView};
+use maki_lua::{
+    BuiltinAction, EventHandle, HintReader, HintSnapshot, KeymapReader, LuaCommandReader, WinView,
+};
 use maki_providers::{ContentBlock, Message, Model, Role, ThinkingConfig, add_cost};
 use maki_storage::StateDir;
 use maki_storage::input_history::InputHistory;
@@ -103,6 +106,12 @@ const SUBAGENT_REPLY_HEADER: &str = "[msg from ";
 const SUBAGENT_REPLY_SUFFIX: &str = "] ";
 /// Length cap for the `/tasks` row message snippet (AC.10).
 const SNIPPET_CHARS: usize = 64;
+
+/// Depth budget for `maki.api.run_command` chains. Aliases nest a level or two
+/// in practice; the cap only exists so a command aliasing itself reports an
+/// error instead of ping-ponging with the Lua thread forever.
+pub(crate) const MAX_COMMAND_DEPTH: u8 = 8;
+pub(crate) const COMMAND_DEPTH_MSG: &str = "slash command nested too deeply (alias cycle?)";
 
 #[derive(Clone)]
 pub(super) struct TaskEntry {
@@ -229,6 +238,7 @@ pub struct App {
     pub(crate) lua_event_handle: EventHandle,
     pub(super) keymap_reader: KeymapReader,
     pub(super) hint_reader: HintReader,
+    hints: Watch<HintSnapshot>,
     pub(crate) restore_event_tx: Option<maki_agent::EventSender>,
     pub(super) restoring: Arc<AtomicBool>,
     /// Per-subagent channels: the `answer_tx` (mid-turn interrupt replies) and,
@@ -322,6 +332,7 @@ impl App {
             permissions,
             model_policy: Arc::clone(&model_policy),
             lua_event_handle,
+            hints: Watch::seeded(hint_reader.load_full()),
             keymap_reader,
             hint_reader,
             restore_event_tx: None,
@@ -376,10 +387,12 @@ impl App {
         self.lua_event_handle.fire_autocmd(event, data);
     }
 
-    pub fn tick_error_expiry(&mut self) {
-        if self.status.is_error_expired() {
-            self.status = Status::Idle;
+    pub fn tick_error_expiry(&mut self) -> Dirty {
+        if !self.status.is_error_expired() {
+            return Dirty::NO;
         }
+        self.status = Status::Idle;
+        Dirty::YES
     }
 
     pub fn poll_login_picker(&mut self) -> Vec<Action> {
@@ -951,7 +964,10 @@ impl App {
             .handle_key(key, &self.input_box.buffer.value())
         {
             CommandAction::Consumed => return vec![],
-            CommandAction::Execute(cmd) => return self.execute_command(cmd),
+            CommandAction::Execute(cmd) => {
+                self.input_box.discard();
+                return self.execute_command(cmd, 0);
+            }
             CommandAction::Complete(text) => {
                 self.command_palette.sync(&text);
                 self.input_box.set_input(text);
@@ -1168,9 +1184,8 @@ impl App {
             if let Some(reply) = reply {
                 // Header the reply with the task id so it reads as subagent
                 // output rather than a message typed by the user.
-                let text = format!(
-                    "{SUBAGENT_REPLY_HEADER}{tool_use_id}{SUBAGENT_REPLY_SUFFIX}{reply}"
-                );
+                let text =
+                    format!("{SUBAGENT_REPLY_HEADER}{tool_use_id}{SUBAGENT_REPLY_SUFFIX}{reply}");
                 self.queue_and_notify(QueuedMessage {
                     text,
                     images: Vec::new(),
@@ -1377,8 +1392,33 @@ impl App {
         idx
     }
 
-    fn execute_command(&mut self, cmd: ParsedCommand) -> Vec<Action> {
-        self.input_box.discard();
+    /// Entry point for `maki.api.run_command`: splits a command line into the
+    /// name and args the input bar would hand over, leading slash optional.
+    /// `Err` means nothing ran at all, so the Lua caller can say why.
+    pub(crate) fn run_cmdline(&mut self, cmdline: &str, depth: u8) -> Result<Vec<Action>, String> {
+        if depth > MAX_COMMAND_DEPTH {
+            return Err(COMMAND_DEPTH_MSG.to_string());
+        }
+        let trimmed = cmdline.trim();
+        let (name, args) = trimmed
+            .split_once(char::is_whitespace)
+            .unwrap_or((trimmed, ""));
+        let resolved = self
+            .command_palette
+            .resolve(&format!("/{}", name.trim_start_matches('/')))
+            .ok_or_else(|| format!("unknown command '{name}'"))?;
+        Ok(self.execute_command(
+            ParsedCommand {
+                name: resolved,
+                args: args.trim().to_string(),
+            },
+            depth,
+        ))
+    }
+
+    /// {depth} is the `maki.api.run_command` hop count, forwarded to a Lua
+    /// handler so an alias cycle keeps counting. 0 when the user typed it.
+    fn execute_command(&mut self, cmd: ParsedCommand, depth: u8) -> Vec<Action> {
         match cmd.name.as_str() {
             "/tasks" => {
                 self.open_tasks();
@@ -1447,7 +1487,7 @@ impl App {
             }
             "/thinking" => {
                 if self.command_palette.find_lua_command("/thinking").is_some() {
-                    self.run_lua_command("/thinking", cmd.args);
+                    self.run_lua_command("/thinking", cmd.args, depth);
                     return vec![];
                 }
                 if !self.state.model.supports_thinking() {
@@ -1500,14 +1540,14 @@ impl App {
                 self.execute_mcp_prompt(name, &cmd.args)
             }
             name if self.command_palette.find_lua_command(name).is_some() => {
-                self.run_lua_command(name, cmd.args);
+                self.run_lua_command(name, cmd.args, depth);
                 vec![]
             }
             _ => vec![],
         }
     }
 
-    fn run_lua_command(&self, name: &str, args: String) {
+    fn run_lua_command(&self, name: &str, args: String, depth: u8) {
         let Some(lua_cmd) = self.command_palette.find_lua_command(name) else {
             return;
         };
@@ -1515,6 +1555,7 @@ impl App {
             Arc::clone(&lua_cmd.plugin),
             Arc::clone(&lua_cmd.name),
             args,
+            depth,
         );
     }
 
@@ -1684,17 +1725,49 @@ impl App {
         self.overlays_mut().iter_mut().for_each(|o| o.close());
     }
 
-    pub fn is_animating(&self) -> bool {
-        !self.image_paste_rx.is_empty()
-            || self.btw_modal.is_animating()
-            || self.file_picker.is_loading()
-            || self.float_mgr.is_open()
-            || self
-                .selection_state
+    /// Every poller that feeds the screen, in one place and never in `view`;
+    /// see [`crate::repaint`] for why.
+    pub fn tick(&mut self) -> Dirty {
+        // `|` never short-circuits: every poller must run on every tick.
+        self.float_mgr.tick()
+            | self.tick_edge_scroll()
+            | self.tick_error_expiry()
+            | self.poll_image_paste()
+            | self.btw_modal.poll()
+            | self.status_bar.poll_branch_update()
+            | self.status_bar.clear_expired_hint()
+            | self.mcp_picker.refresh()
+            | self.model_picker.refresh()
+            | self.usage_modal.poll(&self.usage_slot)
+            | self.hints.poll(self.hint_reader.load_full())
+            | self.tick_file_picker()
+            | Dirty::any(self.chats.iter_mut().map(Chat::tick))
+    }
+
+    fn tick_file_picker(&mut self) -> Dirty {
+        let (dirty, flash) = self.file_picker.tick();
+        if let Some(flash) = flash {
+            self.status_bar.flash(flash);
+        }
+        dirty
+    }
+
+    /// What moves with the clock alone; changes that come from arriving data
+    /// are reported by [`Self::tick`] instead. Overlays answer as a group, so
+    /// adding one to [`Self::overlays`] is enough.
+    pub fn cadence(&self) -> Cadence {
+        Cadence::any([
+            Cadence::any(self.overlays().into_iter().map(Overlay::cadence)),
+            StatusBar::cadence(
+                &self.status,
+                self.restoring.load(Ordering::Relaxed),
+                self.retry_info.is_some(),
+            ),
+            self.selection_state
                 .as_ref()
-                .is_some_and(|s| s.is_edge_scrolling())
-            || self.restoring.load(Ordering::Relaxed)
-            || self.chats.iter().any(|c| c.is_animating())
+                .map_or(Cadence::IDLE, SelectionState::cadence),
+            Cadence::any(self.chats.iter().map(Chat::cadence)),
+        ])
     }
 
     fn finish_subagents(&mut self, role: DisplayRole, text: &str) {

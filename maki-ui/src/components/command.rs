@@ -194,6 +194,43 @@ impl CommandPalette {
         }
     }
 
+    /// Every command the palette knows, in display order. The one place that
+    /// enumerates the four sources: matching and name lookup both read it.
+    fn items<'a>(
+        custom_commands: &'a [CustomCommand],
+        mcp_prompts: &'a [McpPromptInfo],
+        lua_commands: &'a [LuaCommandInfo],
+    ) -> impl Iterator<Item = CommandItem> + 'a {
+        let builtins = BUILTIN_COMMANDS.iter().map(|cmd| CommandItem {
+            name: cmd.name.to_string(),
+            max_args: cmd.max_args,
+            command_type: CommandType::Builtin(cmd),
+        });
+        let custom = custom_commands
+            .iter()
+            .enumerate()
+            .map(|(i, cmd)| CommandItem {
+                name: cmd.display_name(),
+                max_args: if cmd.has_args() { usize::MAX } else { 0 },
+                command_type: CommandType::Custom(i),
+            });
+        let prompts = mcp_prompts.iter().enumerate().map(|(i, p)| CommandItem {
+            name: format!("/{}", p.display_name),
+            max_args: if p.arguments.is_empty() {
+                0
+            } else {
+                usize::MAX
+            },
+            command_type: CommandType::McpPrompt(i),
+        });
+        let lua = lua_commands.iter().enumerate().map(|(i, cmd)| CommandItem {
+            name: cmd.name.to_string(),
+            max_args: cmd.max_args,
+            command_type: CommandType::Lua(i),
+        });
+        builtins.chain(custom).chain(prompts).chain(lua)
+    }
+
     fn build_nucleo(
         custom_commands: &[CustomCommand],
         mcp_prompts: &[McpPromptInfo],
@@ -202,57 +239,20 @@ impl CommandPalette {
         let nucleo = Nucleo::new(Config::DEFAULT, Arc::new(|| {}), None, 1);
         let injector = nucleo.injector();
 
-        let mut overridden: HashSet<String> = HashSet::new();
-        overridden.extend(lua_commands.iter().map(|c| c.name.to_string()));
-        overridden.extend(custom_commands.iter().map(|c| c.display_name()));
-        overridden.extend(mcp_prompts.iter().map(|p| format!("/{}", p.display_name)));
+        let overridden: HashSet<String> = HashSet::from_iter(
+            lua_commands
+                .iter()
+                .map(|c| c.name.to_string())
+                .chain(custom_commands.iter().map(|c| c.display_name()))
+                .chain(mcp_prompts.iter().map(|p| format!("/{}", p.display_name))),
+        );
 
-        for cmd in BUILTIN_COMMANDS.iter() {
-            if overridden.contains(cmd.name) {
+        for item in Self::items(custom_commands, mcp_prompts, lua_commands) {
+            if matches!(item.command_type, CommandType::Builtin(_))
+                && overridden.contains(&item.name)
+            {
                 continue;
             }
-            let item = CommandItem {
-                name: cmd.name.to_string(),
-                max_args: cmd.max_args,
-                command_type: CommandType::Builtin(cmd),
-            };
-            injector.push(item, |item, cols| {
-                cols[0] = Utf32String::from(item.name.as_str());
-            });
-        }
-
-        for (i, cmd) in custom_commands.iter().enumerate() {
-            let item = CommandItem {
-                name: cmd.display_name(),
-                max_args: if cmd.has_args() { usize::MAX } else { 0 },
-                command_type: CommandType::Custom(i),
-            };
-            injector.push(item, |item, cols| {
-                cols[0] = Utf32String::from(item.name.as_str());
-            });
-        }
-
-        for (i, prompt) in mcp_prompts.iter().enumerate() {
-            let item = CommandItem {
-                name: format!("/{}", prompt.display_name),
-                max_args: if prompt.arguments.is_empty() {
-                    0
-                } else {
-                    usize::MAX
-                },
-                command_type: CommandType::McpPrompt(i),
-            };
-            injector.push(item, |item, cols| {
-                cols[0] = Utf32String::from(item.name.as_str());
-            });
-        }
-
-        for (i, cmd) in lua_commands.iter().enumerate() {
-            let item = CommandItem {
-                name: cmd.name.to_string(),
-                max_args: cmd.max_args,
-                command_type: CommandType::Lua(i),
-            };
             injector.push(item, |item, cols| {
                 cols[0] = Utf32String::from(item.name.as_str());
             });
@@ -458,6 +458,16 @@ impl CommandPalette {
             name,
             args: args.to_string(),
         })
+    }
+
+    /// Name lookup for `maki.api.run_command`, returning the registered
+    /// spelling that [`crate::app::App`] dispatches on. Case-insensitive like
+    /// typing, but never fuzzy: an alias names one command on purpose, and a
+    /// typo should report itself instead of running the closest neighbor.
+    pub fn resolve(&self, name: &str) -> Option<String> {
+        Self::items(&self.custom, &self.mcp_prompts, &self.lua_commands)
+            .map(|item| item.name)
+            .find(|n| n.eq_ignore_ascii_case(name))
     }
 
     pub fn find_custom_command(&self, display_name: &str) -> Option<&CustomCommand> {

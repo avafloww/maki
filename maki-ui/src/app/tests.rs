@@ -1,19 +1,22 @@
 use super::*;
 use crate::agent::shared_queue;
 use crate::chat::{CANCELLED_TEXT, DONE_TEXT, ERROR_TEXT};
+use crate::components::btw_modal::BtwEvent;
 use crate::components::command::ParsedCommand;
+use crate::components::file_picker::EMPTY_DIR_MSG;
 use crate::components::keybindings::{KeybindContext, key as kb};
-use crate::components::{ExitRequest, key, test_model};
+use crate::components::{ExitRequest, buffer_text, key, test_model};
+use crate::repaint::expect::{OWED, QUIET};
 use crate::selection::{SelectableZone, SelectionState, SelectionZone};
 use arc_swap::ArcSwap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use maki_agent::permissions::PermissionManager;
 use maki_agent::{
-    ImageMediaType, McpConfigErrors, McpServerInfo, McpServerStatus, McpSnapshot,
-    McpSnapshotReader, ModeDefSpec, ToolDoneEvent, ToolOutput, ToolStartEvent,
-    TurnCompleteEvent,
+    DoneReason, ImageMediaType, McpConfigErrors, McpServerInfo, McpServerStatus, McpSnapshot,
+    McpSnapshotReader, ModeDefSpec, ToolDoneEvent, ToolOutput, ToolStartEvent, TurnCompleteEvent,
 };
 use maki_config::{PermissionsConfig, UiConfig};
+use maki_lua::test_support::{HintWriterHandle, hint_writer_pair};
 use maki_lua::{BuiltinAction, HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader};
 use maki_providers::{ContentBlock, Effort, Message, Role, TokenUsage};
 use maki_storage::sessions::{StoredMode, StoredThinking};
@@ -26,6 +29,16 @@ use test_case::test_case;
 
 const WRITER_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const TASK_ID: &str = "task1";
+const SUB_TOOL_ID: &str = "sub_t1";
+const TOOL_OUTPUT_LINE: &str = "hello from the subagent";
+const LATE_MODEL_SPEC: &str = "zai/glm-5";
+const HINT_PLUGIN: &str = "statusline";
+const HINT_TEXT: &str = "2/4 staged";
+const HINT_STYLE: &str = "fg";
+const RETRY_MESSAGE: &str = "overloaded";
+const RETRY_DELAY: Duration = Duration::from_secs(5);
+const MISSING_DIR: &str = "gone";
+const WALK_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn set_zone(app: &mut App, zone: SelectionZone, area: Rect) {
     app.zones.push(SelectableZone { area, zone });
@@ -79,6 +92,38 @@ pub(crate) fn test_app() -> App {
     app
 }
 
+/// A `test_app` past its idle splash, whose drifting starfield would mask
+/// every other cadence.
+fn app_without_splash() -> App {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    app.update(agent_msg(AgentEvent::TextDelta { text: "hi".into() }));
+    app.update(done_event());
+    app
+}
+
+/// Hands back the slot providers publish their model lists into, since the app
+/// keeps no handle to it once the picker owns it.
+fn app_with_model_slot() -> (App, Arc<ArcSwapOption<Vec<String>>>) {
+    let models = Arc::new(ArcSwapOption::empty());
+    let mut app = test_app();
+    app.model_picker = ModelPicker::new(Arc::clone(&models));
+    (app, models)
+}
+
+/// Hands back the end a plugin publishes hints through. That is the Lua thread
+/// in production, and this test here. Seeding the watch from the new reader is
+/// what `App::new` does, and skipping it would make the first poll report the
+/// swap itself.
+fn app_with_hints() -> (App, HintWriterHandle) {
+    let (writer, reader) = hint_writer_pair();
+    let mut app = test_app();
+    app.hints = Watch::seeded(reader.load_full());
+    app.hint_reader = reader;
+    (app, writer)
+}
+
 fn tempdir_app() -> (TempDir, StateDir, Arc<StorageWriter>, App) {
     let tmp = TempDir::new().unwrap();
     let dir = StateDir::from_path(tmp.path().to_path_buf());
@@ -106,6 +151,18 @@ fn agent_msg_with_run_id(event: AgentEvent, run_id: u64) -> Msg {
         subagent: None,
         run_id,
     }))
+}
+
+fn done() -> AgentEvent {
+    AgentEvent::Done {
+        usage: TokenUsage::default(),
+        num_turns: 1,
+        reason: DoneReason::EndTurn,
+    }
+}
+
+fn done_event() -> Msg {
+    agent_msg(done())
 }
 
 fn subagent_info(parent_id: &str, name: &str) -> SubagentInfo {
@@ -271,7 +328,7 @@ fn ctrl_c_quits_when_input_empty() {
     assert!(actions.is_empty());
 }
 
-#[test_case(AgentEvent::Done { usage: TokenUsage::default(), num_turns: 1, stop_reason: None }, ExitRequest::Success ; "done_exits_success")]
+#[test_case(done(), ExitRequest::Success ; "done_exits_success")]
 #[test_case(AgentEvent::Error { message: "boom".into() }, ExitRequest::Error ; "error_exits_error")]
 fn exit_on_done_flag_triggers_exit(event: AgentEvent, expected: ExitRequest) {
     let mut app = test_app();
@@ -981,7 +1038,7 @@ fn cancel_resets_all_chats_and_indices() {
     assert_eq!(app.chats[1].in_progress_count(), 0);
     assert!(app.chats[1].is_finished());
     assert!(app.chat_index.is_empty());
-    assert!(!app.is_animating());
+    assert_eq!(app.cadence(), Cadence::IDLE);
 }
 
 fn finish_subagent(app: &mut App, id: &str, is_error: bool) {
@@ -1252,7 +1309,7 @@ fn overlay_blocks_ctrl_shortcuts(setup: fn(&mut App)) {
 #[test]
 fn compact_command_sets_streaming() {
     let mut app = test_app();
-    let actions = app.execute_command(cmd("/compact"));
+    let actions = app.execute_command(cmd("/compact"), 0);
     assert!(matches!(&actions[0], Action::Compact));
     assert_eq!(app.status, Status::Streaming);
 }
@@ -1263,7 +1320,7 @@ fn compact_during_streaming_queues_item() {
     app.status = Status::Streaming;
     app.run_id = 1;
 
-    let actions = app.execute_command(cmd("/compact"));
+    let actions = app.execute_command(cmd("/compact"), 0);
     assert!(actions.is_empty());
     assert_eq!(app.queue.len(), 1);
     assert_eq!(app.queue.panel_entries()[0].text, "/compact");
@@ -1461,24 +1518,211 @@ fn ctrl_c_while_streaming_cancels_instead_of_quitting() {
     assert_ne!(app.exit_request, ExitRequest::Success);
 }
 
+/// The whole point of issue 778: a settled session paints nothing at all. Any
+/// poller that starts reporting a change on every tick trips this.
+#[test]
+fn settled_app_owes_no_frame_and_does_not_animate() {
+    let mut app = app_without_splash();
+
+    assert_eq!(app.cadence(), Cadence::IDLE);
+    assert_eq!(app.tick(), Dirty::NO, "{QUIET}");
+}
+
+/// Nothing wakes the loop when a background thread drops an answer into a
+/// shared slot, so `tick` has to go and look. The tick that first sees it is
+/// also the only one allowed to claim a frame: `tick` runs on every turn of the
+/// loop, so a poller that keeps saying yes never lets it sleep again.
+#[track_caller]
+fn assert_owes_one_frame(app: &mut App, arrival: impl FnOnce()) {
+    assert_eq!(app.tick(), Dirty::NO, "{QUIET}");
+    arrival();
+    assert_eq!(app.tick(), Dirty::YES, "{OWED}");
+    assert_eq!(app.tick(), Dirty::NO, "{QUIET}");
+}
+
+/// `/usage` spawns a detached fetch that stores its answer with nothing
+/// listening, so an unpolled modal sits on `Loading` until the user presses
+/// some unrelated key.
+#[test]
+fn usage_quota_arriving_in_the_background_owes_a_frame() {
+    let mut app = test_app();
+    app.execute_command(cmd("/usage"), 0);
+    let slot = Arc::clone(&app.usage_slot);
+
+    assert_owes_one_frame(&mut app, || {
+        slot.store(Some(Arc::new(UsageFetchState::Loading)));
+    });
+}
+
+/// Providers publish their model list into a shared slot that wakes nothing,
+/// so an open picker keeps showing the stale list until the user happens to
+/// press a key.
+#[test]
+fn model_list_arriving_in_the_background_owes_a_frame() {
+    let (mut app, models) = app_with_model_slot();
+    app.execute_command(cmd("/model"), 0);
+    assert!(app.model_picker.is_open());
+
+    assert_owes_one_frame(&mut app, || {
+        models.store(Some(Arc::new(vec![LATE_MODEL_SPEC.into()])));
+    });
+}
+
+/// Tool output streams into a subagent's chat while the parent chat is the one
+/// on screen. Draining only the active chat would lose it, and the task picker
+/// and a later switch would show nothing.
+#[test]
+fn tick_drains_live_bufs_of_background_chats() {
+    let mut app = test_app();
+    app.run_id = 1;
+    app.update(agent_msg(tool_start(TASK_ID, "task")));
+    app.update(subagent_msg(tool_start(SUB_TOOL_ID, "bash"), TASK_ID, None));
+    let buf = Arc::new(maki_agent::SharedBuf::new());
+    app.update(subagent_msg(
+        AgentEvent::LiveToolBuf {
+            id: SUB_TOOL_ID.into(),
+            body: Arc::clone(&buf),
+        },
+        TASK_ID,
+        None,
+    ));
+    assert_eq!(app.active_chat, 0, "the subagent's chat is the hidden one");
+
+    assert_owes_one_frame(&mut app, || {
+        buf.append(maki_agent::SnapshotLine::plain(TOOL_OUTPUT_LINE.into()));
+    });
+}
+
+/// A plugin publishes hints from the Lua thread, and the loop never hears back
+/// from that thread. The footer they draw in is on screen the whole time, so a
+/// publish nobody polled for shows up on some later, unrelated keypress, or
+/// never.
+#[test]
+fn status_hints_published_by_a_plugin_reach_the_screen() {
+    let (mut app, plugin) = app_with_hints();
+    plugin.publish(vec![(
+        Arc::from(HINT_PLUGIN),
+        vec![(HINT_TEXT.into(), HINT_STYLE.into())],
+    )]);
+
+    assert!(
+        !rendered(&mut app).contains(HINT_TEXT),
+        "a hint no poller has seen must not be on screen"
+    );
+    assert_eq!(app.tick(), Dirty::YES, "{OWED}");
+    assert!(rendered(&mut app).contains(HINT_TEXT));
+
+    plugin.publish(vec![]);
+    assert_eq!(app.tick(), Dirty::YES, "{OWED}");
+    assert!(!rendered(&mut app).contains(HINT_TEXT));
+}
+
+fn rendered(app: &mut App) -> String {
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.view(frame)).unwrap();
+    buffer_text(terminal.backend().buffer())
+}
+
+/// When the picker gives up on a directory it cannot list, the flash is the
+/// only trace the user gets. Forwarding it moved from `view` into `tick`, and
+/// dropping that hop closes the picker with no explanation at all. The loop
+/// ends the moment the walker thread answers; the deadline only turns a
+/// missing hop into a failure instead of a hang.
+#[test]
+fn tick_forwards_the_file_picker_flash_to_the_status_bar() {
+    let tmp = TempDir::new().unwrap();
+    let mut app = test_app();
+    app.file_picker
+        .open(&tmp.path().join(MISSING_DIR).to_string_lossy());
+
+    let deadline = Instant::now() + WALK_TIMEOUT;
+    while app.status_bar.flash_text().is_none() {
+        assert!(Instant::now() < deadline, "the picker never flashed");
+        let _ = app.tick();
+        std::thread::yield_now();
+    }
+
+    assert_eq!(app.status_bar.flash_text(), Some(EMPTY_DIR_MSG));
+    assert!(!app.file_picker.is_open());
+}
+
+/// A waiting tool draws a spinner, which changes once per `SPINNER_FRAME`.
+/// Claiming `SMOOTH` here paints five identical frames for every visible one,
+/// for as long as the tool runs.
+#[test]
+fn waiting_tool_animates_at_the_spinner_rate() {
+    let mut app = app_without_splash();
+    app.update(agent_msg(tool_start("t1", "bash")));
+
+    assert_eq!(app.cadence(), Cadence::SPINNER);
+}
+
+/// The bar spins for a whole streaming turn, again while a restore is in
+/// flight, and once more for a retry countdown. The old `is_animating` only
+/// knew about the restore, so the other two froze mid turn.
+#[test_case(Status::Streaming, false, false => Cadence::SPINNER ; "streaming_turn")]
+#[test_case(Status::Idle, true, false => Cadence::SPINNER ; "restoring_session")]
+#[test_case(Status::Idle, false, true => Cadence::SPINNER ; "retry_countdown")]
+#[test_case(Status::Idle, false, false => Cadence::IDLE ; "nothing_in_flight")]
+fn status_bar_motion_reaches_app_cadence(
+    status: Status,
+    restoring: bool,
+    retrying: bool,
+) -> Cadence {
+    let mut app = app_without_splash();
+    app.status = status;
+    app.restoring.store(restoring, Ordering::Relaxed);
+    if retrying {
+        app.retry_info = Some(RetryInfo {
+            attempt: 1,
+            message: RETRY_MESSAGE.into(),
+            deadline: Instant::now() + RETRY_DELAY,
+        });
+    }
+    app.cadence()
+}
+
+/// `App::cadence` asks `overlays()` as a group, so a moving overlay only
+/// reaches the loop through that fold.
+#[test]
+fn open_overlay_motion_reaches_app_cadence() {
+    let mut app = app_without_splash();
+    assert_eq!(app.cadence(), Cadence::IDLE);
+
+    let (event_tx, _event_rx) = flume::bounded::<maki_lua::WinEvent>(8);
+    let (_cmd_tx, cmd_rx) = flume::bounded::<maki_lua::WinCommand>(8);
+    app.float_mgr.open(
+        Arc::new(maki_agent::SharedBuf::new()),
+        maki_lua::FloatConfig::default(),
+        true,
+        event_tx,
+        cmd_rx,
+    );
+    assert_eq!(
+        app.cadence(),
+        Cadence::SPINNER,
+        "an open float's spinners only turn if the app keeps painting"
+    );
+
+    app.close_all_overlays();
+    assert_eq!(app.cadence(), Cadence::IDLE);
+}
+
 #[test]
 fn edge_scroll_makes_app_animating() {
-    let mut app = test_app();
-    app.status = Status::Streaming;
-    app.run_id = 1;
-    app.update(agent_msg(AgentEvent::TextDelta { text: "x".into() }));
-    app.update(agent_msg(AgentEvent::Done {
-        usage: TokenUsage::default(),
-        num_turns: 1,
-        stop_reason: None,
-    }));
-    assert!(!app.is_animating());
+    let mut app = app_without_splash();
+    assert_eq!(app.cadence(), Cadence::IDLE);
     let zone = Rect::new(0, 2, 80, 20);
     set_zone(&mut app, SelectionZone::Messages, zone);
     app.active_chat().scroll_to_top();
     app.update(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 10));
     app.update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 10, 1));
-    assert!(app.is_animating());
+    assert_eq!(
+        app.cadence(),
+        Cadence::SMOOTH,
+        "an edge-scrolling drag advances on a timer, with no events to wake us"
+    );
 }
 
 #[test]
@@ -1647,23 +1891,15 @@ fn pending_copy_ignores_drag_and_tick() {
     app.update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 50, 50));
     assert!(app.selection_state.as_ref().unwrap().is_pending_copy());
 
-    app.tick_edge_scroll();
+    let _ = app.tick_edge_scroll();
     assert!(app.selection_state.as_ref().unwrap().is_pending_copy());
 }
 
 #[test]
 fn pending_copy_not_animating() {
-    let mut app = test_app();
-    app.status = Status::Streaming;
-    app.run_id = 1;
-    app.update(agent_msg(AgentEvent::TextDelta { text: "x".into() }));
-    app.update(agent_msg(AgentEvent::Done {
-        usage: TokenUsage::default(),
-        num_turns: 1,
-        stop_reason: None,
-    }));
+    let mut app = app_without_splash();
     make_pending_copy(&mut app);
-    assert!(!app.is_animating());
+    assert_eq!(app.cadence(), Cadence::IDLE);
 }
 
 #[test]
@@ -1734,7 +1970,7 @@ fn queue_command_sets_focus(has_queue: bool) {
     } else {
         test_app()
     };
-    app.execute_command(cmd("/queue"));
+    app.execute_command(cmd("/queue"), 0);
     assert_eq!(app.queue.focus().is_some(), has_queue);
 }
 
@@ -1849,14 +2085,7 @@ fn stale_done_does_not_drain_queue() {
     cancel_app(&mut app);
     app.queue_and_notify(queued_msg("next"));
 
-    app.update(agent_msg_with_run_id(
-        AgentEvent::Done {
-            usage: TokenUsage::default(),
-            num_turns: 1,
-            stop_reason: None,
-        },
-        1,
-    ));
+    app.update(agent_msg_with_run_id(done(), 1));
     assert_eq!(app.queue.len(), 1);
     assert_eq!(app.status, Status::Idle);
 }
@@ -1910,7 +2139,7 @@ fn help_toggles_modal() {
     assert!(!app.help_modal.is_open());
     app.update(Msg::Key(kb::HELP.to_key_event()));
     assert!(app.help_modal.is_open());
-    app.execute_command(cmd("/help"));
+    app.execute_command(cmd("/help"), 0);
     assert!(!app.help_modal.is_open());
 }
 
@@ -2079,7 +2308,7 @@ fn reload_persists_session_with_content_to_disk() {
     app.state
         .session_mut()
         .push_message(Message::user("hello".into()));
-    let actions = app.execute_command(cmd("/reload"));
+    let actions = app.execute_command(cmd("/reload"), 0);
     assert_eq!(app.exit_request, ExitRequest::Reload);
     assert!(actions.is_empty());
     app.checkpoint();
@@ -2092,7 +2321,7 @@ fn reload_persists_session_with_content_to_disk() {
 #[test]
 fn reload_leaves_empty_session_unpersisted_on_disk() {
     let (tmp, _dir, writer, mut app) = tempdir_app();
-    app.execute_command(cmd("/reload"));
+    app.execute_command(cmd("/reload"), 0);
     drain_writer(app, writer);
 
     let sessions_dir = tmp.path().join(maki_storage::sessions::SESSIONS_DIR);
@@ -2132,11 +2361,11 @@ fn apply_loaded_session_defers_queued_messages_until_respawn() {
 fn yolo_toggle() {
     let mut app = test_app();
     assert!(!app.permissions.is_yolo());
-    app.execute_command(cmd("/yolo"));
+    app.execute_command(cmd("/yolo"), 0);
     assert!(app.permissions.is_yolo());
     let flash = app.status_bar.flash_text().unwrap();
     assert!(flash.contains("enabled"), "flash={flash:?}");
-    app.execute_command(cmd("/yolo"));
+    app.execute_command(cmd("/yolo"), 0);
     assert!(!app.permissions.is_yolo());
     let flash = app.status_bar.flash_text().unwrap();
     assert!(flash.contains("disabled"), "flash={flash:?}");
@@ -2146,7 +2375,7 @@ fn yolo_toggle() {
 fn usage_command_toggles_modal() {
     let mut app = test_app();
     assert!(!app.usage_modal.is_open());
-    let open_actions = app.execute_command(cmd("/usage"));
+    let open_actions = app.execute_command(cmd("/usage"), 0);
     assert!(app.usage_modal.is_open());
     assert!(
         open_actions
@@ -2154,7 +2383,7 @@ fn usage_command_toggles_modal() {
             .any(|a| matches!(a, Action::RefreshUsage)),
         "opening should request a quota refresh"
     );
-    let close_actions = app.execute_command(cmd("/usage"));
+    let close_actions = app.execute_command(cmd("/usage"), 0);
     assert!(!app.usage_modal.is_open());
     assert!(
         !close_actions
@@ -2167,7 +2396,7 @@ fn usage_command_toggles_modal() {
 #[test]
 fn ctrl_r_refreshes_usage_while_modal_open() {
     let mut app = test_app();
-    app.execute_command(cmd("/usage"));
+    app.execute_command(cmd("/usage"), 0);
     assert!(app.usage_modal.is_open());
 
     let actions = app.update(Msg::Key(kb::REFRESH.to_key_event()));
@@ -2181,10 +2410,13 @@ fn ctrl_r_refreshes_usage_while_modal_open() {
 #[test]
 fn cd_command_behavior() {
     let mut app = test_app();
-    app.execute_command(ParsedCommand {
-        name: "/cd".into(),
-        args: "/tmp".into(),
-    });
+    app.execute_command(
+        ParsedCommand {
+            name: "/cd".into(),
+            args: "/tmp".into(),
+        },
+        0,
+    );
     let flash = app.status_bar.flash_text().unwrap();
     assert!(flash.starts_with("cd /tmp"), "flash={flash:?}");
     // Use `canonicalize_clean` (resolves symlinks like the OS does) rather
@@ -2194,10 +2426,13 @@ fn cd_command_behavior() {
     let resolved = maki_storage::paths::canonicalize_clean(Path::new("/tmp"));
     assert_eq!(app.state.session.cwd, resolved.to_string_lossy());
 
-    app.execute_command(ParsedCommand {
-        name: "/cd".into(),
-        args: "/nonexistent_path_12345".into(),
-    });
+    app.execute_command(
+        ParsedCommand {
+            name: "/cd".into(),
+            args: "/nonexistent_path_12345".into(),
+        },
+        0,
+    );
     let flash = app.status_bar.flash_text().unwrap();
     assert!(flash.starts_with("cd: "), "error flash={flash:?}");
 }
@@ -2236,6 +2471,98 @@ fn typed_lua_command_with_args_executes() {
 
     assert!(actions.is_empty(), "{LUA_COMMAND_NOT_SENT}");
     assert!(probe.try_recv().is_some(), "{LUA_COMMAND_RAN}");
+}
+
+const RUN_CMDLINE_REJECTED: &str = "a rejected cmdline must not run anything";
+
+#[test_case("/new" ; "plain")]
+#[test_case("/NEW" ; "uppercase")]
+#[test_case("  /new  " ; "surrounding_whitespace")]
+#[test_case("new" ; "missing_slash")]
+fn run_cmdline_executes_builtin(cmdline: &str) {
+    let mut app = test_app();
+
+    let actions = app.run_cmdline(cmdline, 0).unwrap();
+
+    assert!(matches!(&actions[..], [Action::NewSession]));
+}
+
+#[test]
+fn run_cmdline_splits_args_off_the_name() {
+    let mut app = test_app();
+
+    let actions = app.run_cmdline("/btw what is rust?", 0).unwrap();
+
+    assert!(matches!(&actions[..], [Action::Btw(q)] if q == "what is rust?"));
+}
+
+/// Only the typed path clears the input, so a keybind or autocmd reaching for
+/// `run_command` cannot eat a half-written message.
+#[test]
+fn run_cmdline_keeps_typed_input() {
+    let mut app = test_app();
+    app.input_box.set_input("half written".into());
+
+    app.run_cmdline("/usage", 0).unwrap();
+
+    assert_eq!(app.input_box.buffer.value(), "half written");
+}
+
+#[test]
+fn run_cmdline_unknown_name_errors_without_dispatching() {
+    let mut app = test_app();
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    app.lua_event_handle = handle;
+
+    let Err(err) = app.run_cmdline("/nope", 0) else {
+        panic!("{RUN_CMDLINE_REJECTED}");
+    };
+
+    assert!(err.contains("/nope"), "err={err:?}");
+    assert!(probe.try_recv_command().is_none(), "{RUN_CMDLINE_REJECTED}");
+}
+
+#[test]
+fn run_cmdline_rejects_past_max_depth() {
+    let mut app = test_app();
+
+    let Err(err) = app.run_cmdline("/new", crate::app::MAX_COMMAND_DEPTH + 1) else {
+        panic!("{RUN_CMDLINE_REJECTED}");
+    };
+
+    assert_eq!(err, crate::app::COMMAND_DEPTH_MSG);
+    assert!(
+        app.run_cmdline("/new", crate::app::MAX_COMMAND_DEPTH)
+            .is_ok(),
+        "the cap itself must still run"
+    );
+}
+
+/// A Lua command reached through an alias carries the hop count onward, or a
+/// cycle of Lua aliases would never trip the cap. It goes out spelled as
+/// registered, since only that spelling dispatches.
+#[test]
+fn run_cmdline_forwards_depth_to_lua_command() {
+    let dir = StateDir::from_path(env::temp_dir());
+    let mut app = build_app_with_lua(
+        dir.clone(),
+        Arc::new(test_writer(dir)),
+        LuaCommandReader::from_commands(vec![LuaCommandInfo {
+            name: "/Sessions".into(),
+            description: "Browse sessions".into(),
+            plugin: "sessions".into(),
+            max_args: 0,
+        }]),
+    );
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    app.lua_event_handle = handle;
+
+    app.run_cmdline("/sessions", 3).unwrap();
+
+    assert_eq!(
+        probe.try_recv_command(),
+        Some(("/Sessions".to_string(), String::new(), 3))
+    );
 }
 
 #[test]
@@ -2333,7 +2660,7 @@ fn tick_error_expiry(age: Duration, expect_error: bool) {
         message: "fail".into(),
         since: Instant::now() - age,
     };
-    app.tick_error_expiry();
+    let _ = app.tick_error_expiry();
     assert_eq!(matches!(app.status, Status::Error { .. }), expect_error);
 }
 
@@ -2527,7 +2854,7 @@ fn search_escape_restores_scroll(scroll_top: u16, auto_scroll: bool) {
 #[test]
 fn mcp_command_opens_picker() {
     let mut app = test_app();
-    app.execute_command(cmd("/mcp"));
+    app.execute_command(cmd("/mcp"), 0);
     assert!(app.mcp_picker.is_open());
 }
 
@@ -2552,7 +2879,7 @@ fn mcp_toggle_dispatches_action() {
         }),
         McpConfigErrors::new(PathBuf::new()),
     );
-    app.execute_command(cmd("/mcp"));
+    app.execute_command(cmd("/mcp"), 0);
 
     let actions = app.update(Msg::Key(key(KeyCode::Enter)));
     assert!(matches!(
@@ -2618,10 +2945,13 @@ fn alt_o_opens_editor_for_input() {
 #[test]
 fn btw_empty_flashes_error() {
     let mut app = test_app();
-    let actions = app.execute_command(ParsedCommand {
-        name: "/btw".into(),
-        args: String::new(),
-    });
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/btw".into(),
+            args: String::new(),
+        },
+        0,
+    );
     assert!(actions.is_empty());
     assert_eq!(
         app.status_bar.flash_text().unwrap(),
@@ -2632,20 +2962,29 @@ fn btw_empty_flashes_error() {
 #[test]
 fn btw_with_question_returns_action() {
     let mut app = test_app();
-    let actions = app.execute_command(ParsedCommand {
-        name: "/btw".into(),
-        args: "what is rust?".into(),
-    });
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/btw".into(),
+            args: "what is rust?".into(),
+        },
+        0,
+    );
     assert!(matches!(&actions[..], [Action::Btw(q)] if q == "what is rust?"));
 }
 
 #[test]
 fn btw_modal_key_routing_and_animation() {
     let mut app = test_app();
-    let (_tx, rx) = flume::bounded(1);
+    let (tx, rx) = flume::bounded(1);
     app.btw_modal.open("test", rx);
 
-    assert!(app.btw_modal.is_animating());
+    // A pending stream is data, drained by `poll`. Only the typewriter
+    // revealing the answer moves on its own.
+    assert!(app.btw_modal.is_streaming());
+    assert_eq!(app.btw_modal.cadence(), Cadence::IDLE);
+    tx.send(BtwEvent::TextDelta("hi".into())).unwrap();
+    assert_eq!(app.btw_modal.poll(), Dirty::YES);
+    assert_eq!(app.btw_modal.cadence(), Cadence::SMOOTH);
 
     let actions = app.update(Msg::Key(key(KeyCode::Char('x'))));
     assert!(actions.is_empty());
@@ -2655,7 +2994,7 @@ fn btw_modal_key_routing_and_animation() {
     let actions = app.update(Msg::Key(key(KeyCode::Esc)));
     assert!(actions.is_empty());
     assert!(!app.btw_modal.is_open());
-    assert!(!app.btw_modal.is_animating());
+    assert_eq!(app.btw_modal.cadence(), Cadence::IDLE);
 }
 
 #[test]
@@ -2697,9 +3036,7 @@ fn streaming_app_with_history() -> App {
 
 /// The stale event is dropped, yet the cancelled turn still reaches disk: the
 /// next frame's checkpoint syncs the mirror whatever event arrived.
-#[test_case(
-    AgentEvent::Done { usage: TokenUsage::default(), num_turns: 1, stop_reason: None } ; "stale_done"
-)]
+#[test_case(done() ; "stale_done")]
 #[test_case(
     AgentEvent::Error { message: "timeout".into() } ; "stale_error"
 )]
@@ -2766,7 +3103,7 @@ fn parent_done_reconciles_unresolved_children_and_tools() {
     assert!(app.state.session.subagents().is_empty());
     assert_eq!(app.state.session.messages().len(), 2);
     assert!(app.state.session.tool_outputs().is_empty());
-    assert!(!app.is_animating());
+    assert_eq!(app.cadence(), Cadence::IDLE);
 }
 
 #[test]
@@ -2974,14 +3311,6 @@ fn flush_restored_queue_drops_recovery_snapshot() {
 
 // --- Plan form integration tests ---
 
-fn done_event() -> Msg {
-    agent_msg(AgentEvent::Done {
-        usage: TokenUsage::default(),
-        num_turns: 1,
-        stop_reason: None,
-    })
-}
-
 fn implement_msg(parallel: bool) -> String {
     if parallel {
         format!("{IMPLEMENT_MSG_PREFIX} at `test-plan.md`. {IMPLEMENT_PARALLEL_HINT}")
@@ -3116,7 +3445,8 @@ fn plan_submit_mode_disables_auto_open() {
         .unwrap();
 
     let mut app = test_app();
-    app.lua_event_handle = maki_lua::EventHandle::disconnected_for_test_with_modes(Arc::new(registry));
+    app.lua_event_handle =
+        maki_lua::EventHandle::disconnected_for_test_with_modes(Arc::new(registry));
     app.status = Status::Streaming;
     app.run_id = 1;
     app.state.mode = Mode::Plan;
@@ -3463,10 +3793,10 @@ fn thinking_toggle_cycles_off_adaptive() {
     let mut app = test_app();
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
 
-    app.execute_command(cmd("/thinking"));
+    app.execute_command(cmd("/thinking"), 0);
     assert_eq!(app.state.thinking, ThinkingConfig::Adaptive);
 
-    app.execute_command(cmd("/thinking"));
+    app.execute_command(cmd("/thinking"), 0);
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
 }
 
@@ -3474,16 +3804,22 @@ fn thinking_toggle_cycles_off_adaptive() {
 fn thinking_explicit_args() {
     let mut app = test_app();
 
-    app.execute_command(ParsedCommand {
-        name: "/thinking".into(),
-        args: "8192".into(),
-    });
+    app.execute_command(
+        ParsedCommand {
+            name: "/thinking".into(),
+            args: "8192".into(),
+        },
+        0,
+    );
     assert_eq!(app.state.thinking, ThinkingConfig::Budget(8192));
 
-    app.execute_command(ParsedCommand {
-        name: "/thinking".into(),
-        args: "high".into(),
-    });
+    app.execute_command(
+        ParsedCommand {
+            name: "/thinking".into(),
+            args: "high".into(),
+        },
+        0,
+    );
     assert_eq!(app.state.thinking, ThinkingConfig::Effort(Effort::High));
 }
 
@@ -3492,7 +3828,7 @@ fn thinking_unsupported_model_flashes_error() {
     let mut app = test_app();
     app.state.model.thinking_override = Some(maki_providers::ThinkingSupport::No);
 
-    app.execute_command(cmd("/thinking"));
+    app.execute_command(cmd("/thinking"), 0);
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
     assert!(app.status_bar.flash_text().is_some());
 }
@@ -3523,11 +3859,11 @@ fn fast_toggle_on_off_on_opus() {
     set_opus_model(&mut app);
     assert!(!app.state.fast);
 
-    app.execute_command(cmd("/fast"));
+    app.execute_command(cmd("/fast"), 0);
     assert!(app.state.fast);
     assert_eq!(app.status_bar.flash_text(), Some(FAST_ON_MSG));
 
-    app.execute_command(cmd("/fast"));
+    app.execute_command(cmd("/fast"), 0);
     assert!(!app.state.fast);
     assert_eq!(app.status_bar.flash_text(), Some(FAST_OFF_MSG));
 }
@@ -3541,11 +3877,11 @@ fn workflow_toggle_flows_into_agent_input() {
     };
     assert!(!app.build_agent_input(&msg).workflow);
 
-    app.execute_command(cmd("/workflow"));
+    app.execute_command(cmd("/workflow"), 0);
     assert!(app.build_agent_input(&msg).workflow);
     assert_eq!(app.status_bar.flash_text(), Some(WORKFLOW_ON_MSG));
 
-    app.execute_command(cmd("/workflow"));
+    app.execute_command(cmd("/workflow"), 0);
     assert!(!app.build_agent_input(&msg).workflow);
     assert_eq!(app.status_bar.flash_text(), Some(WORKFLOW_OFF_MSG));
 }
@@ -3582,7 +3918,7 @@ fn fast_flashes_error_on_ineligible_model(spec: &str) {
     let mut app = test_app();
     app.state.model = maki_providers::Model::from_spec(spec).unwrap();
 
-    app.execute_command(cmd("/fast"));
+    app.execute_command(cmd("/fast"), 0);
     assert!(!app.state.fast);
     assert_eq!(app.status_bar.flash_text(), Some(FAST_UNSUPPORTED_MSG));
 }
@@ -3717,7 +4053,7 @@ fn attention_float_marks_app_as_awaiting_input_until_close() {
     assert!(app.awaiting_input());
 
     cmd_tx.send(maki_lua::WinCommand::Close).unwrap();
-    app.float_mgr.tick();
+    let _ = app.float_mgr.tick();
     assert!(!app.awaiting_input());
 }
 
@@ -3822,7 +4158,7 @@ fn cancel_preserves_panel_window_and_closes_transient() {
         "panel dock survives cancel and stays visible",
     );
     assert!(
-        !app.float_mgr.is_open(),
+        !app.float_mgr.needs_input(),
         "transient focused float is closed by cancel",
     );
 }

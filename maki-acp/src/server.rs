@@ -1,21 +1,28 @@
+use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::iter;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol_schema::{
     AgentNotification, AgentRequest, AgentResponse, ContentBlock, CurrentModeUpdate,
     EmbeddedResourceResource, Error as AcpError, ImageContent, JsonRpcMessage, LoadSessionRequest,
-    NewSessionRequest, Notification, PromptRequest, PromptResponse, Request, RequestId,
+    McpServer, NewSessionRequest, Notification, PromptRequest, PromptResponse, Request, RequestId,
     RequestPermissionRequest, RequestPermissionResponse, Response, SessionId, SessionModeId,
     SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, TextContent,
-    ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, StopReason,
+    TextContent, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
 };
 use color_eyre::eyre::Context;
 use flume::{Receiver, Sender};
 use maki_agent::headless::{self, InteractiveHandle, InteractiveParams};
+use maki_agent::mcp::config::{RawHttpFields, RawStdioFields, RawTransport};
+use maki_agent::mcp::{self, McpHandle};
+use maki_agent::permissions::PermissionAnswer;
 use maki_agent::types::AgentEvent;
 use maki_agent::{AgentInput, AgentMode, Envelope, ImageMediaType, ImageSource};
+use maki_config::MAX_SERVER_NAME_LEN;
 use maki_providers::Message;
 use maki_providers::model::Model;
 use maki_providers::provider::available_model_specs;
@@ -29,13 +36,26 @@ use crate::{AcpParams, methods, permissions, translate};
 
 const FIRST_OUTGOING_REQUEST_ID: i64 = 1000;
 
-type PendingPrompt = Arc<Mutex<Option<RequestId>>>;
+/// Ids come from here and are never reused, so a late answer for a closed
+/// session cannot match a request of the session that replaced it.
+static NEXT_OUTGOING_REQUEST_ID: AtomicI64 = AtomicI64::new(FIRST_OUTGOING_REQUEST_ID);
+
+/// What the client still owes us. Only one permission can be outstanding: the
+/// agent holds the answer channel while it waits for one.
+#[derive(Default)]
+struct Pending {
+    prompt: Option<RequestId>,
+    permission: Option<i64>,
+}
+
+type PendingState = Arc<Mutex<Pending>>;
 
 struct SessionState {
     handle: InteractiveHandle,
+    mcp: Option<McpHandle>,
     current_mode: AgentMode,
     current_model: String,
-    pending_prompt: PendingPrompt,
+    pending: PendingState,
 }
 
 struct Server {
@@ -104,7 +124,7 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
             handle_incoming_response(&server, &raw);
         } else if let Some(method) = raw.get("method").and_then(Value::as_str) {
             match id {
-                Some(id) => handle_request(&mut server, method, id, &raw, &params),
+                Some(id) => handle_request(&mut server, method, id, &raw, &params).await,
                 None => handle_notification(&server, method),
             }
         } else if let Some(id) = id {
@@ -122,36 +142,19 @@ fn request_id(v: &Value) -> RequestId {
     serde_json::from_value(v.clone()).unwrap_or(RequestId::Null)
 }
 
-fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Value, params: &AcpParams) {
+async fn handle_request(
+    srv: &mut Server,
+    method: &str,
+    id: RequestId,
+    raw: &Value,
+    params: &AcpParams,
+) {
     let result = match method {
         "initialize" => Ok(AgentResponse::InitializeResponse(
             methods::initialize_response(),
         )),
-        "session/new" => parse_params::<NewSessionRequest>(raw).map(|req| {
-            let handle = spawn_session(params, req.cwd, None, Vec::new());
-            let spec = params.model.spec();
-            let resp = methods::new_session_response(handle.session_id.as_str(), &srv.modes)
-                .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
-            install_session(srv, handle, spec);
-            AgentResponse::NewSessionResponse(resp)
-        }),
-        "session/load" => parse_params::<LoadSessionRequest>(raw).and_then(|req| {
-            let session_ref: SessionRef =
-                req.session_id.0.parse().map_err(|_| {
-                    AcpError::resource_not_found(Some(req.session_id.0.to_string()))
-                })?;
-            let history = load_history(session_ref.id())?;
-            let sid = SessionId::from(session_ref.to_string());
-            for update in translate::replay_history(&history) {
-                session_update(&srv.out_tx, &sid, update);
-            }
-            let handle = spawn_session(params, req.cwd, Some(session_ref), history);
-            let spec = params.model.spec();
-            let resp = methods::load_session_response(&srv.modes)
-                .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
-            install_session(srv, handle, spec);
-            Ok(AgentResponse::LoadSessionResponse(resp))
-        }),
+        "session/new" => new_session(srv, raw, params).await,
+        "session/load" => load_session(srv, raw, params).await,
         "session/prompt" => match handle_prompt(srv, raw, &id) {
             Ok(()) => return,
             Err(e) => Err(e),
@@ -163,11 +166,54 @@ fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Value, pa
     srv.respond(id, result);
 }
 
+async fn new_session(
+    srv: &mut Server,
+    raw: &Value,
+    params: &AcpParams,
+) -> Result<AgentResponse, AcpError> {
+    let req: NewSessionRequest = parse_params(raw)?;
+    close_session(srv).await;
+    let mcp = start_mcp(&req.cwd, &req.mcp_servers).await;
+    let handle = spawn_session(params, req.cwd, None, Vec::new(), mcp.clone());
+    let spec = params.model.spec();
+    let resp = methods::new_session_response(handle.session_id.as_str(), &srv.modes)
+        .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
+    install_session(srv, handle, mcp, spec);
+    Ok(AgentResponse::NewSessionResponse(resp))
+}
+
+async fn load_session(
+    srv: &mut Server,
+    raw: &Value,
+    params: &AcpParams,
+) -> Result<AgentResponse, AcpError> {
+    let req: LoadSessionRequest = parse_params(raw)?;
+    let session_ref: SessionRef = req
+        .session_id
+        .0
+        .parse()
+        .map_err(|_| AcpError::resource_not_found(Some(req.session_id.0.to_string())))?;
+    let history = load_history(session_ref.id())?;
+    close_session(srv).await;
+    let mcp = start_mcp(&req.cwd, &req.mcp_servers).await;
+    let sid = SessionId::from(session_ref.to_string());
+    for update in translate::replay_history(&history) {
+        session_update(&srv.out_tx, &sid, update);
+    }
+    let handle = spawn_session(params, req.cwd, Some(session_ref), history, mcp.clone());
+    let spec = params.model.spec();
+    let resp = methods::load_session_response(&srv.modes)
+        .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
+    install_session(srv, handle, mcp, spec);
+    Ok(AgentResponse::LoadSessionResponse(resp))
+}
+
 fn spawn_session(
     params: &AcpParams,
     cwd: PathBuf,
     session_id: Option<SessionRef>,
     history: Vec<Message>,
+    mcp_handle: Option<McpHandle>,
 ) -> InteractiveHandle {
     headless::spawn_interactive(InteractiveParams {
         model: params.model.clone(),
@@ -176,7 +222,7 @@ fn spawn_session(
         timeouts: params.timeouts,
         prompt_slots: Arc::clone(&params.prompt_slots),
         excluded_tools: Vec::new(),
-        mcp_handle: params.mcp_handle.clone(),
+        mcp_handle,
         initial_wd: cwd,
         session_id,
         modes: Arc::clone(&params.modes),
@@ -189,8 +235,94 @@ fn spawn_session(
     })
 }
 
-fn install_session(srv: &mut Server, handle: InteractiveHandle, current_model: String) {
-    let pending = PendingPrompt::default();
+/// Servers the client injects on `session/new` and `session/load`. A transport we
+/// cannot speak is dropped like a broken `mcp.toml` entry: losing one server beats
+/// losing the session.
+fn injected_servers(servers: &[McpServer]) -> Vec<(String, RawTransport)> {
+    servers
+        .iter()
+        .filter_map(|server| match server {
+            McpServer::Http(http) => Some((
+                server_name(&http.name),
+                RawTransport::Http(RawHttpFields {
+                    url: http.url.clone(),
+                    headers: pairs(&http.headers, |h| (&h.name, &h.value)),
+                    oauth: None,
+                }),
+            )),
+            McpServer::Stdio(stdio) => Some((
+                server_name(&stdio.name),
+                RawTransport::Stdio(RawStdioFields {
+                    command: iter::once(stdio.command.to_string_lossy().into_owned())
+                        .chain(stdio.args.iter().cloned())
+                        .collect(),
+                    environment: pairs(&stdio.env, |e| (&e.name, &e.value)),
+                }),
+            )),
+            _ => {
+                warn!("ignoring injected MCP server, only http and stdio are supported");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Clients name their servers freely, maki names them like `mcp.toml` does.
+fn server_name(name: &str) -> String {
+    name.chars()
+        .take(MAX_SERVER_NAME_LEN)
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+fn pairs<T>(items: &[T], split: impl Fn(&T) -> (&String, &String)) -> HashMap<String, String> {
+    items
+        .iter()
+        .map(|item| {
+            let (name, value) = split(item);
+            (name.clone(), value.clone())
+        })
+        .collect()
+}
+
+/// MCP is per session: the client picks the cwd and may inject its own servers.
+/// Returns as soon as the config is read, the first prompt waits for the tools.
+async fn start_mcp(cwd: &Path, servers: &[McpServer]) -> Option<McpHandle> {
+    let (handle, errors) = mcp::start_with_extra(cwd, injected_servers(servers)).await;
+    if !errors.is_empty() {
+        warn!(%errors, "MCP config errors");
+    }
+    handle
+}
+
+/// Stop the old session before the next one starts, so two generations of the
+/// same MCP servers never fight over a port or a lock file.
+async fn close_session(srv: &mut Server) {
+    let Some(state) = srv.session.take() else {
+        return;
+    };
+    // The event pump dies with the session, so the prompt it owed an answer to
+    // has to be answered here or the client waits on it forever.
+    if let Some(id) = state.pending.lock().unwrap().prompt.take() {
+        let resp = PromptResponse::new(StopReason::Cancelled);
+        send(
+            &srv.out_tx,
+            Response::new(id, Ok(AgentResponse::PromptResponse(resp))),
+        );
+    }
+    state.handle.task.cancel().await;
+    if let Some(mcp) = state.mcp {
+        mcp.shutdown().await;
+    }
+}
+
+fn install_session(
+    srv: &mut Server,
+    handle: InteractiveHandle,
+    mcp: Option<McpHandle>,
+    current_model: String,
+) {
+    let pending = PendingState::default();
     start_event_pump(
         handle.event_rx.clone(),
         handle.session_id.clone(),
@@ -199,9 +331,10 @@ fn install_session(srv: &mut Server, handle: InteractiveHandle, current_model: S
     );
     srv.session = Some(SessionState {
         handle,
+        mcp,
         current_mode: AgentMode::Build,
         current_model,
-        pending_prompt: pending,
+        pending,
     });
 }
 
@@ -246,7 +379,7 @@ fn handle_prompt(srv: &mut Server, raw: &Value, id: &RequestId) -> Result<(), Ac
         .input_tx
         .send(input)
         .map_err(|_| AcpError::new(-32603, "session ended"))?;
-    *session.pending_prompt.lock().unwrap() = Some(id.clone());
+    session.pending.lock().unwrap().prompt = Some(id.clone());
     Ok(())
 }
 
@@ -304,6 +437,9 @@ fn handle_notification(srv: &Server, method: &str) {
     match method {
         "session/cancel" => {
             if let Some(session) = &srv.session {
+                // Any answer still in flight belongs to the cancelled turn, so
+                // forget its id and let it be dropped on arrival.
+                session.pending.lock().unwrap().permission = None;
                 let _ = session.handle.cancel_tx.try_send(());
             }
         }
@@ -313,12 +449,35 @@ fn handle_notification(srv: &Server, method: &str) {
 
 fn handle_incoming_response(srv: &Server, raw: &Value) {
     let Some(session) = &srv.session else { return };
-
-    if let Some(result) = raw.get("result")
-        && let Ok(resp) = serde_json::from_value::<RequestPermissionResponse>(result.clone())
+    let Some(id) = raw.get("id").and_then(Value::as_i64) else {
+        return;
+    };
+    if session
+        .pending
+        .lock()
+        .unwrap()
+        .permission
+        .take_if(|pending| *pending == id)
+        .is_none()
     {
-        let answer = permissions::outcome_to_answer(&resp.outcome);
-        let _ = session.handle.answer_tx.send(answer.encode());
+        warn!(id, "response for an unknown request id");
+        return;
+    }
+    let _ = session
+        .handle
+        .answer_tx
+        .send(permission_answer(raw).encode());
+}
+
+/// A response we cannot read still has to answer the agent, or the tool waits
+/// on a permission that will never come.
+fn permission_answer(raw: &Value) -> PermissionAnswer {
+    match raw
+        .get("result")
+        .map(|result| serde_json::from_value::<RequestPermissionResponse>(result.clone()))
+    {
+        Some(Ok(resp)) => permissions::outcome_to_answer(&resp.outcome),
+        _ => PermissionAnswer::Deny,
     }
 }
 
@@ -368,11 +527,10 @@ fn start_event_pump(
     event_rx: Receiver<Envelope>,
     session_id: SessionRef,
     out_tx: Sender<Value>,
-    pending: PendingPrompt,
+    pending: PendingState,
 ) {
     smol::spawn(async move {
         let sid = SessionId::from(session_id.to_string());
-        let mut next_request_id = FIRST_OUTGOING_REQUEST_ID;
 
         while let Ok(Envelope {
             event, subagent, ..
@@ -398,20 +556,21 @@ fn start_event_pump(
                             ToolCallUpdate::new(ToolCallId::from(id), fields),
                             permissions::permission_options(),
                         ));
-                    next_request_id += 1;
+                    let request_id = NEXT_OUTGOING_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+                    pending.lock().unwrap().permission = Some(request_id);
                     send(
                         &out_tx,
                         Request {
-                            id: RequestId::Number(next_request_id),
+                            id: RequestId::Number(request_id),
                             method: Arc::from(request.method()),
                             params: Some(request),
                         },
                     );
                     continue;
                 }
-                AgentEvent::Done { stop_reason, .. } => {
-                    if let Some(id) = pending.lock().unwrap().take() {
-                        let resp = PromptResponse::new(translate::map_stop_reason(stop_reason));
+                AgentEvent::Done { reason, .. } => {
+                    if let Some(id) = pending.lock().unwrap().prompt.take() {
+                        let resp = PromptResponse::new(translate::map_done_reason(reason));
                         send(
                             &out_tx,
                             Response::new(id, Ok(AgentResponse::PromptResponse(resp))),
@@ -420,7 +579,7 @@ fn start_event_pump(
                     continue;
                 }
                 AgentEvent::Error { message } => {
-                    if let Some(id) = pending.lock().unwrap().take() {
+                    if let Some(id) = pending.lock().unwrap().prompt.take() {
                         let error = AcpError::internal_error().data(Value::String(message));
                         send(&out_tx, Response::<AgentResponse>::new(id, Err(error)));
                     }
@@ -467,12 +626,96 @@ fn json_str(e: &impl std::fmt::Display) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use maki_agent::permissions::PermissionManager;
     use maki_providers::{ContentBlock as MsgBlock, Role, TokenUsage};
     use maki_storage::StateDir;
     use maki_storage::sessions::Session;
     use tempfile::TempDir;
+    use test_case::test_case;
 
     use super::*;
+
+    const ANSWERED_ID: i64 = 1001;
+    const UNKNOWN_ID: i64 = 1002;
+
+    fn allow_once(id: i64) -> Value {
+        serde_json::json!({
+            "id": id,
+            "result": { "outcome": { "outcome": "selected", "optionId": "allow_once" } },
+        })
+    }
+
+    #[test_case(allow_once(ANSWERED_ID), PermissionAnswer::AllowOnce ; "selected_option")]
+    #[test_case(serde_json::json!({ "id": ANSWERED_ID, "result": { "outcome": { "outcome": "cancelled" } } }), PermissionAnswer::Deny ; "cancelled_outcome")]
+    #[test_case(serde_json::json!({ "id": ANSWERED_ID, "result": { "nonsense": true } }), PermissionAnswer::Deny ; "unparsable_result")]
+    #[test_case(serde_json::json!({ "id": ANSWERED_ID, "error": { "code": -32603 } }), PermissionAnswer::Deny ; "jsonrpc_error")]
+    fn permission_answer_maps_response(raw: Value, expected: PermissionAnswer) {
+        assert_eq!(permission_answer(&raw), expected);
+    }
+
+    fn server_awaiting_answer() -> (Server, Receiver<String>) {
+        let (answer_tx, answer_rx) = flume::unbounded();
+        let handle = InteractiveHandle {
+            event_rx: flume::unbounded().1,
+            tool_names: Vec::new(),
+            input_tx: flume::unbounded().0,
+            answer_tx,
+            cancel_tx: flume::unbounded().0,
+            model_tx: flume::unbounded().0,
+            session_id: SessionRef::from(MakiId::generate()),
+            permissions: Arc::new(PermissionManager::new(
+                maki_config::PermissionsConfig::default(),
+                PathBuf::from("/project"),
+            )),
+            task: smol::spawn(async {}),
+        };
+        let server = Server {
+            out_tx: flume::unbounded().0,
+            modes: Arc::new(maki_agent::ModeRegistry::builtin()),
+            model_specs: Vec::new(),
+            model_policy: Arc::new(maki_config::ModelPolicy::default()),
+            session: Some(SessionState {
+                handle,
+                mcp: None,
+                current_mode: AgentMode::Build,
+                current_model: String::new(),
+                pending: Arc::new(Mutex::new(Pending {
+                    permission: Some(ANSWERED_ID),
+                    ..Default::default()
+                })),
+            }),
+        };
+        (server, answer_rx)
+    }
+
+    #[test]
+    fn only_the_outstanding_request_id_is_answered() {
+        let (srv, answer_rx) = server_awaiting_answer();
+
+        handle_incoming_response(&srv, &allow_once(UNKNOWN_ID));
+        assert!(answer_rx.is_empty(), "an unknown id is dropped");
+
+        handle_incoming_response(&srv, &allow_once(ANSWERED_ID));
+        assert_eq!(
+            answer_rx.try_recv().ok(),
+            Some(PermissionAnswer::AllowOnce.encode())
+        );
+
+        handle_incoming_response(&srv, &allow_once(ANSWERED_ID));
+        assert!(
+            answer_rx.is_empty(),
+            "a replayed answer cannot land on the next request"
+        );
+    }
+
+    #[test]
+    fn cancel_drops_the_outstanding_permission_request() {
+        let (srv, answer_rx) = server_awaiting_answer();
+        handle_notification(&srv, "session/cancel");
+
+        handle_incoming_response(&srv, &allow_once(ANSWERED_ID));
+        assert!(answer_rx.is_empty(), "the cancelled turn owns that answer");
+    }
 
     #[test]
     fn load_history_round_trips_stored_messages() {
@@ -508,5 +751,59 @@ mod tests {
         let dir = StateDir::from_path(tmp.path().to_path_buf());
         let err = load_history_from(&dir, MakiId::generate()).unwrap_err();
         assert_eq!(err.code, AcpError::resource_not_found(None).code);
+    }
+
+    #[test]
+    fn converts_injected_mcp_servers() {
+        let raw = serde_json::json!({
+            "params": {
+                "sessionId": MakiId::generate().to_string(),
+                "cwd": "/project",
+                "mcpServers": [
+                    {
+                        "type": "http",
+                        "name": "kan.dev/mcp",
+                        "url": "http://127.0.0.1:41012",
+                        "headers": [{ "name": "Authorization", "value": "Bearer abc" }]
+                    },
+                    {
+                        "name": "local",
+                        "command": "/usr/bin/mcp",
+                        "args": ["--stdio"],
+                        "env": [{ "name": "TOKEN", "value": "t" }]
+                    },
+                    {
+                        "type": "sse",
+                        "name": "legacy",
+                        "url": "http://127.0.0.1:41013",
+                        "headers": []
+                    }
+                ]
+            }
+        });
+
+        let req: LoadSessionRequest = parse_params(&raw).unwrap();
+        let servers = injected_servers(&req.mcp_servers);
+        assert_eq!(servers.len(), 2, "sse is dropped, not converted");
+
+        let (name, RawTransport::Http(http)) = &servers[0] else {
+            panic!("expected http transport");
+        };
+        assert_eq!(name, "kan-dev-mcp", "wire names are coerced to valid ones");
+        assert_eq!(http.url, "http://127.0.0.1:41012");
+        assert_eq!(
+            http.headers.get("Authorization").map(String::as_str),
+            Some("Bearer abc")
+        );
+
+        let (name, RawTransport::Stdio(stdio)) = &servers[1] else {
+            panic!("expected stdio transport");
+        };
+        assert_eq!(name, "local");
+        assert_eq!(stdio.command, ["/usr/bin/mcp", "--stdio"]);
+        assert_eq!(
+            stdio.environment.get("TOKEN").map(String::as_str),
+            Some("t")
+        );
     }
 }
