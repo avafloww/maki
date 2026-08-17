@@ -7,13 +7,13 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol_schema::{
     AgentNotification, AgentRequest, AgentResponse, ContentBlock, CreateElicitationResponse,
-    CurrentModeUpdate, EmbeddedResourceResource, Error as AcpError, ImageContent, InitializeRequest,
-    JsonRpcMessage, LoadSessionRequest, McpServer, NewSessionRequest, Notification, PromptRequest,
-    PromptResponse, Request, RequestId, RequestPermissionRequest, RequestPermissionResponse,
-    Response, SessionId, SessionModeId, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
-    SetSessionModeResponse, StopReason, TextContent, ToolCallId, ToolCallUpdate,
-    ToolCallUpdateFields,
+    CurrentModeUpdate, EmbeddedResourceResource, Error as AcpError, ImageContent,
+    InitializeRequest, JsonRpcMessage, LoadSessionRequest, McpServer, NewSessionRequest,
+    Notification, PromptRequest, PromptResponse, Request, RequestId, RequestPermissionRequest,
+    RequestPermissionResponse, Response, SessionId, SessionModeId, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+    SetSessionModeRequest, SetSessionModeResponse, StopReason, TextContent, ToolCallId,
+    ToolCallUpdate, ToolCallUpdateFields,
 };
 use color_eyre::eyre::Context;
 use flume::{Receiver, Sender};
@@ -188,7 +188,14 @@ async fn new_session(
     let req: NewSessionRequest = parse_params(raw)?;
     close_session(srv).await;
     let mcp = start_mcp(&req.cwd, &req.mcp_servers).await;
-    let handle = spawn_session(params, req.cwd, None, Vec::new(), mcp.clone(), srv.elicitation);
+    let handle = spawn_session(
+        params,
+        req.cwd,
+        None,
+        Vec::new(),
+        mcp.clone(),
+        srv.elicitation,
+    );
     let spec = params.model.spec();
     let resp = methods::new_session_response(handle.session_id.as_str(), &srv.modes)
         .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
@@ -214,7 +221,14 @@ async fn load_session(
     for update in translate::replay_history(&history) {
         session_update(&srv.out_tx, &sid, update);
     }
-    let handle = spawn_session(params, req.cwd, Some(session_ref), history, mcp.clone(), srv.elicitation);
+    let handle = spawn_session(
+        params,
+        req.cwd,
+        Some(session_ref),
+        history,
+        mcp.clone(),
+        srv.elicitation,
+    );
     let spec = params.model.spec();
     let resp = methods::load_session_response(&srv.modes)
         .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
@@ -745,6 +759,7 @@ mod tests {
                     ..Default::default()
                 })),
             }),
+            elicitation: false,
         };
         (server, answer_rx)
     }
@@ -776,6 +791,59 @@ mod tests {
 
         handle_incoming_response(&srv, &allow_once(ANSWERED_ID));
         assert!(answer_rx.is_empty(), "the cancelled turn owns that answer");
+    }
+
+    #[test]
+    fn elicitation_answer_is_routed_by_id_and_decoded() {
+        let (srv, answer_rx) = server_awaiting_answer();
+        {
+            let mut pending = srv.session.as_ref().unwrap().pending.lock().unwrap();
+            pending.permission = None;
+            pending.elicitation = Some(ANSWERED_ID);
+        }
+
+        handle_incoming_response(
+            &srv,
+            &serde_json::json!({
+                "id": ANSWERED_ID,
+                "result": {
+                    "action": "accept",
+                    "content": { "q1": "a", "q2": ["x", "y"] },
+                },
+            }),
+        );
+        assert_eq!(
+            answer_rx.try_recv().ok(),
+            Some(r#"{"answers":[["a"],["x","y"]]}"#.to_string())
+        );
+
+        handle_incoming_response(&srv, &allow_once(ANSWERED_ID));
+        assert!(
+            answer_rx.is_empty(),
+            "a replayed id cannot land on the next request"
+        );
+    }
+
+    #[test]
+    fn unparsable_elicitation_result_dismisses_instead_of_hanging() {
+        let (srv, answer_rx) = server_awaiting_answer();
+        srv.session
+            .as_ref()
+            .unwrap()
+            .pending
+            .lock()
+            .unwrap()
+            .elicitation = Some(ANSWERED_ID);
+
+        handle_incoming_response(
+            &srv,
+            &serde_json::json!({ "id": ANSWERED_ID, "result": { "nonsense": true } }),
+        );
+        assert_eq!(
+            answer_rx.try_recv().ok(),
+            Some(r#"{"dismissed":true}"#.to_string()),
+            "a broken answer must still unblock the waiting tool"
+        );
     }
 
     #[test]
