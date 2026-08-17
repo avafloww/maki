@@ -36,7 +36,10 @@ pub fn at_token_range(line: &str, cursor_chars: usize) -> Option<(usize, usize)>
         if bytes[i] != b'@' {
             continue;
         }
-        let token_start = before[..i].chars().next_back().is_none_or(char::is_whitespace);
+        let token_start = before[..i]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace);
         if token_start {
             return Some((i, cursor_byte));
         }
