@@ -4695,14 +4695,29 @@ fn converge_completion(app: &mut App) {
     }
 }
 
-/// Seeds a single on-disk skill named `name` under a frontmatter-mismatched
-/// dir, so no colliding `skills/<name>/` directory shows up as a file candidate.
+/// Seeding a skill writes `SKILL.md` into a directory under `.maki/skills/`;
+/// the dir name deliberately differs from the frontmatter name so no colliding
+/// `skills/<name>/` directory shows up as a file candidate.
 fn seed_skill(cwd: &Path, name: &str) {
     write_completion_fixture(
         cwd,
-        ".maki/skills/sk",
+        ".maki/skills/sk/SKILL.md",
         &format!("---\nname: {name}\n---\nWorkflows for {name}."),
     );
+}
+
+/// Lets the completion popup's walker finish and nucleo converge, waiting until
+/// the popup is actually offering a selectable item.
+fn converge_completion(app: &mut App) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let _ = app.file_completion.tick();
+        if app.file_completion.has_selectable() {
+            return;
+        }
+        std::thread::yield_now();
+    }
+    panic!("@-completion popup never offered a selectable item");
 }
 
 #[test]
@@ -4785,12 +4800,14 @@ fn popup_closes_when_token_removed() {
 #[test]
 fn command_palette_takes_precedence() {
     let (_tmp, mut app) = completion_app();
-    app.update(Msg::Key(key(KeyCode::Char('/'))));
+    // A live `/compact ` command keeps the palette matched while we type `@`.
+    for c in "/compact ".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
     assert!(app.command_palette.is_active());
     app.update(Msg::Key(key(KeyCode::Char('@'))));
-    assert_eq!(app.input_box.buffer.value(), "/@");
-    assert!(app.command_palette.is_active());
-    assert!(!app.file_completion.is_active());
+    assert!(app.command_palette.is_active(), "palette stays matched on /compact");
+    assert!(!app.file_completion.is_active(), "@ popup suppressed while palette is up");
 }
 
 // --- Async subagent routing (AC.8, AC.9, AC.10) ------------------------------

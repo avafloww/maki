@@ -19,8 +19,8 @@ use crate::repaint::{Cadence, Dirty};
 use crate::text_buffer::TextBuffer;
 use crate::theme;
 
-const SKILLS_HEADER: &str = "skills";
 const WALKER_CRASHED_MSG: &str = "File scanner crashed";
+const COL_GAP: usize = 2;
 const PENDING_DEBOUNCE_MS: u128 = 100;
 const MAX_MATERIALIZED: u32 = 640;
 
@@ -97,9 +97,10 @@ struct Session {
     file_matches: Vec<Candidate>,
     skill_matches: Vec<Candidate>,
     matches: Vec<Candidate>,
-    skills_start: Option<usize>,
 
     selected: usize,
+    /// Grid layout: columns used, and scroll/viewport in whole rows.
+    cols: usize,
     scroll_offset: usize,
     viewport_height: usize,
 
@@ -151,8 +152,8 @@ impl FileCompletionMenu {
             file_matches: Vec::new(),
             skill_matches: Vec::new(),
             matches: Vec::new(),
-            skills_start: None,
             selected: 0,
+            cols: 1,
             scroll_offset: 0,
             viewport_height: 0,
             cancel: cancel_clone,
@@ -174,6 +175,12 @@ impl FileCompletionMenu {
 
     pub fn is_active(&self) -> bool {
         self.session.is_some()
+    }
+
+    pub fn has_selectable(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|s| s.visible && !s.matches.is_empty())
     }
 
     pub fn token_byte_range(&self) -> (usize, usize) {
@@ -297,30 +304,54 @@ impl FileCompletionMenu {
             _ => return None,
         };
 
-        let popup_height = (s.matches.len() as u16 + 1).min(input_area.y);
-        if popup_height <= 1 {
+        let len = s.matches.len();
+        // Cap taken from the screen height: the popup is a compact overlay, not
+        // a full-height list.
+        let max_height = ((frame.area().height as u32 * 30 / 100) as u16).max(2);
+        let avail = max_height.saturating_sub(1) as usize;
+        if avail == 0 || input_area.y == 0 {
             return None;
         }
-        let rows = popup_height - 1;
-        s.viewport_height = rows as usize;
+
+        let cols = if len <= avail {
+            1
+        } else if len <= avail.saturating_mul(2) {
+            2
+        } else {
+            len.min(3)
+        };
+        s.cols = cols;
+        let total_rows = len.div_ceil(cols);
+        let view_rows = avail.min(total_rows);
+        s.viewport_height = view_rows;
         ensure_visible(s);
 
-        let max_width = s
-            .matches
-            .iter()
-            .map(|c| c.item.display().chars().count())
-            .max()
-            .unwrap_or(0)
-            .min(input_area.width as usize);
+        let budget = (input_area.width as usize)
+            .saturating_sub(COL_GAP * (cols - 1))
+            / cols;
+        let col_widths: Vec<usize> = (0..cols)
+            .map(|j| {
+                s.matches
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| i % cols == j)
+                    .map(|(_, c)| c.item.display().chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .min(budget)
+            })
+            .collect();
+        let total_width = col_widths.iter().sum::<usize>() + COL_GAP * (cols - 1);
+        let popup_height = (view_rows as u16 + 1).min(max_height);
         let popup = Rect {
             x: input_area.x,
             y: input_area.y.saturating_sub(popup_height),
-            width: (max_width as u16 + 2).min(input_area.width).max(1),
+            width: total_width.clamp(1, input_area.width.max(1) as usize) as u16,
             height: popup_height,
         };
 
         let t = theme::current();
-        let lines = build_lines(s, rows as usize, max_width, &t);
+        let lines = build_grid(s, view_rows, cols, &col_widths, &t);
 
         frame.render_widget(Clear, popup);
         let block = Block::default()
@@ -393,25 +424,24 @@ fn refresh_file_matches(s: &mut Session) {
 
 fn rebuild_combined(s: &mut Session) {
     s.matches.clear();
-    s.skills_start = None;
     if s.skills_only {
         s.matches.extend(s.skill_matches.iter().cloned());
         return;
     }
-    let n_files = s.file_matches.len();
     s.matches.extend(s.file_matches.iter().cloned());
-    if !s.skill_matches.is_empty() {
-        s.skills_start = Some(n_files);
-        s.matches.extend(s.skill_matches.iter().cloned());
-    }
+    s.matches.extend(s.skill_matches.iter().cloned());
 }
 
-fn move_selection(s: &mut Session, delta: isize) {
+fn move_selection(s: &mut Session, rows: isize) {
     if s.matches.is_empty() {
         return;
     }
-    let new = (s.selected as isize + delta).clamp(0, s.matches.len() as isize - 1);
-    s.selected = new as usize;
+    let cols = s.cols.max(1);
+    let last = s.matches.len() - 1;
+    let col = (s.selected % cols).min(last);
+    let last_row = last / cols;
+    let row = ((s.selected / cols) as isize + rows).clamp(0, last_row as isize) as usize;
+    s.selected = (row * cols + col).min(last);
     ensure_visible(s);
 }
 
@@ -426,99 +456,91 @@ fn clamp_selection(s: &mut Session) {
 }
 
 fn ensure_visible(s: &mut Session) {
-    let len = s.matches.len();
-    if len > s.viewport_height {
-        s.scroll_offset = s.scroll_offset.min(len - s.viewport_height);
+    let cols = s.cols.max(1);
+    let total_rows = s.matches.len().div_ceil(cols);
+    let vh = s.viewport_height.max(1);
+
+    if total_rows > vh {
+        s.scroll_offset = s.scroll_offset.min(total_rows - vh);
     } else {
         s.scroll_offset = 0;
     }
 
-    if s.selected < s.scroll_offset {
-        s.scroll_offset = s.selected;
-    } else if s.selected >= s.scroll_offset + s.viewport_height {
-        s.scroll_offset = s.selected + 1 - s.viewport_height;
+    let row = s.selected / cols;
+    if row < s.scroll_offset {
+        s.scroll_offset = row;
+    } else if row >= s.scroll_offset + vh {
+        s.scroll_offset = row + 1 - vh;
     }
 }
 
-fn build_lines<'a>(
+fn build_grid<'a>(
     s: &Session,
-    row_count: usize,
-    max_width: usize,
+    view_rows: usize,
+    cols: usize,
+    col_widths: &[usize],
     t: &'a theme::Theme,
 ) -> Vec<Line<'a>> {
-    let end = (s.scroll_offset + row_count).min(s.matches.len());
-    let mut lines = Vec::with_capacity(end - s.scroll_offset);
+    let len = s.matches.len();
+    let mut lines = Vec::with_capacity(view_rows);
 
-    for i in s.scroll_offset..end {
-        if s.skills_start == Some(i) {
-            lines.push(Line::from(Span::styled(
-                format!("  {SKILLS_HEADER}"),
-                t.item_desc,
-            )));
+    for r in 0..view_rows {
+        let row = s.scroll_offset + r;
+        let mut spans = Vec::new();
+        for j in 0..cols {
+            let idx = row * cols + j;
+            if idx < len {
+                spans.extend(cell_line(&s.matches[idx], col_widths[j], idx == s.selected, t).spans);
+            } else {
+                spans.push(Span::raw(" ".repeat(col_widths[j])));
+            }
+            if j + 1 < cols {
+                spans.push(Span::raw(" ".repeat(COL_GAP)));
+            }
         }
-        let c = &s.matches[i];
-        let selected = i == s.selected;
-        lines.push(row_line(c, max_width, selected, t));
+        lines.push(Line::from(spans));
     }
     lines
 }
 
-fn row_line<'a>(c: &Candidate, max_width: usize, selected: bool, t: &'a theme::Theme) -> Line<'a> {
+fn cell_line<'a>(c: &Candidate, width: usize, selected: bool, t: &'a theme::Theme) -> Line<'a> {
     let base = if selected { t.item_selected } else { t.item };
     let text = c.item.display();
-    let mut must_break = false;
-    let mut spans = vec![Span::styled("   ", base)];
-    let remaining = max_width.saturating_sub(3);
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    let mut used = 0usize;
 
-    if let CompletionItem::File { .. } = c.item {
-        let mut in_match = false;
-        let mut run = String::new();
-        let mut width = 0usize;
-        for (i, ch) in text.chars().enumerate() {
-            if width + ch.width().unwrap_or(0) > remaining {
-                must_break = true;
-                break;
+    match &c.item {
+        CompletionItem::File { .. } => {
+            let hl = base.fg(t.accent.fg.unwrap_or_default()).add_modifier(Modifier::BOLD);
+            let mut in_match = false;
+            let mut run = String::new();
+            for (i, ch) in text.chars().enumerate() {
+                let cw = ch.width().unwrap_or(0);
+                if used + cw > width {
+                    break;
+                }
+                used += cw;
+                let is_match = c.indices.binary_search(&(i as u32)).is_ok();
+                if is_match != in_match && !run.is_empty() {
+                    spans.push(Span::styled(mem::take(&mut run), if in_match { hl } else { base }));
+                }
+                in_match = is_match;
+                run.push(ch);
             }
-            width += ch.width().unwrap_or(0);
-            let is_match = c.indices.binary_search(&(i as u32)).is_ok();
-            if is_match != in_match && !run.is_empty() {
-                spans.push(Span::styled(
-                    mem::take(&mut run),
-                    if in_match {
-                        base.fg(t.accent.fg.unwrap_or_default())
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        base
-                    },
-                ));
+            if !run.is_empty() {
+                spans.push(Span::styled(run, if in_match { hl } else { base }));
             }
-            in_match = is_match;
-            run.push(ch);
         }
-        if !run.is_empty() {
-            spans.push(Span::styled(
-                run,
-                if in_match {
-                    base.fg(t.accent.fg.unwrap_or_default())
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    base
-                },
-            ));
+        CompletionItem::Skill { .. } => {
+            let run: String = text.chars().take(width).collect();
+            used = run.chars().count();
+            spans.push(Span::styled(run, base));
         }
-        if must_break {
-            spans.push(Span::styled("…", base));
-        }
-    } else {
-        let truncated: String = text.chars().take(remaining).collect();
-        let mut styled = String::with_capacity(truncated.len() + 1);
-        styled.push_str(&truncated);
-        if text.chars().count() > remaining {
-            styled.push('…');
-        }
-        spans.push(Span::styled(styled, base));
     }
 
+    if used < width {
+        spans.push(Span::raw(" ".repeat(width - used)));
+    }
     Line::from(spans)
 }
 
@@ -557,8 +579,8 @@ mod tests {
             file_matches: Vec::new(),
             skill_matches: Vec::new(),
             matches: Vec::new(),
-            skills_start: None,
             selected: 0,
+            cols: 1,
             scroll_offset: 0,
             viewport_height: 0,
             cancel: Arc::new(AtomicBool::new(false)),
