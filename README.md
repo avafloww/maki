@@ -17,6 +17,7 @@ _maki is good! i just have different opinions that i dont think are upstreamable
    - `--apend-system-prompt` works in TUI mode
    - `/login` has OpenAI Codex auth as an option
    - Esc-Esc doesn't wipe the todo UI
+   - emit terminal bell when agent wants user input (stolen from polytoken)
 
 ## installing lunamaki
 
