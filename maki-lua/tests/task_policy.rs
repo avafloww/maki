@@ -3,7 +3,6 @@
 //! scriptable Lua stubs.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use maki_agent::tools::ToolRegistry;
 use maki_agent::tools::test_support::stub_ctx;
@@ -685,6 +684,7 @@ local real_session = maki.agent.session
 maki.agent.session = function(ctx, opts)
   recorder.sessions = recorder.sessions + 1
   opts.inherit_provider = true
+  opts.tools = nil
   return real_session(ctx, opts)
 end
 
@@ -727,18 +727,12 @@ fn probe_real(reg: &ToolRegistry, ctx: &ToolContext) -> Value {
     common::exec_tool(reg, ctx, "probe", json!({})).expect("probe failed")
 }
 
-/// Poll `task_get` (each poll drives the smol executor, letting the background
-/// subagent driver advance) until the task is done or closed.
-fn wait_task_done(reg: &ToolRegistry, ctx: &ToolContext, task_id: &str) -> Value {
-    for _ in 0..400 {
-        if let Ok(out) = common::exec_tool(reg, ctx, "task_get", json!({ "task_id": task_id }))
-            && (out["status"] == "done" || out["status"] == "closed")
-        {
-            return out;
-        }
-        smol::block_on(async { smol::Timer::after(Duration::from_millis(5)).await });
-    }
-    panic!("task {task_id} did not finish");
+/// Run the blocking `task` composite (which drives the real `maki.agent.session`
+/// via `:prompt`) against the canned provider. Mirrors the passing automode
+/// pattern: `:prompt` blocks on the driver's `done_rx`, and `smol::block_on` pumps
+/// the background driver to completion. No `task_spawn`/`task_get` polling.
+fn run_task(reg: &ToolRegistry, ctx: &ToolContext, input: Value) -> Result<Value, String> {
+    common::exec_tool(reg, ctx, TASK_TOOL, input)
 }
 
 #[test]
@@ -755,24 +749,20 @@ fn task_policy_spawn_honors_mode_gating_real() {
     let (reg, _host) = load_real_driver_host("plan");
     let mut general = task_input(SCENARIO_PLAIN, None);
     general["subagent_type"] = json!("general");
-    let err = common::exec_tool(&reg, &ctx, "task_spawn", general)
-        .expect_err("general must be blocked in plan mode");
+    let err = run_task(&reg, &ctx, general).expect_err("general must be blocked in plan mode");
     assert!(err.contains("blocked in plan mode"), "got: {err}");
     assert_eq!(probe_real(&reg, &ctx)["sessions"], json!(0));
 
     // plan_reviewer in plan mode -> allowed; outside plan -> blocked.
     let mut reviewer = task_input(SCENARIO_PLAIN, None);
     reviewer["subagent_type"] = json!("plan_reviewer");
-    let spawn = common::exec_tool(&reg, &ctx, "task_spawn", reviewer)
-        .expect("plan_reviewer must spawn in plan mode");
-    let task_id = spawn["task_id"].as_str().unwrap().to_string();
-    wait_task_done(&reg, &ctx, &task_id);
+    run_task(&reg, &ctx, reviewer).expect("plan_reviewer must run in plan mode");
     assert_eq!(probe_real(&reg, &ctx)["sessions"], json!(1));
 
     let (reg_build, _host) = load_real_driver_host("build");
     let mut reviewer_build = task_input(SCENARIO_PLAIN, None);
     reviewer_build["subagent_type"] = json!("plan_reviewer");
-    let err = common::exec_tool(&reg_build, &ctx, "task_spawn", reviewer_build)
+    let err = run_task(&reg_build, &ctx, reviewer_build)
         .expect_err("plan_reviewer must be blocked outside plan mode");
     assert!(err.contains("only available in plan mode"), "got: {err}");
     assert_eq!(probe_real(&reg_build, &ctx)["sessions"], json!(0));
@@ -780,16 +770,12 @@ fn task_policy_spawn_honors_mode_gating_real() {
     // research is allowed in every mode.
     let mut research = task_input(SCENARIO_PLAIN, None);
     research["subagent_type"] = json!("research");
-    let spawn = common::exec_tool(&reg, &ctx, "task_spawn", research)
-        .expect("research must spawn in plan mode");
-    wait_task_done(&reg, &ctx, spawn["task_id"].as_str().unwrap());
+    run_task(&reg, &ctx, research).expect("research must run in plan mode");
 
     let (reg_build2, _host) = load_real_driver_host("build");
     let mut research_build = task_input(SCENARIO_PLAIN, None);
     research_build["subagent_type"] = json!("research");
-    let spawn = common::exec_tool(&reg_build2, &ctx, "task_spawn", research_build)
-        .expect("research must spawn in build mode");
-    wait_task_done(&reg_build2, &ctx, spawn["task_id"].as_str().unwrap());
+    run_task(&reg_build2, &ctx, research_build).expect("research must run in build mode");
 
     // The granted sessions were served by the canned provider (real driver),
     // not a Lua stub: the provider recorded the requests it received.
@@ -808,24 +794,15 @@ fn task_policy_structured_output_real_driver() {
     let (ctx, _rx, _trigger) = common::ctx_with_provider(Arc::clone(&provider));
 
     let (reg, _host) = load_real_driver_host("build");
-    let spawn = common::exec_tool(
-        &reg,
-        &ctx,
-        "task_spawn",
-        task_input(SCENARIO_HAPPY, Some(answer_schema())),
-    )
-    .expect("structured spawn failed");
-    let task_id = spawn["task_id"].as_str().unwrap().to_string();
-    let status = wait_task_done(&reg, &ctx, &task_id);
-
-    assert_eq!(status["status"], json!("done"), "got: {status}");
-    let captured = &status["result"]["captured"];
-    assert_eq!(captured, &json!({ "answer": "42" }), "captured must be the validated result");
+    let out = run_task(&reg, &ctx, task_input(SCENARIO_HAPPY, Some(answer_schema())))
+        .expect("structured task failed");
+    assert_eq!(out, json!({ "answer": "42" }));
 
     // The structured_output local tool was offered to the model.
     let names = common::tool_names(&provider.captured_tools()[0]);
     assert!(
         names.iter().any(|n| n == STRUCTURED_OUTPUT_TOOL),
-        "reviewer tools must include structured_output: {names:?}"
+        "session tools must include structured_output: {names:?}"
     );
 }
+

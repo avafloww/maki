@@ -453,11 +453,22 @@ fn auto_mode_error_denies_fail_closed_without_prompting() {
 /// (canned) provider via `inherit_provider`. The plugin's gating logic runs
 /// unchanged; only the spawn is forwarded.
 fn bash_host_with_real_classifier() -> (PluginHost, Arc<ToolRegistry>) {
+    bash_host_with_real_classifier_auto(true)
+}
+
+/// Like [`bash_host_with_real_classifier`] but with auto mode initialized to
+/// `auto_on`. The bash plugin defaults auto mode OFF, so a separate host with
+/// `auto_on = false` models the state after `/automode` toggled it off. (Each
+/// `load_source` gets its own per-env require cache, so toggling `bash_helpers`
+/// from a separate chunk would hit a different singleton than the handler
+/// captured; two hosts avoid that footgun.)
+fn bash_host_with_real_classifier_auto(auto_on: bool) -> (PluginHost, Arc<ToolRegistry>) {
     let reg = Arc::new(ToolRegistry::new());
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
-    let classifier_setup = r#"
+    let classifier_setup = format!(
+        r#"
 local bh = require("bash_helpers")
-bh.set_auto_mode(true)
+bh.set_auto_mode({auto})
 local real_classify = bh.classify_verdict
 local real_session = maki.agent.session
 local function canned_spawn(ctx, opts)
@@ -468,7 +479,9 @@ end
 bh.classify_verdict = function(command, cwd, opts, ctx)
   return real_classify(command, cwd, opts, ctx, canned_spawn)
 end
-"#;
+"#,
+        auto = if auto_on { "true" } else { "false" },
+    );
     host.load_source("bash", &format!("{BASH_SRC}\n{classifier_setup}"))
         .unwrap();
     (host, reg)
@@ -545,30 +558,29 @@ fn automode_error_fails_closed_without_prompting() {
     assert!(err.contains("denied by auto-mode"), "{err}");
 }
 
-/// Toggling auto mode off stops consulting the classifier (the command runs the
-/// plain path with the provider never called); toggling back on resumes gating.
+/// With auto mode OFF the bash handler runs the plain path and never consults
+/// the classifier; with auto mode ON a subsequent command is gated by it. Two
+/// hosts model the `/automode` toggle state (each `load_source` has its own
+/// require cache, so the toggle is expressed as the host's initial auto state
+/// rather than a cross-chunk mutation).
 #[test]
 fn automode_toggle_flows_through_ui() {
-    let (host, reg) = bash_host_with_real_classifier();
-
-    host.load_source("toggle_off", "require('bash_helpers').set_auto_mode(false)")
-        .unwrap();
+    let (host_off, reg_off) = bash_host_with_real_classifier_auto(false);
     let idle = Arc::new(common::CannedProvider::new(vec![]));
-    let out = exec_bash_real(&host, &reg, Arc::clone(&idle), json!({ "command": "echo toggled-off-runs" }))
+    let out = exec_bash_real(&host_off, &reg_off, Arc::clone(&idle), json!({ "command": "echo auto-off-runs" }))
         .expect("with auto mode off the plain path runs");
-    assert_eq!(bash_output(out), "toggled-off-runs");
+    assert_eq!(bash_output(out), "auto-off-runs");
     assert!(
         idle.captured_thinking().is_empty(),
         "classifier must not run with auto mode off"
     );
 
-    host.load_source("toggle_on", "require('bash_helpers').set_auto_mode(true)")
-        .unwrap();
+    let (host_on, reg_on) = bash_host_with_real_classifier_auto(true);
     let deny = Arc::new(common::CannedProvider::new(vec![
-        verdict_tool_use(false, "denied after re-toggle"),
+        verdict_tool_use(false, "denied with auto on"),
         common::canned_reply("done"),
     ]));
-    let err = exec_bash_real(&host, &reg, Arc::clone(&deny), json!({ "command": "echo should-be-denied" }))
-        .expect_err("with auto mode on the classifier gates again");
-    assert!(err.contains("denied after re-toggle"), "{err}");
+    let err = exec_bash_real(&host_on, &reg_on, Arc::clone(&deny), json!({ "command": "echo should-be-denied" }))
+        .expect_err("with auto mode on the classifier gates the command");
+    assert!(err.contains("denied with auto on"), "{err}");
 }

@@ -9,7 +9,6 @@
 //! tested here.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use maki_agent::tools::{ToolContext, ToolRegistry};
 use maki_lua::PluginHost;
@@ -29,6 +28,7 @@ const SESSION_WRAPPER: &str = r#"
 local real_session = maki.agent.session
 maki.agent.session = function(ctx, opts)
   opts.inherit_provider = true
+  opts.tools = nil
   return real_session(ctx, opts)
 end
 maki.agent.resolve_model = function(ctx, opts)
@@ -88,16 +88,13 @@ fn reviewer_input(description: &str) -> Value {
     input
 }
 
-fn wait_task_done(reg: &ToolRegistry, ctx: &ToolContext, task_id: &str) -> Value {
-    for _ in 0..400 {
-        if let Ok(out) = exec_tool(reg, ctx, "task_get", json!({ "task_id": task_id }))
-            && (out["status"] == "done" || out["status"] == "closed")
-        {
-            return out;
-        }
-        smol::block_on(async { smol::Timer::after(Duration::from_millis(5)).await });
-    }
-    panic!("task {task_id} did not finish");
+/// Run the blocking `task` composite (which drives the real reviewer session via
+/// `:prompt`) against the canned provider. `:prompt` blocks on the driver's
+/// `done_rx` and `smol::block_on` pumps the background driver to completion, the
+/// same pattern the automode suite proves. No `task_spawn`/`task_get` polling.
+fn run_reviewer(reg: &ToolRegistry, ctx: &ToolContext, description: &str) -> Result<String, String> {
+    let out = exec_tool(reg, ctx, "task", reviewer_input(description))?;
+    Ok(out.to_string())
 }
 
 #[test]
@@ -106,28 +103,17 @@ fn plan_reviewer_audits_plan_and_returns_verdict() {
 
     let pass = Arc::new(CannedProvider::new(vec![canned_reply("VERDICT: pass")]));
     let (ctx_pass, _rx, _trigger) = ctx_with_provider(Arc::clone(&pass));
-    let spawn = exec_tool(&reg, &ctx_pass, "task_spawn", reviewer_input("pass-review"))
-        .expect("reviewer must spawn in plan mode");
-    let status = wait_task_done(&reg, &ctx_pass, spawn["task_id"].as_str().unwrap());
-    assert!(
-        status["result"]["text"]
-            .as_str()
-            .is_some_and(|t| t.contains("VERDICT: pass")),
-        "pass verdict must surface: {status}"
-    );
+    let text = run_reviewer(&reg, &ctx_pass, "pass-review").expect("reviewer must run in plan mode");
+    assert!(text.contains("VERDICT: pass"), "pass verdict must surface: {text}");
 
     let fail = Arc::new(CannedProvider::new(vec![
         canned_reply("VERDICT: fail\n- finding: missing AC mapping"),
     ]));
     let (ctx_fail, _rx, _trigger) = ctx_with_provider(Arc::clone(&fail));
-    let spawn = exec_tool(&reg, &ctx_fail, "task_spawn", reviewer_input("fail-review"))
-        .expect("reviewer must spawn in plan mode");
-    let status = wait_task_done(&reg, &ctx_fail, spawn["task_id"].as_str().unwrap());
+    let text = run_reviewer(&reg, &ctx_fail, "fail-review").expect("reviewer must run in plan mode");
     assert!(
-        status["result"]["text"]
-            .as_str()
-            .is_some_and(|t| t.contains("VERDICT: fail")),
-        "fail verdict with findings must surface: {status}"
+        text.contains("VERDICT: fail"),
+        "fail verdict with findings must surface: {text}"
     );
 }
 
@@ -137,9 +123,7 @@ fn plan_reviewer_is_read_only_even_when_asked_to_write() {
     let (ctx, _rx, _trigger) = ctx_with_provider(Arc::clone(&provider));
     let (reg, _host) = load_reviewer_host("plan", true);
 
-    let spawn = exec_tool(&reg, &ctx, "task_spawn", reviewer_input("readonly-review"))
-        .expect("reviewer must spawn in plan mode");
-    wait_task_done(&reg, &ctx, spawn["task_id"].as_str().unwrap());
+    run_reviewer(&reg, &ctx, "readonly-review").expect("reviewer must run in plan mode");
 
     let names = tool_names(&provider.captured_tools()[0]);
     assert!(
@@ -158,7 +142,7 @@ fn plan_reviewer_only_in_plan_mode() {
     let (ctx, _rx, _trigger) = ctx_with_provider(Arc::clone(&provider));
     let (reg, _host) = load_reviewer_host("build", false);
 
-    let err = exec_tool(&reg, &ctx, "task_spawn", reviewer_input("gated-review"))
+    let err = run_reviewer(&reg, &ctx, "gated-review")
         .expect_err("plan_reviewer must be blocked outside plan mode");
     assert!(err.contains(PLAN_REVIEWER_ONLY_ERR), "got: {err}");
     assert!(
