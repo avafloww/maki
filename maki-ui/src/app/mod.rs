@@ -1081,9 +1081,13 @@ impl App {
 
     /// Refresh the input's known `@`-label set after external text (restore,
     /// rewind, command completion, editor edit) may have put a token in the
-    /// input. Skips the Lua round-trip when the text has no `@`-token.
+    /// input. File references resolve by path existence, so the Lua round-trip
+    /// is skipped unless the text has a tagged `@`-token.
     pub(crate) fn refresh_at_ref_labels(&mut self, text: &str) {
-        if maki_lua::parse_at_tokens(text).is_empty() {
+        if !maki_lua::parse_at_tokens(text)
+            .iter()
+            .any(|t| !t.prefix.is_empty())
+        {
             return;
         }
         let items = self
