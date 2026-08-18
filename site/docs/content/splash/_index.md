@@ -150,6 +150,15 @@ maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
 end)
 ```
 
+## More splash screens
+
+`examples/splash/` ships six self-contained whole-screen overrides you can
+drop into `~/.config/maki/lua/` and `require` to explore different home
+screens: a spinning pentagram, rising flowers, an ASCII printer, a perspective
+tunnel, shooting comets, and a wave banner. They work exactly like the example
+above. See [`examples/splash/README.md`](../../../examples/splash/README.md)
+for how to copy and switch between them.
+
 Two notes on writing overrides:
 
 - The renderer must be pure and pull-driven. It runs on the Lua thread while the UI waits for the frame, so do not call blocking maki API from inside it (for example an `open_win` that waits on the UI would deadlock). The default and the example above only read `maki.version()` and theme colors.
