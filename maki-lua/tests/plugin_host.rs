@@ -4146,7 +4146,12 @@ mod read_tool_required_params {
 // ---- splash plugin (home-screen) ----
 
 fn wait_for_splash_text(handle: &maki_lua::EventHandle, needle: &str) -> maki_lua::SplashFrame {
-    const DEADLINE: Duration = Duration::from_secs(5);
+    // Each timed-out pull leaves a render queued on the host, so a tight loop
+    // floods its request channel and starves it (especially during JIT warmup).
+    // Back off so the host drains the backlog and a warm frame fits the pull
+    // timeout even under heavy parallel test load.
+    const DEADLINE: Duration = Duration::from_secs(30);
+    const BACKOFF: Duration = Duration::from_millis(100);
     let start = std::time::Instant::now();
     loop {
         if let Some(frame) = handle.splash_frame(80, 20, 10.0, 1.0) {
@@ -4159,7 +4164,7 @@ fn wait_for_splash_text(handle: &maki_lua::EventHandle, needle: &str) -> maki_lu
             start.elapsed() < DEADLINE,
             "splash never contained '{needle}'"
         );
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(BACKOFF);
     }
 }
 
@@ -4225,7 +4230,7 @@ end)
         if let Some(f) = handle.splash_frame(80, 20, 0.0, 1.0) {
             break f;
         }
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(100));
     };
     assert!(
         frame

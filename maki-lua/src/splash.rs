@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use mlua::{Lua, Result as LuaResult, Table, Value};
 
+use crate::docs::FnDoc;
+
 /// Max time the UI waits for a splash frame from the host. The pull is
 /// best-effort: a dead or bogged-down renderer never freezes a frame.
 pub const SPLASH_PULL_TIMEOUT: Duration = Duration::from_millis(8);
@@ -187,3 +189,15 @@ impl SplashPull {
         }
     }
 }
+
+/// Documentation for `maki.version()`, which is registered by hand (see
+/// `register_version_api`) so it cannot carry a `#[lua_fn]` doc block.
+#[allow(non_upper_case_globals)]
+pub(crate) const version__doc: FnDoc = FnDoc {
+    name: "version",
+    args: "",
+    desc: "Read the current maki version and, if the built-in update check found one, the newer version. Rust owns the update check; plugins only mirror it, so the version text and update notice belong to whoever draws them.",
+    params: &[],
+    returns: "(table) { current = string, latest = string|nil, update_available = boolean }",
+    example: "local v = maki.version()\nif v.update_available then\n  print(\"run maki update to get v\" .. v.latest)\nend",
+};

@@ -416,7 +416,9 @@ mod tests {
         let (handle, _guard) = spawn_host_for_tests(&["splash"]);
         handle.set_version(update::CURRENT, None);
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Back off between pulls so the host's render queue (which every
+        // timed-out pull refills during JIT warmup) can drain under load.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let frame = loop {
             if let Some(f) = handle.splash_frame(80, 20, 10.0, 1.0) {
                 let all: String = f.rows.iter().map(|r| r.glyphs.as_str()).collect();
@@ -428,7 +430,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "splash never rendered the version"
             );
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(std::time::Duration::from_millis(100));
         };
         let area = Rect::new(0, 0, 80, 20);
         let mut buf = Buffer::empty(area);

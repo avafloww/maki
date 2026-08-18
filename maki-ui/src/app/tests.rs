@@ -5443,13 +5443,13 @@ fn test_splash_still_repulls_once_on_version_change() {
     let mut app = build_app_with_full(dir, writer, LuaCommandReader::empty(), handle.clone(), ui);
     // Warm the Lua JIT so the still-splash pull and the forced repull below
     // fit inside the pull timeout even under parallel test load.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while handle.splash_frame(80, 20, 0.0, 1.0).is_none() {
         assert!(
             std::time::Instant::now() < deadline,
             "splash never warmed up"
         );
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
     rendered(&mut app);
     let _ = app.tick(); // consume SplashShown, pull the fading still frame
