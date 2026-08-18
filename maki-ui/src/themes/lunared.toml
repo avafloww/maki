@@ -132,7 +132,7 @@ todo_completed     = { fg = "rose" }
 todo_in_progress   = { fg = "amber" }
 todo_pending       = { fg = "comment" }
 todo_cancelled     = { fg = "red", modifiers = ["crossed_out"] }
-item_selected      = { fg = "background", bg = "red" }
+item_selected      = { fg = "foreground", bg = "selection" }
 item               = { fg = "rose" }
 item_desc          = { fg = "comment" }
 accent             = { fg = "peach" }

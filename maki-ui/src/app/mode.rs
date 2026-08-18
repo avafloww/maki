@@ -194,6 +194,8 @@ impl App {
     }
 
     pub(crate) fn build_agent_input(&self, msg: &QueuedMessage) -> AgentInput {
+        // `msg.text` is already `@`-expanded at submit time (`submit_prompt`);
+        // no second expansion here.
         AgentInput {
             message: msg.text.clone(),
             mode: self.agent_mode(),

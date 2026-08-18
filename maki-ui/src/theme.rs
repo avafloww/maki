@@ -383,6 +383,20 @@ pub fn style_by_name(name: &str) -> Style {
         "warning" | "todo_in_progress" => t.todo_in_progress,
         "todo_pending" | "pending" => t.todo_pending,
         "todo_cancelled" | "cancelled" => t.todo_cancelled,
+        "completion.file" | "completion_file" => {
+            t.completion_kinds.get("file").copied().unwrap_or(t.item)
+        }
+        "completion.skill" | "completion_skill" => {
+            t.completion_kinds.get("skill").copied().unwrap_or(t.item)
+        }
+        "completion.subagent" | "completion_subagent" => t
+            .completion_kinds
+            .get("subagent")
+            .copied()
+            .unwrap_or(t.item),
+        "completion.model" | "completion_model" => {
+            t.completion_kinds.get("model").copied().unwrap_or(t.item)
+        }
         _ => Style::default(),
     }
 }
@@ -459,6 +473,17 @@ pub struct Theme {
     pub index_keyword: Style,
     pub shell_prefix: Style,
     pub progress_bar: Style,
+    /// Style for detected (known) `@`-reference tokens in the input; falls back
+    /// to `accent`.
+    pub at_ref: Style,
+    /// Style for undetected (unknown) `@`-reference tokens in the input; falls
+    /// back to `error`.
+    pub at_ref_invalid: Style,
+    /// Per-kind styles for `@`-completion candidates, keyed by the candidate's
+    /// `kind` string (e.g. "file", "skill", "subagent", "model"). Missing kinds
+    /// fall back to `item` at render time; the four built-ins are seeded from
+    /// `[completion]` TOML keys or sensible ui fallbacks.
+    pub completion_kinds: HashMap<String, Style>,
 
     pub syntax: syntect::highlighting::Theme,
 }
@@ -642,6 +667,30 @@ fn build_syntax_theme(
         settings,
         scopes,
     }
+}
+
+fn build_completion_kinds(
+    full_table: &toml::Table,
+    palette: &HashMap<String, Color>,
+    style: &impl Fn(&str) -> Style,
+) -> HashMap<String, Style> {
+    let completion_tbl = full_table.get("completion").and_then(|v| v.as_table());
+    let resolve = |kind: &str| -> Style {
+        completion_tbl
+            .and_then(|t| t.get(kind))
+            .and_then(|def| StyleDef::deserialize(def.clone()).ok())
+            .map(|def| resolve_style(&def, palette))
+            // Every kind falls back to `accent` (the file highlight) so the
+            // match highlight is visible on every theme; a `[completion]`
+            // entry is how a theme differentiates kinds.
+            .unwrap_or_else(|| style("accent"))
+    };
+    HashMap::from([
+        ("file".to_string(), resolve("file")),
+        ("skill".to_string(), resolve("skill")),
+        ("subagent".to_string(), resolve("subagent")),
+        ("model".to_string(), resolve("model")),
+    ])
 }
 
 impl Theme {
@@ -850,6 +899,23 @@ impl Theme {
                     s
                 }
             },
+            at_ref: {
+                let s = style("at_ref");
+                if s == Style::default() {
+                    style("accent")
+                } else {
+                    s
+                }
+            },
+            at_ref_invalid: {
+                let s = style("at_ref_invalid");
+                if s == Style::default() {
+                    style("error")
+                } else {
+                    s
+                }
+            },
+            completion_kinds: build_completion_kinds(&full_table, &palette, &style),
             syntax,
         })
     }
@@ -1079,6 +1145,107 @@ comment = "#6272a4"
         let theme = Theme::from_toml(toml).unwrap();
         assert!(!theme.syntax.scopes.is_empty());
         assert_eq!(theme.background, Color::Rgb(0x28, 0x2a, 0x36));
+    }
+
+    #[test]
+    fn completion_kinds_fall_back_to_accent_without_table() {
+        let toml = r##"
+[palette]
+foreground = "#f8f8f2"
+background = "#282a36"
+accent = "#ff79c6"
+
+[ui]
+accent = { fg = "accent" }
+"##;
+        let theme = Theme::from_toml(toml).unwrap();
+        let file = theme
+            .completion_kinds
+            .get("file")
+            .expect("file kind seeded");
+        // Every kind shares the file highlight so the match is visible on any
+        // theme; per-kind colors are a `[completion]` opt-in.
+        for kind in ["skill", "subagent", "model"] {
+            assert_eq!(
+                theme.completion_kinds.get(kind),
+                Some(file),
+                "{kind} must fall back to the accent highlight"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_table_overrides_kind_fallback() {
+        let toml = r##"
+[palette]
+foreground = "#f8f8f2"
+background = "#282a36"
+accent = "#ff79c6"
+cyan = "#8be9fd"
+
+[ui]
+accent = { fg = "accent" }
+
+[completion]
+skill = { fg = "cyan" }
+"##;
+        let theme = Theme::from_toml(toml).unwrap();
+        let file = theme
+            .completion_kinds
+            .get("file")
+            .expect("file kind seeded");
+        assert_eq!(
+            theme.completion_kinds.get("skill"),
+            Some(&Style::new().fg(Color::Rgb(0x8b, 0xe9, 0xfd)))
+        );
+        assert_eq!(
+            theme.completion_kinds.get("subagent"),
+            Some(file),
+            "unlisted kinds keep the accent fallback"
+        );
+    }
+
+    #[test]
+    fn at_ref_styles_fall_back_to_accent_and_error() {
+        let toml = r##"
+[palette]
+foreground = "#f8f8f2"
+background = "#282a36"
+accent = "#ff79c6"
+red = "#ff5555"
+
+[ui]
+accent = { fg = "accent" }
+error = { fg = "red" }
+"##;
+        let theme = Theme::from_toml(toml).unwrap();
+        assert_eq!(theme.at_ref, theme.accent);
+        assert_eq!(theme.at_ref_invalid, theme.error);
+    }
+
+    #[test]
+    fn at_ref_styles_take_ui_values() {
+        let toml = r##"
+[palette]
+foreground = "#f8f8f2"
+background = "#282a36"
+accent = "#ff79c6"
+cyan = "#8be9fd"
+purple = "#bd93f9"
+
+[ui]
+accent = { fg = "accent" }
+at_ref = { fg = "cyan" }
+at_ref_invalid = { fg = "purple", modifiers = ["underlined"] }
+"##;
+        let theme = Theme::from_toml(toml).unwrap();
+        assert_eq!(theme.at_ref, Style::new().fg(Color::Rgb(0x8b, 0xe9, 0xfd)));
+        assert_eq!(
+            theme.at_ref_invalid,
+            Style::new()
+                .fg(Color::Rgb(0xbd, 0x93, 0xf9))
+                .add_modifier(Modifier::UNDERLINED)
+        );
     }
 
     #[test]

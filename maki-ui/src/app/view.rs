@@ -203,6 +203,7 @@ impl App {
                     self.separator_style(),
                     !self.any_overlay_open(),
                     subagent_input_hint(true),
+                    &self.state.session.cwd,
                 );
             }
         } else if self.plan_form_active() {
@@ -225,6 +226,7 @@ impl App {
                 self.separator_style(),
                 !self.any_overlay_open(),
                 panel_hint,
+                &self.state.session.cwd,
             );
             if !streaming && !self.command_palette.is_active() && !self.any_overlay_open() {
                 self.file_completion.view(frame, layout.input_area);

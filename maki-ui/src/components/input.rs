@@ -9,9 +9,12 @@ use crate::theme;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use maki_storage::input_history::InputHistory;
+use std::collections::HashSet;
 use std::mem;
+use std::path::Path;
 
 use maki_providers::ImageSource;
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -69,6 +72,9 @@ impl Submission {
 
 pub struct InputBox {
     pub(crate) buffer: TextBuffer,
+    /// Labels of known `@`-completion items, used to highlight `@`-tokens in
+    /// the input text.
+    pub(crate) at_ref_labels: Vec<String>,
     history: InputHistory,
     history_index: Option<usize>,
     draft: String,
@@ -162,6 +168,7 @@ impl InputBox {
         let max_input_lines = max_input_lines.clamp(1, u16::MAX as u32 - 2) as u16;
         Self {
             buffer: TextBuffer::new(String::new()),
+            at_ref_labels: Vec::new(),
             history,
             history_index: None,
             draft: String::new(),
@@ -317,6 +324,7 @@ impl InputBox {
         lines_above + wrap_row
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn view(
         &mut self,
         frame: &mut Frame,
@@ -325,6 +333,7 @@ impl InputBox {
         border_style: Style,
         focused: bool,
         top_right_hint: Option<Line<'_>>,
+        cwd: &str,
     ) {
         let content_height = area.height.saturating_sub(2);
         let ew = effective_width(area.width as usize);
@@ -379,6 +388,8 @@ impl InputBox {
         } else {
             let cursor_y = self.buffer.y();
             let cursor_x = self.buffer.x();
+            let t = theme::current();
+            let label_set: HashSet<&str> = self.at_ref_labels.iter().map(String::as_str).collect();
             self.buffer
                 .lines()
                 .iter()
@@ -390,13 +401,16 @@ impl InputBox {
                     } else {
                         None
                     };
+                    let at_spans =
+                        at_token_spans(line, cwd, &label_set, t.at_ref, t.at_ref_invalid);
+                    let styled = merge_styled_spans(shell_spans.as_deref(), at_spans.as_deref());
                     wrap_line(
                         line,
                         ew,
                         is_cursor_line,
                         cursor_x,
                         i == 0,
-                        shell_spans.as_deref(),
+                        styled.as_deref(),
                     )
                 })
                 .collect()
@@ -621,6 +635,124 @@ fn shell_highlight_spans(line: &str) -> Option<Vec<Span<'static>>> {
     Some(spans)
 }
 
+/// Spans covering `line` where each `@`-token gets the known/unknown style
+/// and the gaps are raw. `None` when the line has no tokens. A tagged token is
+/// known when its `prefix:value` label (prefix lowercased, as the expander
+/// parser does) is in `labels`; a file reference (empty prefix) is known when
+/// its path exists relative to `cwd` (or absolute, or `~`-expanded). Styles
+/// are taken as arguments so the result is deterministic to test.
+fn at_token_spans(
+    line: &str,
+    cwd: &str,
+    labels: &HashSet<&str>,
+    known_style: Style,
+    unknown_style: Style,
+) -> Option<Vec<Span<'static>>> {
+    let tokens = maki_lua::parse_at_tokens(line);
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(tokens.len() * 2);
+    let mut last = 0;
+    for token in &tokens {
+        if token.range.start > last {
+            spans.push(Span::raw(line[last..token.range.start].to_string()));
+        }
+        let is_known = if token.prefix.is_empty() {
+            file_ref_exists(cwd, &token.value)
+        } else {
+            labels.contains(format!("{}:{}", token.prefix, token.value).as_str())
+        };
+        let style = if is_known { known_style } else { unknown_style };
+        spans.push(Span::styled(
+            line[token.range.start..token.range.end].to_string(),
+            style,
+        ));
+        last = token.range.end;
+    }
+    if last < line.len() {
+        spans.push(Span::raw(line[last..].to_string()));
+    }
+    Some(spans)
+}
+
+/// Whether a file reference's path resolves to an existing file or dir:
+/// relative to `cwd`, absolute, or `~`-expanded.
+fn file_ref_exists(cwd: &str, value: &str) -> bool {
+    let path = match value.strip_prefix("~/") {
+        Some(rest) => match maki_storage::paths::home() {
+            Some(home) => home.join(rest),
+            None => return false,
+        },
+        None => {
+            let p = Path::new(value);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                Path::new(cwd).join(p)
+            }
+        }
+    };
+    path.is_file() || path.is_dir()
+}
+
+/// Combine two span views of the same line: `at` styles win where they cover
+/// the text, `base` wins elsewhere. Used to layer `@`-token highlights over
+/// the shell highlight of the first line.
+fn merge_styled_spans(
+    base: Option<&[Span<'static>]>,
+    at: Option<&[Span<'static>]>,
+) -> Option<Vec<Span<'static>>> {
+    match (base, at) {
+        (None, None) => None,
+        (None, at) => at.map(|s| s.to_vec()),
+        (base, None) => base.map(|s| s.to_vec()),
+        (Some(base), Some(at)) => Some(overlay_styled_spans(base, at)),
+    }
+}
+
+/// Splits `base` spans at the `at` span boundaries and restyles the pieces
+/// covered by `at` with the `at` style. `at` pieces with the default style are
+/// transparent, so `base` shows through them.
+fn overlay_styled_spans(base: &[Span<'static>], at: &[Span<'static>]) -> Vec<Span<'static>> {
+    let mut at_ranges: Vec<(usize, usize, Style)> = Vec::with_capacity(at.len());
+    let mut pos = 0;
+    for span in at {
+        let len = span.content.chars().count();
+        at_ranges.push((pos, pos + len, span.style));
+        pos += len;
+    }
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut pos = 0;
+    for span in base {
+        let len = span.content.chars().count();
+        let chars: Vec<char> = span.content.chars().collect();
+        let mut cuts: Vec<usize> = vec![0, len];
+        for (s, e, _) in &at_ranges {
+            if pos < *s && *s < pos + len {
+                cuts.push(s - pos);
+            }
+            if pos < *e && *e < pos + len {
+                cuts.push(*e - pos);
+            }
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        for w in cuts.windows(2) {
+            let (lo, hi) = (w[0], w[1]);
+            let piece: String = chars[lo..hi].iter().collect();
+            let abs = pos + lo;
+            let style = at_ranges
+                .iter()
+                .find(|(s, e, st)| abs >= *s && abs < *e && *st != Style::default())
+                .map_or(span.style, |(_, _, st)| *st);
+            out.push(Span::styled(piece, style));
+        }
+        pos += len;
+    }
+    out
+}
+
 fn slice_styled_spans(
     spans: &[Span<'static>],
     char_start: usize,
@@ -701,6 +833,7 @@ mod tests {
     use super::*;
     use crate::components::scrollbar::SCROLLBAR_THUMB;
     use ratatui::layout::Rect;
+    use ratatui::style::Color;
     use test_case::test_case;
 
     fn type_text(input: &mut InputBox, text: &str) {
@@ -879,7 +1012,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, width, height);
-                input.view(frame, area, streaming, border_style, true, None);
+                input.view(frame, area, streaming, border_style, true, None, "");
             })
             .unwrap();
         terminal
@@ -1199,5 +1332,165 @@ mod tests {
         type_text(&mut input, "xy");
         input.buffer.set_cursor(0, 8);
         input.click_position(area(10), row, col, focused)
+    }
+
+    const AT_KNOWN_STYLE: Style = Style::new().fg(Color::Cyan);
+    const AT_UNKNOWN_STYLE: Style = Style::new().fg(Color::Red);
+
+    fn labels_for<'a>(names: &'a [&'a str]) -> HashSet<&'a str> {
+        names.iter().copied().collect()
+    }
+
+    #[test]
+    fn at_token_spans_none_when_no_tokens() {
+        let labels = labels_for(&["skill:committing"]);
+        for line in ["hello world", "foo@bar", "@skill:"] {
+            assert!(
+                at_token_spans(line, "", &labels, AT_KNOWN_STYLE, AT_UNKNOWN_STYLE).is_none(),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn at_token_spans_styles_known_vs_unknown() {
+        let labels = labels_for(&["skill:committing"]);
+        let spans = at_token_spans(
+            "use @skill:committing and @model:foo",
+            "",
+            &labels,
+            AT_KNOWN_STYLE,
+            AT_UNKNOWN_STYLE,
+        )
+        .unwrap();
+        assert_eq!(spans.len(), 4);
+        assert_eq!(spans[0].content, "use ");
+        assert_eq!(spans[0].style, Style::default());
+        assert_eq!(spans[1].content, "@skill:committing");
+        assert_eq!(spans[1].style, AT_KNOWN_STYLE);
+        assert_eq!(spans[2].content, " and ");
+        assert_eq!(spans[2].style, Style::default());
+        assert_eq!(spans[3].content, "@model:foo");
+        assert_eq!(spans[3].style, AT_UNKNOWN_STYLE);
+    }
+
+    #[test]
+    fn at_token_spans_no_leading_gap_when_token_first() {
+        let labels = labels_for(&["skill:committing"]);
+        let spans = at_token_spans(
+            "@skill:committing now",
+            "",
+            &labels,
+            AT_KNOWN_STYLE,
+            AT_UNKNOWN_STYLE,
+        )
+        .unwrap();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content, "@skill:committing");
+        assert_eq!(spans[0].style, AT_KNOWN_STYLE);
+        assert_eq!(spans[1].content, " now");
+    }
+
+    #[test]
+    fn at_token_spans_matches_lowercased_prefix() {
+        let labels = labels_for(&["skill:committing"]);
+        let spans = at_token_spans(
+            "@SKILL:committing",
+            "",
+            &labels,
+            AT_KNOWN_STYLE,
+            AT_UNKNOWN_STYLE,
+        )
+        .unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "@SKILL:committing");
+        assert_eq!(spans[0].style, AT_KNOWN_STYLE);
+    }
+
+    #[test]
+    fn at_token_spans_file_ref_by_existence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let probe = tmp.path().join("probe.txt");
+        std::fs::write(&probe, b"x").unwrap();
+        let labels = labels_for(&[]);
+        let line = format!("read @{} and @nope/missing.rs", probe.display());
+        let spans = at_token_spans(
+            &line,
+            tmp.path().to_str().unwrap(),
+            &labels,
+            AT_KNOWN_STYLE,
+            AT_UNKNOWN_STYLE,
+        )
+        .unwrap();
+        assert_eq!(spans.len(), 4);
+        assert_eq!(spans[1].content, format!("@{}", probe.display()));
+        assert_eq!(spans[1].style, AT_KNOWN_STYLE);
+        assert_eq!(spans[3].content, "@nope/missing.rs");
+        assert_eq!(spans[3].style, AT_UNKNOWN_STYLE);
+    }
+
+    #[test]
+    fn file_ref_exists_resolution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        std::fs::write(cwd.join("probe.txt"), b"x").unwrap();
+        std::fs::create_dir(cwd.join("sub")).unwrap();
+        let cwd_s = cwd.to_str().unwrap();
+        assert!(file_ref_exists(cwd_s, "probe.txt"));
+        assert!(file_ref_exists(cwd_s, "sub"));
+        assert!(!file_ref_exists(cwd_s, "missing.txt"));
+        assert!(file_ref_exists("", cwd.join("sub").to_str().unwrap()));
+        assert!(file_ref_exists("", "~/."));
+        assert!(!file_ref_exists("", "~/no-such-dir-xyz"));
+    }
+
+    #[test]
+    fn merge_styled_spans_cases() {
+        let base = vec![Span::styled("ab", Style::default())];
+        let at = vec![Span::styled("ab", AT_KNOWN_STYLE)];
+        assert!(merge_styled_spans(None, None).is_none());
+        assert_eq!(merge_styled_spans(Some(&base), None), Some(base.clone()));
+        assert_eq!(merge_styled_spans(None, Some(&at)), Some(at.clone()));
+        assert_eq!(merge_styled_spans(Some(&base), Some(&at)), Some(at.clone()));
+    }
+
+    #[test]
+    fn overlay_styled_spans_at_wins_where_covered() {
+        let base = vec![Span::styled("hello @skill:x now", AT_UNKNOWN_STYLE)];
+        let at = vec![
+            Span::raw("hello "),
+            Span::styled("@skill:x", AT_KNOWN_STYLE),
+            Span::raw(" now"),
+        ];
+        assert_eq!(
+            overlay_styled_spans(&base, &at),
+            vec![
+                Span::styled("hello ", AT_UNKNOWN_STYLE),
+                Span::styled("@skill:x", AT_KNOWN_STYLE),
+                Span::styled(" now", AT_UNKNOWN_STYLE),
+            ]
+        );
+    }
+
+    #[test]
+    fn overlay_styled_spans_splits_base_at_boundaries() {
+        let base = vec![
+            Span::styled("abcd", AT_UNKNOWN_STYLE),
+            Span::styled("efgh", AT_UNKNOWN_STYLE),
+        ];
+        let at = vec![
+            Span::raw("ab"),
+            Span::styled("cdef", AT_KNOWN_STYLE),
+            Span::raw("gh"),
+        ];
+        assert_eq!(
+            overlay_styled_spans(&base, &at),
+            vec![
+                Span::styled("ab", AT_UNKNOWN_STYLE),
+                Span::styled("cd", AT_KNOWN_STYLE),
+                Span::styled("ef", AT_KNOWN_STYLE),
+                Span::styled("gh", AT_UNKNOWN_STYLE),
+            ]
+        );
     }
 }

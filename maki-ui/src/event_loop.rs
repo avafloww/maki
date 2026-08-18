@@ -934,7 +934,7 @@ impl<'t> EventLoop<'t> {
                 Ok(json!("started"))
             }
             SubmitOutcome::Queued => Ok(json!("queued")),
-            SubmitOutcome::Rejected(e) => Err(e.into()),
+            SubmitOutcome::Rejected(e) => Err(e),
         }
     }
 
@@ -1180,7 +1180,10 @@ impl<'t> EventLoop<'t> {
                     terminal::edit_temp_content(&current_text, self.terminal)
                 };
                 match result {
-                    Ok(edited) => self.sessions[idx].app.input_box.set_input(edited),
+                    Ok(edited) => {
+                        self.sessions[idx].app.refresh_at_ref_labels(&edited);
+                        self.sessions[idx].app.input_box.set_input(edited);
+                    }
                     Err(e) => self.sessions[idx].app.flash(e),
                 }
             }

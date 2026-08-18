@@ -48,6 +48,38 @@ fn build_app(dir: StateDir, writer: Arc<StorageWriter>) -> App {
     build_app_with_lua(dir, writer, LuaCommandReader::empty())
 }
 
+fn build_app_with_handle(
+    dir: StateDir,
+    writer: Arc<StorageWriter>,
+    handle: maki_lua::EventHandle,
+) -> App {
+    let model = test_model();
+    App::new(
+        &model,
+        AppSession::new("test-model", "/tmp/test"),
+        dir,
+        Arc::new(ArcSwapOption::empty()),
+        McpSnapshotReader::empty(),
+        McpConfigErrors::new(PathBuf::new()),
+        LuaCommandReader::empty(),
+        KeymapReader::empty(),
+        HintReader::empty(),
+        writer,
+        UiConfig::default(),
+        100,
+        Arc::new(PermissionManager::new(
+            PermissionsConfig {
+                rules: vec![],
+                ..Default::default()
+            },
+            PathBuf::from("/tmp"),
+        )),
+        Arc::from([]),
+        handle,
+        Arc::new(maki_config::ModelPolicy::default()),
+    )
+}
+
 fn build_app_with_lua(
     dir: StateDir,
     writer: Arc<StorageWriter>,
@@ -109,6 +141,7 @@ fn app_with_model_slot() -> (App, Arc<ArcSwapOption<Vec<String>>>) {
     let models = Arc::new(ArcSwapOption::empty());
     let mut app = test_app();
     app.model_picker = ModelPicker::new(Arc::clone(&models));
+    app.available_models = Arc::clone(&models);
     (app, models)
 }
 
@@ -2888,6 +2921,38 @@ fn mcp_toggle_dispatches_action() {
     ));
 }
 
+#[test]
+fn mcp_prompt_args_expand_references() {
+    let (_tmp, mut app, backend) = completion_app();
+    seed_skill(&backend, "pdf");
+    app.command_palette = CommandPalette::new(
+        Arc::from([]),
+        McpSnapshotReader::from_snapshot(McpSnapshot {
+            prompts: vec![McpPromptInfo {
+                display_name: "prompt".into(),
+                qualified_name: "srv/prompt".into(),
+                description: "test prompt".into(),
+                arguments: vec![],
+            }],
+            ..Default::default()
+        }),
+        LuaCommandReader::empty(),
+    );
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/prompt".into(),
+            args: "@skill:pdf summarize".into(),
+        },
+        0,
+    );
+    let [Action::SendMessage(input)] = actions.as_slice() else {
+        panic!("expected one SendMessage action");
+    };
+    assert_eq!(input.message, "/prompt <skill:pdf> summarize");
+    assert!(input.prompt.is_some());
+}
+
 #[test_case(
     |app: &mut App| { app.state.mode = Mode::Plan; app.plan_form.on_plan_ready(); },
     ""
@@ -4670,15 +4735,21 @@ fn run_builtin_file_picker_opens_modal() {
 
 // --- `@` completion popup (files + skills) ---------------------------------
 
-/// An app whose cwd points at a fresh temp dir, so walk results and skill
-/// discovery are deterministic no matter the machine.
-fn completion_app() -> (TempDir, App) {
+/// An app whose cwd points at a fresh temp dir, so walk results are
+/// deterministic no matter the machine. The `EventHandle` is backed by an
+/// in-memory completion store so `@` sources/expanders work without a plugin
+/// host; the store handle is returned so tests can seed it.
+fn completion_app() -> (TempDir, App, Arc<maki_lua::TestCompletionBackend>) {
     let tmp = TempDir::new().unwrap();
-    let mut app = test_app();
+    let dir = StateDir::from_path(env::temp_dir());
+    let (handle, backend) = maki_lua::test_support::event_handle_with_completion();
+    let mut app = build_app_with_handle(dir.clone(), Arc::new(test_writer(dir)), handle);
+    let (shared_queue, _rx) = shared_queue::queue();
+    app.queue.set_shared(shared_queue);
     std::sync::Arc::get_mut(&mut app.state.session)
         .unwrap()
         .set_cwd(tmp.path().to_string_lossy().into_owned());
-    (tmp, app)
+    (tmp, app, backend)
 }
 
 fn write_completion_fixture(cwd: &Path, rel: &str, content: &str) {
@@ -4687,15 +4758,20 @@ fn write_completion_fixture(cwd: &Path, rel: &str, content: &str) {
     std::fs::write(path, content).unwrap();
 }
 
-/// Seeding a skill writes `SKILL.md` into a directory under `.maki/skills/`;
-/// the dir name deliberately differs from the frontmatter name so no colliding
-/// `skills/<name>/` directory shows up as a file candidate.
-fn seed_skill(cwd: &Path, name: &str) {
-    write_completion_fixture(
-        cwd,
-        ".maki/skills/sk/SKILL.md",
-        &format!("---\nname: {name}\n---\nWorkflows for {name}."),
+/// Seed a `skill` source + expander into the test backend (skills now come
+/// from a plugin completion source, not the filesystem).
+fn seed_skill(backend: &maki_lua::TestCompletionBackend, name: &str) {
+    backend.register_source(
+        "skill",
+        vec![maki_lua::ItemSpec {
+            label: format!("skill:{name}"),
+            kind: "skill".into(),
+            insertion: format!("@skill:{name}"),
+            description: None,
+        }],
     );
+    backend.register_expander("skill", move |v| Ok(format!("<skill:{v}>")));
+    backend.register_expander("s", move |v| Ok(format!("<skill:{v}>")));
 }
 
 /// Lets the completion popup's walker finish and nucleo converge, waiting until
@@ -4714,7 +4790,7 @@ fn converge_completion(app: &mut App) {
 
 #[test]
 fn typing_at_opens_popup() {
-    let (_tmp, mut app) = completion_app();
+    let (_tmp, mut app, _backend) = completion_app();
     app.update(Msg::Key(key(KeyCode::Char('@'))));
     assert!(app.file_completion.is_active());
     assert_eq!(app.input_box.buffer.value(), "@");
@@ -4722,7 +4798,7 @@ fn typing_at_opens_popup() {
 
 #[test]
 fn no_token_no_popup() {
-    let (_tmp, mut app) = completion_app();
+    let (_tmp, mut app, _backend) = completion_app();
     app.update(Msg::Key(key(KeyCode::Char('h'))));
     app.update(Msg::Key(key(KeyCode::Char('i'))));
     assert!(!app.file_completion.is_active());
@@ -4730,7 +4806,7 @@ fn no_token_no_popup() {
 
 #[test]
 fn esc_closes_leaves_text() {
-    let (_tmp, mut app) = completion_app();
+    let (_tmp, mut app, _backend) = completion_app();
     app.update(Msg::Key(key(KeyCode::Char('@'))));
     assert!(app.file_completion.is_active());
     app.update(Msg::Key(key(KeyCode::Esc)));
@@ -4740,8 +4816,8 @@ fn esc_closes_leaves_text() {
 
 #[test]
 fn enter_inserts_skill() {
-    let (tmp, mut app) = completion_app();
-    seed_skill(tmp.path(), "review");
+    let (_tmp, mut app, backend) = completion_app();
+    seed_skill(&backend, "review");
     for c in "@skill:rev".chars() {
         app.update(Msg::Key(key(KeyCode::Char(c))));
     }
@@ -4752,8 +4828,8 @@ fn enter_inserts_skill() {
 
 #[test]
 fn skills_complete_without_prefix() {
-    let (tmp, mut app) = completion_app();
-    seed_skill(tmp.path(), "review");
+    let (_tmp, mut app, backend) = completion_app();
+    seed_skill(&backend, "review");
     for c in "@rev".chars() {
         app.update(Msg::Key(key(KeyCode::Char(c))));
     }
@@ -4764,7 +4840,7 @@ fn skills_complete_without_prefix() {
 
 #[test]
 fn enter_inserts_file_verbatim() {
-    let (tmp, mut app) = completion_app();
+    let (tmp, mut app, _backend) = completion_app();
     write_completion_fixture(tmp.path(), "docs/read me.md", "content");
     for c in "@read".chars() {
         app.update(Msg::Key(key(KeyCode::Char(c))));
@@ -4776,7 +4852,7 @@ fn enter_inserts_file_verbatim() {
 
 #[test]
 fn popup_closes_when_token_removed() {
-    let (_tmp, mut app) = completion_app();
+    let (_tmp, mut app, _backend) = completion_app();
     app.update(Msg::Key(key(KeyCode::Char('@'))));
     app.update(Msg::Key(key(KeyCode::Char('x'))));
     assert!(app.file_completion.is_active());
@@ -4791,7 +4867,7 @@ fn popup_closes_when_token_removed() {
 
 #[test]
 fn command_palette_takes_precedence() {
-    let (_tmp, mut app) = completion_app();
+    let (_tmp, mut app, _backend) = completion_app();
     // `/thinking ` takes an argument, so the palette stays matched while an
     // `@` token is added to that argument space.
     for c in "/thinking ".chars() {
@@ -4807,6 +4883,258 @@ fn command_palette_takes_precedence() {
         !app.file_completion.is_active(),
         "@ popup suppressed while palette is up"
     );
+}
+
+// --- `@` reference completion: subagents and models --------------------------
+
+fn completion_match_items(app: &App) -> Vec<CompletionItem> {
+    app.file_completion.match_items()
+}
+
+fn subagent_match_names(app: &App) -> Vec<String> {
+    completion_match_items(app)
+        .into_iter()
+        .filter(|i| i.kind == "subagent")
+        .map(|i| {
+            i.label
+                .strip_prefix("subagent:")
+                .map(|s| s.to_string())
+                .unwrap_or(i.label)
+        })
+        .collect()
+}
+
+/// Seed the `subagent` source with the types valid for `mode` (the task
+/// plugin's mode filtering, mirrored here): `general` is plan-blocked,
+/// `plan_reviewer` is build-blocked.
+fn seed_subagents(backend: &maki_lua::TestCompletionBackend, mode: &str) {
+    let all = [
+        ("research", "Read-only search and summarize"),
+        ("general", "Can modify files"),
+        ("plan_reviewer", "Read-only plan audit (plan mode)"),
+    ];
+    let items: Vec<_> = all
+        .iter()
+        .filter(|(name, _)| {
+            if mode == "plan" {
+                *name != "general"
+            } else {
+                *name != "plan_reviewer"
+            }
+        })
+        .map(|(name, desc)| maki_lua::ItemSpec {
+            label: format!("subagent:{name}"),
+            kind: "subagent".into(),
+            insertion: format!("@subagent:{name} "),
+            description: Some((*desc).into()),
+        })
+        .collect();
+    backend.register_source("subagent", items);
+    backend.register_expander("subagent", |v| Ok(format!("<subagent:{v}>")));
+    backend.register_expander("a", |v| Ok(format!("<subagent:{v}>")));
+}
+
+#[test]
+fn at_a_prefix_lists_subagents() {
+    let (_tmp, mut app, backend) = completion_app();
+    seed_subagents(&backend, "build");
+    for c in "@a:".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    converge_completion(&mut app);
+    assert_eq!(
+        subagent_match_names(&app),
+        vec!["research".to_string(), "general".to_string()]
+    );
+}
+
+#[test]
+fn at_subagent_prefix_lists_subagents() {
+    let (_tmp, mut app, backend) = completion_app();
+    seed_subagents(&backend, "build");
+    for c in "@subagent:".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    converge_completion(&mut app);
+    assert_eq!(
+        subagent_match_names(&app),
+        vec!["research".to_string(), "general".to_string()]
+    );
+}
+
+#[test]
+fn at_a_prefix_in_plan_mode_hides_general() {
+    let (_tmp, mut app, backend) = completion_app();
+    app.set_mode_id("plan".into());
+    seed_subagents(&backend, "plan");
+    for c in "@a:".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    converge_completion(&mut app);
+    let names = subagent_match_names(&app);
+    assert!(!names.contains(&"general".to_string()));
+    assert!(names.contains(&"plan_reviewer".to_string()));
+    assert!(names.contains(&"research".to_string()));
+}
+
+fn seed_models(backend: &maki_lua::TestCompletionBackend, models: &[&str]) {
+    let items: Vec<_> = models
+        .iter()
+        .map(|spec| maki_lua::ItemSpec {
+            label: format!("model:{spec}"),
+            kind: "model".into(),
+            insertion: format!("@model:{spec} "),
+            description: None,
+        })
+        .collect();
+    backend.register_source("model", items);
+    backend.register_expander("model", |v| Ok(format!("<model:{v}>")));
+    backend.register_expander("m", |v| Ok(format!("<model:{v}>")));
+}
+
+#[test]
+fn at_m_prefix_lists_models() {
+    let (_tmp, mut app, backend) = completion_app();
+    app.available_models.store(Some(Arc::new(vec![
+        "zai/glm-5".into(),
+        "anthropic/claude".into(),
+    ])));
+    seed_models(&backend, &["zai/glm-5", "anthropic/claude"]);
+    for c in "@m:".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    converge_completion(&mut app);
+    let specs: Vec<String> = completion_match_items(&app)
+        .into_iter()
+        .filter(|i| i.kind == "model")
+        .map(|i| {
+            i.label
+                .strip_prefix("model:")
+                .map(|s| s.to_string())
+                .unwrap_or(i.label)
+        })
+        .collect();
+    assert_eq!(
+        specs,
+        vec!["zai/glm-5".to_string(), "anthropic/claude".to_string()]
+    );
+}
+
+#[test]
+fn enter_inserts_subagent_reference_with_trailing_space() {
+    let (_tmp, mut app, backend) = completion_app();
+    seed_subagents(&backend, "build");
+    for c in "@a:res".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    converge_completion(&mut app);
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert_eq!(app.input_box.buffer.value(), "@subagent:research ");
+}
+
+#[test]
+fn enter_inserts_model_reference_with_trailing_space() {
+    let (_tmp, mut app, backend) = completion_app();
+    app.available_models
+        .store(Some(Arc::new(vec!["zai/glm-5".into()])));
+    seed_models(&backend, &["zai/glm-5"]);
+    for c in "@m:glm".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    converge_completion(&mut app);
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert_eq!(app.input_box.buffer.value(), "@model:zai/glm-5 ");
+}
+
+#[test]
+fn mixed_list_includes_skills_subagents_and_models() {
+    let (_tmp, mut app, backend) = completion_app();
+    seed_skill(&backend, "review");
+    seed_subagents(&backend, "build");
+    app.available_models
+        .store(Some(Arc::new(vec!["zai/glm-5".into()])));
+    seed_models(&backend, &["zai/glm-5"]);
+    app.update(Msg::Key(key(KeyCode::Char('@'))));
+    converge_completion(&mut app);
+    let items = completion_match_items(&app);
+    assert!(items.iter().any(|i| i.kind == "skill"));
+    assert!(items.iter().any(|i| i.kind == "subagent"));
+    assert!(items.iter().any(|i| i.kind == "model"));
+}
+
+// --- submit-time `@` expansion ------------------------------------------------
+
+#[test]
+fn submit_expands_subagent_reference_in_place() {
+    let (_tmp, app, backend) = completion_app();
+    seed_subagents(&backend, "build");
+    let input = app.build_agent_input(&queued_msg_with(
+        "@subagent:research review this package",
+        &app,
+    ));
+    assert_eq!(input.message, "<subagent:research> review this package");
+}
+
+#[test]
+fn submit_expands_subagent_model_and_skill_in_place() {
+    let (_tmp, app, backend) = completion_app();
+    seed_subagents(&backend, "build");
+    seed_models(&backend, &["weak"]);
+    seed_skill(&backend, "pdf");
+    // `@m:weak` and `@skill:pdf` both expand; token order in the message is kept.
+    let msg = expand_for_test(&app, "@subagent:general @m:weak @skill:pdf fix the report");
+    assert_eq!(
+        msg,
+        "<subagent:general> <model:weak> <skill:pdf> fix the report"
+    );
+}
+
+#[test]
+fn submit_standalone_model_expands_in_place_no_action() {
+    let (_tmp, mut app, backend) = completion_app();
+    seed_models(&backend, &["zai/glm-5"]);
+    let outcome = app.submit_prompt(queued_msg("@model:zai/glm-5 fix the bug"));
+    let actions = match outcome {
+        SubmitOutcome::Started(a) => a,
+        _ => panic!("expected Started"),
+    };
+    // No ChangeModel: the `@model` path no longer switches the session model.
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::ChangeModel(_))),
+        "@model must not emit ChangeModel"
+    );
+    let message = actions
+        .into_iter()
+        .find_map(|a| match a {
+            Action::SendMessage(inp) => Some(inp.message),
+            _ => None,
+        })
+        .expect("SendMessage action");
+    assert_eq!(message, "<model:zai/glm-5> fix the bug");
+}
+
+#[test]
+fn unrecognized_references_pass_through_at_submit() {
+    let (_tmp, app, _backend) = completion_app();
+    let input = app.build_agent_input(&queued_msg_with("foo@bar @nothing:whatever fix it", &app));
+    assert_eq!(input.message, "foo@bar @nothing:whatever fix it");
+}
+
+/// Run a message through the same `@`-expansion `submit_prompt` uses, without
+/// starting a run.
+fn expand_for_test(app: &App, text: &str) -> String {
+    app.lua_event_handle
+        .expand_references(text)
+        .expect("expander rejected a recognized token")
+}
+
+/// `build_agent_input` reads already-expanded text; this applies the
+/// expansion first so the assertion sees the rewritten message.
+fn queued_msg_with(text: &str, app: &App) -> QueuedMessage {
+    QueuedMessage {
+        text: expand_for_test(app, text),
+        images: vec![],
+    }
 }
 
 // --- Async subagent routing (AC.8, AC.9, AC.10) ------------------------------

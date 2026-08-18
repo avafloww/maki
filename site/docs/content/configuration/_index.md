@@ -89,6 +89,17 @@ You can add your own themes too. Drop a `<name>.toml` file into `themes/` inside
 
 Themes use 24-bit colors, but not every terminal can show them. Maki checks the environment, terminfo, and the terminal itself, and when truecolor is missing it quietly falls back to the closest of the 256 classic terminal colors. If detection gets it wrong, set `MAKI_TRUECOLOR=1` to force truecolor or `MAKI_TRUECOLOR=0` to force the fallback.
 
+Theme files can also carry an optional `[completion]` table that recolors the `@` reference popup per candidate kind. Each key takes the same style definition as other UI styles: `fg` and `bg` (a palette color name or a `#rrggbb` value) plus a `modifiers` array (`"bold"`, `"italic"`, `"underlined"`).
+
+| Key | Meaning | Falls back to |
+|---|---|---|
+| `file` | File and directory candidates | `accent` |
+| `skill` | Skill references | `accent` |
+| `subagent` | Subagent references | `accent` |
+| `model` | Model references | `accent` |
+
+Kinds registered by your own completion sources (via `maki.api.register_completion_source`) fall back to the plain item style until your theme defines them.
+
 ### `ui.tool_output_lines`
 
 How many lines of output to show per tool in the UI. All values are `usize` with a minimum of 1.

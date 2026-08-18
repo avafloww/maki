@@ -161,6 +161,11 @@ maki.api.register_tool({ name = "greet", ... })
 maki.api.register_prompt_hint({ slot = "tool_usage", content = "..." })
 ```
 
+`@`-reference completion. Plugins register sources (popup candidates)
+and expanders (submit-time token replacement) keyed by prefix. The
+built-in `skill`, `task`, and `model` plugins provide the defaults; you
+can add your own kinds the same way.
+
 ---
 
 ### `maki.api.register_tool()` {#maki-api-register_tool}
@@ -484,6 +489,64 @@ maki.api.register_command({
     end
   end,
 })
+```
+
+---
+
+### `maki.api.register_completion_source()` {#maki-api-register_completion_source}
+
+```lua
+maki.api.register_completion_source({prefix}, {spec})
+```
+
+Register a completion source for `prefix`. The source's `get_items(ctx)` is
+called once when the `@` popup opens; `ctx` is `{ mode = "...", models = {...} }`.
+Returns its candidates as an array of `{ label, kind, insertion, description? }`.
+
+**Parameters:**
+
+- `{prefix}` (`string`) The prefix this source owns (e.g. "skill"); labels typically carry the prefix (`skill:review`) so the fuzzy filter narrows by kind as the user types.
+- `{spec}` (`table`) `{ get_items = function(ctx) -> { {label, kind, insertion, description?} } }`.
+
+**Example:**
+
+```lua
+maki.api.register_completion_source("skill", {
+  get_items = function(ctx)
+    return { { label = "skill:review", kind = "skill", insertion = "@skill:review" } }
+  end,
+})
+```
+
+---
+
+### `maki.api.register_expander()` {#maki-api-register_expander}
+
+```lua
+maki.api.register_expander({prefix}, {f})
+```
+
+Register a submit-time expander for `prefix`. Called with `{ value = "..." }`
+(the part after `prefix:`) for each `@prefix:value` token; returns
+`(string, nil)` to splice that string in-place of the token, or
+`(nil, err)` to flash `err` and abort the run. Unknown prefixes pass through
+verbatim, so register an expander under every alias you accept (e.g. both
+`"skill"` and `"s"`).
+
+**Parameters:**
+
+- `{prefix}` (`string`) The prefix this expander owns (e.g. "skill" or "s").
+- `{f}` (`function`) `{ value = string } -> (string, string|nil)`.
+
+**Example:**
+
+```lua
+maki.api.register_expander("skill", function(ref)
+  return "<skill:" .. ref.value .. ">", nil
+end)
+maki.api.register_expander("s", function(ref)
+  return "<skill:" .. ref.value .. ">", nil
+end)
 ```
 
 ---

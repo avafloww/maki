@@ -63,7 +63,8 @@ use maki_agent::{
 };
 use maki_config::{ModelPolicy, UiConfig};
 use maki_lua::{
-    BuiltinAction, EventHandle, HintReader, HintSnapshot, KeymapReader, LuaCommandReader, WinView,
+    BuiltinAction, CompletionCtx, EventHandle, HintReader, HintSnapshot, ItemSpec, KeymapReader,
+    LuaCommandReader, WinView,
 };
 use maki_providers::{ContentBlock, Message, Model, Role, ThinkingConfig, add_cost};
 use maki_storage::StateDir;
@@ -230,6 +231,7 @@ pub struct App {
 
     pub(crate) storage: StateDir,
     pub(crate) usage_slot: Arc<ArcSwapOption<UsageFetchState>>,
+    pub(crate) available_models: Arc<ArcSwapOption<Vec<String>>>,
     pub(crate) shared_history: Option<SharedMessages>,
     pub(crate) btw_system: Option<Arc<ArcSwap<String>>>,
     pub(crate) image_paste_rx: Vec<flume::Receiver<Result<ImageSource, String>>>,
@@ -296,7 +298,7 @@ impl App {
             task_picker: ListPicker::new(),
             task_picker_original: None,
             theme_picker: ThemePicker::new(),
-            model_picker: ModelPicker::new(available_models),
+            model_picker: ModelPicker::new(Arc::clone(&available_models)),
             login_picker: LoginPicker::new(),
             mcp_picker: McpPicker::new(mcp_reader, mcp_config_errors),
             rewind_picker: RewindPicker::new(),
@@ -327,6 +329,7 @@ impl App {
             last_esc: None,
             storage,
             usage_slot: Arc::new(ArcSwapOption::empty()),
+            available_models,
             shared_history: None,
             btw_system: None,
             image_paste_rx: vec![],
@@ -978,6 +981,7 @@ impl App {
             }
             CommandAction::Complete(text) => {
                 self.command_palette.sync(&text);
+                self.refresh_at_ref_labels(&text);
                 self.input_box.set_input(text);
                 self.input_box.buffer.move_to_end();
                 return vec![];
@@ -1054,6 +1058,44 @@ impl App {
         }
     }
 
+    /// Store the labels the completion sources currently offer in the input,
+    /// replacing any previous set: the sources' full item list *is* the known
+    /// set for the current mode and models, so the input can style `@`-tokens
+    /// as detected or undetected.
+    fn store_at_ref_labels(&mut self, items: &[ItemSpec]) {
+        self.input_box.at_ref_labels = items.iter().map(|i| i.label.clone()).collect();
+    }
+
+    /// The context completion sources receive: the current mode id and the
+    /// available-models list, already loaded.
+    fn completion_ctx(&self) -> CompletionCtx {
+        CompletionCtx {
+            mode: self.state.mode.id_key(),
+            models: self
+                .available_models
+                .load_full()
+                .map(|arc| (*arc).clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Refresh the input's known `@`-label set after external text (restore,
+    /// rewind, command completion, editor edit) may have put a token in the
+    /// input. File references resolve by path existence, so the Lua round-trip
+    /// is skipped unless the text has a tagged `@`-token.
+    pub(crate) fn refresh_at_ref_labels(&mut self, text: &str) {
+        if !maki_lua::parse_at_tokens(text)
+            .iter()
+            .any(|t| !t.prefix.is_empty())
+        {
+            return;
+        }
+        let items = self
+            .lua_event_handle
+            .collect_completion_items(&self.completion_ctx());
+        self.store_at_ref_labels(&items);
+    }
+
     /// Opens, refreshes, or closes the `@` completion popup to match the token
     /// under the input cursor. Suppressed while the command palette or an
     /// overlay owns the screen.
@@ -1084,9 +1126,11 @@ impl App {
         if self.file_completion.is_active() {
             self.file_completion.sync_query(&query);
         } else {
-            let skills = maki_agent::skills::enumerate_skills(Path::new(&cwd));
-            self.file_completion
-                .open(&cwd, skills, &query, (start, end));
+            let items = self
+                .lua_event_handle
+                .collect_completion_items(&self.completion_ctx());
+            self.store_at_ref_labels(&items);
+            self.file_completion.open(&cwd, items, &query, (start, end));
         }
     }
 
@@ -1664,6 +1708,15 @@ impl App {
             name.to_string()
         } else {
             format!("{name} {args}")
+        };
+        // Same single-expansion rule as submit_prompt: `@`-references in the
+        // prompt args are rewritten once here, before the agent sees them.
+        let display_text = match self.lua_event_handle.expand_references(&display_text) {
+            Ok(text) => text,
+            Err(e) => {
+                self.flash(e);
+                return vec![];
+            }
         };
         let mut input = self.build_agent_input(&QueuedMessage {
             text: display_text.clone(),
