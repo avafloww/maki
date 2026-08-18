@@ -5353,9 +5353,27 @@ fn test_idle_splash_pulls_lua_frame() {
     let writer = Arc::new(test_writer(dir.clone()));
     let mut app = build_app_with_handle(dir, writer, LuaCommandReader::empty(), handle);
     rendered(&mut app); // assigns the splash area in view
-    let _ = app.tick(); // cadence is SMOOTH at startup => a frame is pulled
-    let frame = app.main_chat().splash_frame().expect("a frame was pulled");
-    let all: String = frame.rows.iter().map(|r| r.glyphs.as_str()).collect();
+    // Cadence is SMOOTH at startup so ticks keep pulling; the first frame or
+    // two can miss the pull timeout while the Lua JIT warms up, so loop.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let all = loop {
+        let _ = app.tick();
+        let Some(frame) = app.main_chat().splash_frame() else {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no splash frame pulled"
+            );
+            continue;
+        };
+        let all: String = frame.rows.iter().map(|r| r.glyphs.as_str()).collect();
+        if all.contains("luna-maki") {
+            break all;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "idle splash missed the logo"
+        );
+    };
     assert!(
         all.contains("luna-maki"),
         "idle splash renders the bundled logo"
@@ -5377,6 +5395,8 @@ fn test_splash_lifecycle_events() {
         "startup: {ev:?}"
     );
 
+    app.status = Status::Streaming;
+    app.run_id = 1;
     app.update(agent_msg(AgentEvent::TextDelta { text: "hi".into() }));
     let _ = app.tick();
     let ev = probe.try_recv_autocmd();
@@ -5389,7 +5409,11 @@ fn test_splash_lifecycle_events() {
 
 #[test]
 fn test_splash_off_settles_idle() {
-    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    // A still splash only ever animates during its entry fade; after that the
+    // cadence is IDLE and no frame is owed. Use a disconnected handle so this
+    // test is about the cadence/tick, not host behavior (and immune to the
+    // parallel version-change test that bumps the shared update global).
+    let (handle, _guard) = (maki_lua::EventHandle::disconnected_for_test(), ());
     let dir = StateDir::from_path(env::temp_dir());
     let writer = Arc::new(test_writer(dir.clone()));
     let ui = UiConfig {
@@ -5416,7 +5440,17 @@ fn test_splash_still_repulls_once_on_version_change() {
         splash_animation: false,
         ..Default::default()
     };
-    let mut app = build_app_with_full(dir, writer, LuaCommandReader::empty(), handle, ui);
+    let mut app = build_app_with_full(dir, writer, LuaCommandReader::empty(), handle.clone(), ui);
+    // Warm the Lua JIT so the still-splash pull and the forced repull below
+    // fit inside the pull timeout even under parallel test load.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while handle.splash_frame(80, 20, 0.0, 1.0).is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "splash never warmed up"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     rendered(&mut app);
     let _ = app.tick(); // consume SplashShown, pull the fading still frame
     app.main_chat().advance_splash_past_fade();

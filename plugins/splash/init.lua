@@ -22,7 +22,7 @@ local LOGO_RAMP = 0.8
 local HELP = {
   { "Ctrl+H", true },
   { " help", false },
-  { " \u00b7 ", false },
+  { " · ", false },
   { "/help", true },
   { " in chat", false },
 }

@@ -16,7 +16,7 @@ use crate::api::util::command::{HintReader, LuaCommandReader, UiAction};
 use crate::error::PluginError;
 use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
 use crate::runtime::{self, ClickFallback, LuaThread, Request, RestoreItem};
-use crate::splash::{SPLASH_PULL_TIMEOUT, SplashFrame};
+use crate::splash::{SPLASH_PULL_TIMEOUT, SplashFrame, SplashPull};
 use maki_agent::prompt::ResolvedSlots;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -735,22 +735,19 @@ impl EventHandle {
         });
     }
 
-    /// Pull one `splash.render` frame from the live host. Bounded reply plus a
-    /// short `recv_timeout` keeps it non-hanging: a disconnected sender fails
-    /// at the send (timeout skipped) and a dead host simply times out.
+    /// Pull one `splash.render` frame from the live host. Distinguishes a
+    /// renderer that answered with nothing (`Missing`) from one still computing
+    /// when the timeout hit (`Unknown`), so the UI only suppresses a genuinely
+    /// absent renderer and keeps retrying a slow-but-alive one. A disconnected
+    /// sender fails at the send, so `Unknown` returns immediately.
     /// High-frequency per-frame, hence the priority lane.
-    pub fn splash_frame(
-        &self,
-        width: u16,
-        height: u16,
-        elapsed_secs: f32,
-        fade: f32,
-    ) -> Option<SplashFrame> {
+    pub fn splash_pull(&self, width: u16, height: u16, elapsed_secs: f32, fade: f32) -> SplashPull {
         if self.tx.is_disconnected() && self.prio_tx.is_disconnected() {
-            return None;
+            return SplashPull::Unknown;
         }
         let (reply_tx, reply_rx) = flume::bounded(1);
-        self.prio_tx
+        if self
+            .prio_tx
             .try_send(Request::SplashFrame {
                 width,
                 height,
@@ -758,8 +755,26 @@ impl EventHandle {
                 fade,
                 reply: reply_tx,
             })
-            .ok()?;
-        reply_rx.recv_timeout(SPLASH_PULL_TIMEOUT).ok().flatten()
+            .is_err()
+        {
+            return SplashPull::Unknown;
+        }
+        match reply_rx.recv_timeout(SPLASH_PULL_TIMEOUT) {
+            Ok(Some(frame)) => SplashPull::Frame(frame),
+            Ok(None) => SplashPull::Missing,
+            Err(_) => SplashPull::Unknown,
+        }
+    }
+
+    /// Convenience: frame-only view of [`Self::splash_pull`].
+    pub fn splash_frame(
+        &self,
+        width: u16,
+        height: u16,
+        elapsed_secs: f32,
+        fade: f32,
+    ) -> Option<SplashFrame> {
+        self.splash_pull(width, height, elapsed_secs, fade).frame()
     }
 
     /// Push fresh version/update info into the Lua-side `VersionStore` via the

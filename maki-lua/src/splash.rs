@@ -166,3 +166,24 @@ pub(crate) fn register_version_api(lua: &Lua, maki: &Table) -> LuaResult<()> {
     maki.set("version", f)?;
     Ok(())
 }
+
+/// Outcome of a host pull. The UI treats `Missing` (the renderer answered that
+/// it has nothing) as a dead renderer to suppress, while `Unknown` (the reply
+/// was still computing when the timeout hit, or the handle is disconnected)
+/// means "retry": a cold Lua JIT routinely misses the first frame or two but
+/// warms up within the entry fade.
+#[derive(Debug, Clone)]
+pub enum SplashPull {
+    Frame(SplashFrame),
+    Missing,
+    Unknown,
+}
+
+impl SplashPull {
+    pub fn frame(self) -> Option<SplashFrame> {
+        match self {
+            SplashPull::Frame(f) => Some(f),
+            _ => None,
+        }
+    }
+}

@@ -766,18 +766,23 @@ impl MessagesPanel {
         let (t, fade) = self.idle_splash.frame_inputs();
         match self
             .lua_event_handle
-            .splash_frame(area.width, area.height, t, fade)
+            .splash_pull(area.width, area.height, t, fade)
         {
-            Some(frame) => {
+            maki_lua::SplashPull::Frame(frame) => {
                 self.idle_splash.set_frame(Some(frame));
                 self.splash_pull_suppressed = false;
                 Dirty::YES
             }
-            None => {
+            // The renderer answered that it has nothing: treat it as dead and
+            // stop hammering until `SplashShown`.
+            maki_lua::SplashPull::Missing => {
                 self.splash_pull_suppressed = true;
                 self.idle_splash.set_frame(None);
                 Dirty::NO
             }
+            // Still computing (cold JIT) or dead handle: keep any last frame
+            // and retry on the next cadence instead of suppressing.
+            maki_lua::SplashPull::Unknown => Dirty::NO,
         }
     }
 

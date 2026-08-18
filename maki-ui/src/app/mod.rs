@@ -1883,7 +1883,8 @@ impl App {
             | self.tick_file_completion();
         dirty |= self.tick_chats();
         while let Some(shown) = self.chats[0].take_splash_event() {
-            dirty |= Dirty::YES;
+            // The autocmd is fire-and-forget; repainting is the frame pull's
+            // job (which already reports dirty), so the event itself owes none.
             self.fire_session_autocmd(
                 if shown { "SplashShown" } else { "SplashHidden" },
                 serde_json::json!({}),

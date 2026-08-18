@@ -4149,12 +4149,11 @@ fn wait_for_splash_text(handle: &maki_lua::EventHandle, needle: &str) -> maki_lu
     const DEADLINE: Duration = Duration::from_secs(5);
     let start = std::time::Instant::now();
     loop {
-        let frame = handle
-            .splash_frame(80, 20, 10.0, 1.0)
-            .expect("renderer alive");
-        let all: String = frame.rows.iter().map(|r| r.glyphs.as_str()).collect();
-        if all.contains(needle) {
-            return frame;
+        if let Some(frame) = handle.splash_frame(80, 20, 10.0, 1.0) {
+            let all: String = frame.rows.iter().map(|r| r.glyphs.as_str()).collect();
+            if all.contains(needle) {
+                return frame;
+            }
         }
         assert!(
             start.elapsed() < DEADLINE,
@@ -4174,7 +4173,7 @@ fn frame_has_text(frame: &maki_lua::SplashFrame, needle: &str) -> bool {
 #[test]
 fn test_splash_host_boots_and_serves_frames() {
     let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
-    let frame = handle.splash_frame(80, 20, 10.0, 1.0).expect("frame");
+    let frame = wait_for_splash_text(&handle, "luna-maki");
     assert_eq!(frame.width, 80);
     assert_eq!(frame.height, 20);
     assert!(!frame.rows.is_empty(), "frame has rows");
@@ -4222,7 +4221,12 @@ end)
 "##,
         )
         .unwrap();
-    let frame = handle.splash_frame(80, 20, 0.0, 1.0).expect("frame");
+    let frame = loop {
+        if let Some(f) = handle.splash_frame(80, 20, 0.0, 1.0) {
+            break f;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
     assert!(
         frame
             .rows
@@ -4269,8 +4273,8 @@ fn test_version_api() {
         r#"
 maki.api.register_tool({
   name = "vprobe",
-  description = "",
-  schema = { type = "object", properties = {} },
+  description = "probe maki.version",
+  schema = { type = "object", properties = {}, additionalProperties = false },
   handler = function()
     local v = maki.version()
     return string.format("%s|%s|%s", v.current, v.latest or "nil", tostring(v.update_available))
@@ -4279,10 +4283,10 @@ maki.api.register_tool({
 "#,
     )
     .unwrap();
-    let out = exec_tool(&reg, "vprobe", Value::Null).unwrap();
+    let out = exec_tool(&reg, "vprobe", json!({})).unwrap();
     assert!(out.contains("|nil|false"), "unset store: {out}");
 
     handle.set_version("1.2.3", Some("9.9.9"));
-    let out = exec_tool(&reg, "vprobe", Value::Null).unwrap();
+    let out = exec_tool(&reg, "vprobe", json!({})).unwrap();
     assert_eq!(out, "1.2.3|9.9.9|true", "set store: {out}");
 }

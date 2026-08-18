@@ -20,7 +20,9 @@ pub use error::PluginError;
 pub use loader::{EventHandle, PluginHost, TestCompletionBackend};
 pub use plugin_permissions::{Permission, PluginPermissions};
 pub use runtime::{KILL_GRACE, RestoreItem, WARM_TOOL_CAP};
-pub use splash::{SPLASH_PULL_TIMEOUT, SplashFrame, SplashRow, SplashStyle, VersionInfo};
+pub use splash::{
+    SPLASH_PULL_TIMEOUT, SplashFrame, SplashPull, SplashRow, SplashStyle, VersionInfo,
+};
 
 pub use api::completion::{AtToken, CompletionCtx, ItemSpec, at_is_token_start, parse_at_tokens};
 

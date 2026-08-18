@@ -2967,6 +2967,14 @@ mod tests {
     }
 
     #[test]
+    fn default_builtins_include_splash() {
+        assert!(
+            DEFAULT_BUILTINS.contains(&"splash"),
+            "the home-screen splash plugin must be enabled by default"
+        );
+    }
+
+    #[test]
     fn removed_sub_tool_tables_error() {
         for &tool in EDIT_SUB_TOOLS {
             let raw: RawConfig = toml::from_str(&format!("[plugins.{tool}]\n")).unwrap();

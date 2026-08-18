@@ -418,12 +418,11 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let frame = loop {
-            let f = handle
-                .splash_frame(80, 20, 10.0, 1.0)
-                .expect("renderer alive");
-            let all: String = f.rows.iter().map(|r| r.glyphs.as_str()).collect();
-            if all.contains(update::CURRENT) {
-                break f;
+            if let Some(f) = handle.splash_frame(80, 20, 10.0, 1.0) {
+                let all: String = f.rows.iter().map(|r| r.glyphs.as_str()).collect();
+                if all.contains(update::CURRENT) {
+                    break f;
+                }
             }
             assert!(
                 std::time::Instant::now() < deadline,
