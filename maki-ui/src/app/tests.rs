@@ -5381,6 +5381,88 @@ fn test_splash_lifecycle_events() {
 }
 
 #[test]
+fn test_splash_survives_reset_to_empty_session() {
+    // Regression: a reset (or a switch to an empty session) swaps in a fresh
+    // chat with a fresh splash clock and `splash_shown: false`. The reported
+    // bug blanked the splash ~1s later; hold it up past the 1.6s entry fade
+    // and fail the moment a frame goes missing.
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let dir = StateDir::from_path(env::temp_dir());
+    let writer = Arc::new(test_writer(dir.clone()));
+    let mut app = build_app_with_handle(dir, writer, handle.clone());
+    rendered(&mut app); // assigns the splash area in view
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let _ = app.tick();
+        let Some(frame) = app.main_chat().splash_frame() else {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no splash frame pulled"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            continue;
+        };
+        let all: String = frame.rows.iter().map(|r| r.glyphs.as_str()).collect();
+        if all.contains("luna-maki") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "idle splash missed the logo"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // The event loop fires these around a session switch; include them so the
+    // Lua side sees the same traffic as production.
+    handle.fire_autocmd(
+        "SessionFocusChanged",
+        serde_json::json!({ "session_id": app.state.session.id }),
+    );
+    handle.fire_autocmd(
+        "SessionStatusChanged",
+        serde_json::json!({ "session_id": app.state.session.id, "status": "idle", "focused": true }),
+    );
+    app.reset_session();
+    handle.fire_autocmd(
+        "SessionFocusChanged",
+        serde_json::json!({ "session_id": app.state.session.id }),
+    );
+    handle.fire_autocmd(
+        "SessionStatusChanged",
+        serde_json::json!({ "session_id": app.state.session.id, "status": "idle", "focused": true }),
+    );
+    let reset_at = std::time::Instant::now();
+    let mut timeline = Vec::new();
+    loop {
+        rendered(&mut app);
+        let _ = app.tick();
+        let chat = app.main_chat();
+        let frame = chat.splash_frame();
+        let rows = frame.map(|f| f.rows.len()).unwrap_or(0);
+        timeline.push(format!(
+            "{:4.1}s rows={} suppressed={} shown={}",
+            reset_at.elapsed().as_secs_f32(),
+            rows,
+            chat.splash_pull_suppressed(),
+            chat.splash_shown_flag()
+        ));
+        let all: String = frame
+            .map(|f| f.rows.iter().map(|r| r.glyphs.as_str()).collect())
+            .unwrap_or_default();
+        assert!(
+            all.contains("luna-maki"),
+            "splash vanished {}s after the reset to an empty session\n{timeline:?}",
+            reset_at.elapsed().as_secs_f32()
+        );
+        if reset_at.elapsed() > std::time::Duration::from_millis(2200) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[test]
 fn test_splash_off_settles_idle() {
     // A still splash only ever animates during its entry fade; after that the
     // cadence is IDLE and no frame is owed. Use a disconnected handle so this

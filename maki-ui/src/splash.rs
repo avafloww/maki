@@ -198,16 +198,15 @@ impl Splash {
                         field_style(idx, bg, ac)
                     }
                     // Explicit styles paint every char (spaces erase the field
-                    // behind them), matching the old opaque text block.
+                    // behind them), matching the old opaque text block. The bg
+                    // is owned by the host (the same `theme.background` the field
+                    // and screen use) so the block never reads as a cut-out, even
+                    // when the plugin's own bg guess is stale.
                     SplashStyle::Hex(r, g, b) => Style::new().fg(Color::Rgb(*r, *g, *b)),
-                    SplashStyle::Rgba {
-                        fg,
-                        bg: bgrgb,
-                        bold,
-                    } => {
+                    SplashStyle::Rgba { fg, bg: _, bold } => {
                         let mut s = Style::new()
                             .fg(Color::Rgb(fg.0, fg.1, fg.2))
-                            .bg(Color::Rgb(bgrgb.0, bgrgb.1, bgrgb.2));
+                            .bg(Color::Rgb(bg.0, bg.1, bg.2));
                         if *bold {
                             s = s.add_modifier(Modifier::BOLD);
                         }
@@ -363,6 +362,45 @@ mod tests {
         }]);
         let text = blit_frame(rows);
         assert!(text.contains('a') && text.contains(' ') && text.contains('d'));
+    }
+
+    /// Diagnostic for the "cut-out text" regression: the plugin sends an
+    /// explicit text bg (resolved from `theme_color` with a Dracula fallback),
+    /// but the field cells and the screen are painted with `theme.background`.
+    /// The blit must paint the text bg with the host's `theme.background`, not
+    /// the plugin's, or the centered block reads as a different colour.
+    #[test]
+    fn blit_text_bg_uses_theme_background_not_plugin_bg() {
+        let theme = theme::current();
+        let (tr, tg, tb) = match theme.background {
+            Color::Rgb(r, g, b) => (r, g, b),
+            other => panic!("expected rgb theme background, got {other:?}"),
+        };
+        let theme_bg = Color::Rgb(tr, tg, tb);
+        // Deliberately divergent plugin bg so a buggy blit is detectable.
+        let plugin_bg: (u8, u8, u8) = (200, 100, 50);
+        assert_ne!(
+            plugin_bg,
+            (tr, tg, tb),
+            "fixture bg must differ from theme bg"
+        );
+        let rows = frame(vec![SplashRow {
+            glyphs: "abc".into(),
+            style: SplashStyle::Rgba {
+                fg: (10, 20, 30),
+                bg: plugin_bg,
+                bold: false,
+            },
+        }]);
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buf = Buffer::empty(area);
+        let splash = Splash::new(true);
+        splash.blit(area, &mut buf, &rows, Color::Blue);
+        let cell_bg = buf.cell((0, 0)).unwrap().style().bg.unwrap_or(Color::Reset);
+        assert_eq!(
+            cell_bg, theme_bg,
+            "text bg must be the theme background, got {cell_bg:?} (theme {theme_bg:?})"
+        );
     }
 
     fn serialize_cells(buf: &Buffer) -> String {

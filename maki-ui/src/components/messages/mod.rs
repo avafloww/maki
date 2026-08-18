@@ -758,7 +758,8 @@ impl MessagesPanel {
         let animating = self.idle_splash.cadence() == Cadence::SMOOTH;
         // Regular pulls follow the cadence (animate or entry fade), gated by
         // dead-renderer suppression; a version change forces a repull.
-        if !self.force_pull_once && !(animating && !self.splash_pull_suppressed) {
+        let should_pull = self.force_pull_once || (animating && !self.splash_pull_suppressed);
+        if !should_pull {
             return Dirty::NO;
         }
 
@@ -797,6 +798,16 @@ impl MessagesPanel {
     #[doc(hidden)]
     pub fn splash_frame(&self) -> Option<&maki_lua::SplashFrame> {
         self.idle_splash.frame()
+    }
+
+    #[doc(hidden)]
+    pub fn splash_pull_suppressed(&self) -> bool {
+        self.splash_pull_suppressed
+    }
+
+    #[doc(hidden)]
+    pub fn splash_shown_flag(&self) -> bool {
+        self.splash_shown
     }
 
     #[cfg(test)]
