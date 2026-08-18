@@ -27,6 +27,7 @@ use serde_json::Value;
 use maki_config::RawConfig;
 
 use crate::api::autocmd::AutocmdStore;
+use crate::api::completion::{self, CompletionCtx, ItemSpec};
 use crate::api::create_maki_global;
 use crate::api::r#fn::{JobOwner, JobStore, deliver_job_event};
 use crate::api::keymap::KeymapReader;
@@ -34,7 +35,6 @@ use crate::api::keymap::{KeymapStore, KeymapWriter};
 use crate::api::options::{PluginOptionSpecs, PluginOpts, collect_plugin_options};
 use crate::api::slot::SlotStore;
 use crate::api::tool::{LuaTool, PendingTool, PendingTools, PermissionScopeSpec, ToolCallReply};
-use crate::api::completion::{self, CompletionCtx, ItemSpec};
 use crate::api::ui::HintStore;
 use crate::api::ui::buf::{BufHandle, BufferStore};
 use crate::api::util::command::{CommandHandlerMap, HintWriter, publish_command_snapshot};

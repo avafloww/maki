@@ -233,13 +233,9 @@ impl FileCompletionMenu {
         let Some(s) = &mut self.session else {
             return;
         };
-        s.nucleo.pattern.reparse(
-            0,
-            query,
-            CaseMatching::Smart,
-            Normalization::Smart,
-            false,
-        );
+        s.nucleo
+            .pattern
+            .reparse(0, query, CaseMatching::Smart, Normalization::Smart, false);
         s.query = query.to_string();
         s.selected = 0;
         s.scroll_offset = 0;
@@ -405,7 +401,9 @@ fn highlight_indices(matcher: &mut Matcher, label: &str, query: &str) -> Option<
     let mut hay_buf = Vec::new();
     let hay = Utf32Str::new(label, &mut hay_buf);
     let mut indices = Vec::new();
-    matcher.fuzzy_indices(hay, needle, &mut indices).map(|_| indices)
+    matcher
+        .fuzzy_indices(hay, needle, &mut indices)
+        .map(|_| indices)
 }
 
 fn fuzzy_match<I>(matcher: &mut Matcher, needle: &str, items: I) -> Vec<Candidate>
@@ -553,12 +551,19 @@ fn build_grid<'a>(
 
 fn cell_line<'a>(c: &Candidate, width: usize, selected: bool, t: &'a theme::Theme) -> Line<'a> {
     let base = if selected { t.item_selected } else { t.item };
-    let kind_style = t.completion_kinds.get(&c.item.kind).copied().unwrap_or(base);
+    let kind_style = t
+        .completion_kinds
+        .get(&c.item.kind)
+        .copied()
+        .unwrap_or(base);
     // Matched characters keep the kind foreground but also carry the
     // selection background, so the highlight is not cut out of the selected
     // row.
     let match_style = if selected {
-        Style { bg: base.bg, ..kind_style }
+        Style {
+            bg: base.bg,
+            ..kind_style
+        }
     } else {
         kind_style
     };
@@ -576,7 +581,10 @@ fn cell_line<'a>(c: &Candidate, width: usize, selected: bool, t: &'a theme::Them
         used += cw;
         let is_match = c.indices.binary_search(&(i as u32)).is_ok();
         if is_match != in_match && !run.is_empty() {
-            spans.push(Span::styled(mem::take(&mut run), if in_match { match_style } else { base }));
+            spans.push(Span::styled(
+                mem::take(&mut run),
+                if in_match { match_style } else { base },
+            ));
         }
         in_match = is_match;
         run.push(ch);
@@ -773,7 +781,11 @@ mod tests {
             item("subagent:research", "subagent", "@subagent:research "),
             item("subagent:general", "subagent", "@subagent:general "),
             item("model:zai/glm-5", "model", "@model:zai/glm-5 "),
-            item("model:anthropic/claude", "model", "@model:anthropic/claude "),
+            item(
+                "model:anthropic/claude",
+                "model",
+                "@model:anthropic/claude ",
+            ),
         ])
     }
 
@@ -892,7 +904,10 @@ mod tests {
         // Every kind plugins can emit is seeded in the theme's lookup, so
         // rendering never silently falls back to the generic item style.
         for kind in ["file", "skill", "subagent", "model"] {
-            assert!(t.completion_kinds.contains_key(kind), "kind {kind} not seeded");
+            assert!(
+                t.completion_kinds.contains_key(kind),
+                "kind {kind} not seeded"
+            );
         }
         let expected = *t.completion_kinds.get("skill").expect("skill kind seeded");
         let line = cell_line(&s.matches[0], 20, false, &t);
@@ -910,7 +925,10 @@ mod tests {
         // the kind name.
         for kind in ["file", "skill", "subagent", "model"] {
             let style = t.completion_kinds.get(kind).expect("kind seeded");
-            assert_ne!(style.fg, t.item.fg, "{kind} highlight equals the item colour");
+            assert_ne!(
+                style.fg, t.item.fg,
+                "{kind} highlight equals the item colour"
+            );
         }
     }
 
@@ -1036,12 +1054,19 @@ mod tests {
         let mut menu = session_with_items(vec![item("skill:review", "skill", "@skill:review")]);
         menu.sync_query("sk");
         let c = menu.session.as_ref().unwrap().matches[0].clone();
-        assert_eq!(c.indices, vec![0, 1], "prefix query must highlight the leading chars");
+        assert_eq!(
+            c.indices,
+            vec![0, 1],
+            "prefix query must highlight the leading chars"
+        );
 
         let t = theme::load_by_name("lunared").expect("lunared is a bundled theme");
         let line = cell_line(&c, 40, true, &t);
         let kind = t.completion_kinds.get("skill").copied().unwrap_or(t.item);
-        let expected_match = Style { bg: t.item_selected.bg, ..kind };
+        let expected_match = Style {
+            bg: t.item_selected.bg,
+            ..kind
+        };
 
         // Matched chars keep the kind foreground AND the selection background.
         let match_span = line
@@ -1065,14 +1090,18 @@ mod tests {
         menu.sync_query("rev");
         let c = menu.session.as_ref().unwrap().matches[0].clone();
         assert_eq!(
-            c.indices, vec![6, 7, 8],
+            c.indices,
+            vec![6, 7, 8],
             "fuzzy query must highlight the scattered chars"
         );
 
         let t = theme::load_by_name("lunared").expect("lunared is a bundled theme");
         let line = cell_line(&c, 40, true, &t);
         let kind = t.completion_kinds.get("skill").copied().unwrap_or(t.item);
-        let expected_match = Style { bg: t.item_selected.bg, ..kind };
+        let expected_match = Style {
+            bg: t.item_selected.bg,
+            ..kind
+        };
 
         // The scattered match still carries the selection background, so it is
         // not cut out of the selected row.

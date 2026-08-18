@@ -389,9 +389,11 @@ pub fn style_by_name(name: &str) -> Style {
         "completion.skill" | "completion_skill" => {
             t.completion_kinds.get("skill").copied().unwrap_or(t.item)
         }
-        "completion.subagent" | "completion_subagent" => {
-            t.completion_kinds.get("subagent").copied().unwrap_or(t.item)
-        }
+        "completion.subagent" | "completion_subagent" => t
+            .completion_kinds
+            .get("subagent")
+            .copied()
+            .unwrap_or(t.item),
         "completion.model" | "completion_model" => {
             t.completion_kinds.get("model").copied().unwrap_or(t.item)
         }
@@ -1157,7 +1159,10 @@ accent = "#ff79c6"
 accent = { fg = "accent" }
 "##;
         let theme = Theme::from_toml(toml).unwrap();
-        let file = theme.completion_kinds.get("file").expect("file kind seeded");
+        let file = theme
+            .completion_kinds
+            .get("file")
+            .expect("file kind seeded");
         // Every kind shares the file highlight so the match is visible on any
         // theme; per-kind colors are a `[completion]` opt-in.
         for kind in ["skill", "subagent", "model"] {
@@ -1185,7 +1190,10 @@ accent = { fg = "accent" }
 skill = { fg = "cyan" }
 "##;
         let theme = Theme::from_toml(toml).unwrap();
-        let file = theme.completion_kinds.get("file").expect("file kind seeded");
+        let file = theme
+            .completion_kinds
+            .get("file")
+            .expect("file kind seeded");
         assert_eq!(
             theme.completion_kinds.get("skill"),
             Some(&Style::new().fg(Color::Rgb(0x8b, 0xe9, 0xfd)))

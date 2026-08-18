@@ -1063,10 +1063,7 @@ impl App {
     /// set for the current mode and models, so the input can style `@`-tokens
     /// as detected or undetected.
     fn store_at_ref_labels(&mut self, items: &[ItemSpec]) {
-        self.input_box.at_ref_labels = items
-            .iter()
-            .map(|i| i.label.clone())
-            .collect();
+        self.input_box.at_ref_labels = items.iter().map(|i| i.label.clone()).collect();
     }
 
     /// Refresh the input's known `@`-label set after external text (restore,
@@ -1131,8 +1128,7 @@ impl App {
             };
             let items = self.lua_event_handle.collect_completion_items(&ctx);
             self.store_at_ref_labels(&items);
-            self.file_completion
-                .open(&cwd, items, &query, (start, end));
+            self.file_completion.open(&cwd, items, &query, (start, end));
         }
     }
 

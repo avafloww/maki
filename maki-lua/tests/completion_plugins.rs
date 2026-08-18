@@ -33,9 +33,13 @@ fn ctx(mode: &str) -> CompletionCtx {
 }
 
 fn host_with_real_plugins() -> (PluginHost, EventHandle) {
-    let host = PluginHost::new(Arc::new(ToolRegistry::new()))
-        .unwrap_or_else(|e| panic!("host: {e}"));
-    for (name, src) in [("skill", SKILL_SRC), ("task", TASK_SRC), ("model", MODEL_SRC)] {
+    let host =
+        PluginHost::new(Arc::new(ToolRegistry::new())).unwrap_or_else(|e| panic!("host: {e}"));
+    for (name, src) in [
+        ("skill", SKILL_SRC),
+        ("task", TASK_SRC),
+        ("model", MODEL_SRC),
+    ] {
         host.load_source(name, src)
             .unwrap_or_else(|e| panic!("{name} plugin failed to load: {e}"));
     }
@@ -56,7 +60,10 @@ fn plan_mode_hides_general_subagent() {
     let (_host, eh) = host_with_real_plugins();
     let items = eh.collect_completion_items(&ctx(PLAN_MODE));
     let sub = labels(&items, "subagent");
-    assert!(sub.contains(&SUB_RESEARCH), "research must be offered: {sub:?}");
+    assert!(
+        sub.contains(&SUB_RESEARCH),
+        "research must be offered: {sub:?}"
+    );
     assert!(
         sub.contains(&SUB_PLAN_REVIEWER),
         "plan_reviewer must be offered in plan mode: {sub:?}"
@@ -72,7 +79,10 @@ fn build_mode_hides_plan_reviewer_subagent() {
     let (_host, eh) = host_with_real_plugins();
     let items = eh.collect_completion_items(&ctx(BUILD_MODE));
     let sub = labels(&items, "subagent");
-    assert!(sub.contains(&SUB_RESEARCH), "research must be offered: {sub:?}");
+    assert!(
+        sub.contains(&SUB_RESEARCH),
+        "research must be offered: {sub:?}"
+    );
     assert!(
         sub.contains(&SUB_GENERAL),
         "general must be offered outside plan mode: {sub:?}"
@@ -119,7 +129,10 @@ fn expands_all_three_token_kinds_in_place() {
     let out = eh
         .expand_references("go @subagent:research @skill:maki-plugin-dev @model:zai/glm-5 now")
         .unwrap_or_else(|e| panic!("expand failed: {e}"));
-    assert_eq!(out, "go <subagent:research> <skill:maki-plugin-dev> <model:zai/glm-5> now");
+    assert_eq!(
+        out,
+        "go <subagent:research> <skill:maki-plugin-dev> <model:zai/glm-5> now"
+    );
 }
 
 #[test]
@@ -128,7 +141,10 @@ fn expands_short_form_aliases() {
     let out = eh
         .expand_references("@a:general @s:maki-plugin-dev @m:zai/glm-5")
         .unwrap_or_else(|e| panic!("expand failed: {e}"));
-    assert_eq!(out, "<subagent:general> <skill:maki-plugin-dev> <model:zai/glm-5>");
+    assert_eq!(
+        out,
+        "<subagent:general> <skill:maki-plugin-dev> <model:zai/glm-5>"
+    );
 }
 
 #[test]
@@ -176,7 +192,9 @@ fn plugins_teach_agent_their_intent_tokens() {
 fn unknown_prefix_passes_through() {
     let (_host, eh) = host_with_real_plugins();
     let src = "mail foo@bar:baz? and @nothing:whatever";
-    let out = eh.expand_references(src).unwrap_or_else(|e| panic!("expand failed: {e}"));
+    let out = eh
+        .expand_references(src)
+        .unwrap_or_else(|e| panic!("expand failed: {e}"));
     assert_eq!(out, src);
 }
 
@@ -184,6 +202,8 @@ fn unknown_prefix_passes_through() {
 fn plain_text_is_untouched() {
     let (_host, eh) = host_with_real_plugins();
     let src = "no references here, just prose.";
-    let out = eh.expand_references(src).unwrap_or_else(|e| panic!("expand failed: {e}"));
+    let out = eh
+        .expand_references(src)
+        .unwrap_or_else(|e| panic!("expand failed: {e}"));
     assert_eq!(out, src);
 }

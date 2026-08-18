@@ -84,7 +84,12 @@ fn install_store<T: Default + Send + Sync + 'static>(lua: &Lua) {
 ///   end,
 /// })
 #[lua_fn]
-fn register_completion_source(lua: &Lua, #[ctx] plugin: Arc<str>, prefix: String, spec: Table) -> LuaResult<()> {
+fn register_completion_source(
+    lua: &Lua,
+    #[ctx] plugin: Arc<str>,
+    prefix: String,
+    spec: Table,
+) -> LuaResult<()> {
     let get_items: Function = spec.get("get_items")?;
     let mut store = lua
         .app_data_mut::<CompletionStore>()
@@ -111,7 +116,12 @@ fn register_completion_source(lua: &Lua, #[ctx] plugin: Arc<str>, prefix: String
 ///   return "<skill:" .. ref.value .. ">", nil
 /// end)
 #[lua_fn]
-fn register_expander(lua: &Lua, #[ctx] plugin: Arc<str>, prefix: String, f: Function) -> LuaResult<()> {
+fn register_expander(
+    lua: &Lua,
+    #[ctx] plugin: Arc<str>,
+    prefix: String,
+    f: Function,
+) -> LuaResult<()> {
     let mut store = lua
         .app_data_mut::<ExpanderStore>()
         .ok_or_else(|| mlua::Error::runtime("expander store not available"))?;
@@ -223,10 +233,9 @@ pub(crate) async fn expand_references(lua: &Lua, text: &str) -> Result<String, S
                     .map_err(|e| format!("expander ctx failed: {e}"))?;
                 ctx.set("value", tok.value.as_str())
                     .map_err(|e| format!("expander ctx failed: {e}"))?;
-                let mv: MultiValue = f
-                    .call_async(ctx)
-                    .await
-                    .map_err(|e| format!("expander for '@{}:{}' failed: {e}", tok.prefix, tok.value))?;
+                let mv: MultiValue = f.call_async(ctx).await.map_err(|e| {
+                    format!("expander for '@{}:{}' failed: {e}", tok.prefix, tok.value)
+                })?;
                 match pair_from_multivalue(mv) {
                     (Some(replacement), None) => out.push_str(&replacement),
                     (_, Some(err)) => return Err(err),
@@ -353,7 +362,11 @@ mod tests {
             .insert(prefix.to_string(), get_items);
     }
 
-    fn register_expander(lua: &Lua, prefix: &str, f: impl Fn(&str) -> Pair<String> + Send + 'static) {
+    fn register_expander(
+        lua: &Lua,
+        prefix: &str,
+        f: impl Fn(&str) -> Pair<String> + Send + 'static,
+    ) {
         let f = lua
             .create_function(move |_lua, ctx: Table| {
                 let value: String = ctx.get("value")?;
@@ -395,7 +408,9 @@ mod tests {
     #[test]
     fn expand_in_place_replacement() {
         let lua = lua_with_stores();
-        register_expander(&lua, "subagent", |v| (Some(format!("<subagent:{v}>")), None));
+        register_expander(&lua, "subagent", |v| {
+            (Some(format!("<subagent:{v}>")), None)
+        });
         register_expander(&lua, "a", |v| (Some(format!("<subagent:{v}>")), None));
         assert_eq!(
             smol::block_on(expand_references(&lua, "@subagent:research do x")).unwrap(),
@@ -473,9 +488,13 @@ mod tests {
         let lua = lua_with_stores();
         register_source(&lua, "skill", &[("skill:rev", "skill", "@skill:rev")]);
         register_expander(&lua, "skill", |v| (Some(format!("<skill:{v}>")), None));
-        assert!(!smol::block_on(collect_completion_items(&lua, &CompletionCtx::default())).is_empty());
+        assert!(
+            !smol::block_on(collect_completion_items(&lua, &CompletionCtx::default())).is_empty()
+        );
         clear_plugin(&lua, "test");
-        assert!(smol::block_on(collect_completion_items(&lua, &CompletionCtx::default())).is_empty());
+        assert!(
+            smol::block_on(collect_completion_items(&lua, &CompletionCtx::default())).is_empty()
+        );
         assert_eq!(
             smol::block_on(expand_references(&lua, "@skill:rev x")).unwrap(),
             "@skill:rev x"

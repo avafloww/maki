@@ -5068,7 +5068,10 @@ fn mixed_list_includes_skills_subagents_and_models() {
 fn submit_expands_subagent_reference_in_place() {
     let (_tmp, app, backend) = completion_app();
     seed_subagents(&backend, "build");
-    let input = app.build_agent_input(&queued_msg_with("@subagent:research review this package", &app));
+    let input = app.build_agent_input(&queued_msg_with(
+        "@subagent:research review this package",
+        &app,
+    ));
     assert_eq!(input.message, "<subagent:research> review this package");
 }
 
@@ -5080,7 +5083,10 @@ fn submit_expands_subagent_model_and_skill_in_place() {
     seed_skill(&backend, "pdf");
     // `@m:weak` and `@skill:pdf` both expand; token order in the message is kept.
     let msg = expand_for_test(&app, "@subagent:general @m:weak @skill:pdf fix the report");
-    assert_eq!(msg, "<subagent:general> <model:weak> <skill:pdf> fix the report");
+    assert_eq!(
+        msg,
+        "<subagent:general> <model:weak> <skill:pdf> fix the report"
+    );
 }
 
 #[test]
@@ -5110,10 +5116,7 @@ fn submit_standalone_model_expands_in_place_no_action() {
 #[test]
 fn unrecognized_references_pass_through_at_submit() {
     let (_tmp, app, _backend) = completion_app();
-    let input = app.build_agent_input(&queued_msg_with(
-        "foo@bar @nothing:whatever fix it",
-        &app,
-    ));
+    let input = app.build_agent_input(&queued_msg_with("foo@bar @nothing:whatever fix it", &app));
     assert_eq!(input.message, "foo@bar @nothing:whatever fix it");
 }
 
@@ -5133,7 +5136,6 @@ fn queued_msg_with(text: &str, app: &App) -> QueuedMessage {
         images: vec![],
     }
 }
-
 
 // --- Async subagent routing (AC.8, AC.9, AC.10) ------------------------------
 

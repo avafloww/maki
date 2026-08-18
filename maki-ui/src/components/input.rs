@@ -1366,8 +1366,13 @@ mod tests {
     #[test]
     fn at_token_spans_matches_lowercased_prefix() {
         let labels = labels_for(&["skill:committing"]);
-        let spans =
-            at_token_spans("@SKILL:committing", &labels, AT_KNOWN_STYLE, AT_UNKNOWN_STYLE).unwrap();
+        let spans = at_token_spans(
+            "@SKILL:committing",
+            &labels,
+            AT_KNOWN_STYLE,
+            AT_UNKNOWN_STYLE,
+        )
+        .unwrap();
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content, "@SKILL:committing");
         assert_eq!(spans[0].style, AT_KNOWN_STYLE);
