@@ -800,6 +800,16 @@ impl MessagesPanel {
         self.idle_splash.frame()
     }
 
+    #[doc(hidden)]
+    pub fn splash_pull_suppressed(&self) -> bool {
+        self.splash_pull_suppressed
+    }
+
+    #[doc(hidden)]
+    pub fn splash_shown_flag(&self) -> bool {
+        self.splash_shown
+    }
+
     #[cfg(test)]
     pub(crate) fn advance_splash_past_fade(&mut self) {
         self.idle_splash.advance_past_fade();

@@ -240,6 +240,16 @@ impl Chat {
         self.messages_panel.splash_frame()
     }
 
+    #[doc(hidden)]
+    pub fn splash_pull_suppressed(&self) -> bool {
+        self.messages_panel.splash_pull_suppressed()
+    }
+
+    #[doc(hidden)]
+    pub fn splash_shown_flag(&self) -> bool {
+        self.messages_panel.splash_shown_flag()
+    }
+
     #[cfg(test)]
     pub(crate) fn advance_splash_past_fade(&mut self) {
         self.messages_panel.advance_splash_past_fade();
