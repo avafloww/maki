@@ -1066,6 +1066,19 @@ impl App {
         self.input_box.at_ref_labels = items.iter().map(|i| i.label.clone()).collect();
     }
 
+    /// The context completion sources receive: the current mode id and the
+    /// available-models list, already loaded.
+    fn completion_ctx(&self) -> CompletionCtx {
+        CompletionCtx {
+            mode: self.state.mode.id_key(),
+            models: self
+                .available_models
+                .load_full()
+                .map(|arc| (*arc).clone())
+                .unwrap_or_default(),
+        }
+    }
+
     /// Refresh the input's known `@`-label set after external text (restore,
     /// rewind, command completion, editor edit) may have put a token in the
     /// input. Skips the Lua round-trip when the text has no `@`-token.
@@ -1073,17 +1086,9 @@ impl App {
         if maki_lua::parse_at_tokens(text).is_empty() {
             return;
         }
-        let models = self
-            .available_models
-            .load_full()
-            .map(|arc| (*arc).clone())
-            .unwrap_or_default();
         let items = self
             .lua_event_handle
-            .collect_completion_items(&CompletionCtx {
-                mode: self.state.mode.id_key(),
-                models,
-            });
+            .collect_completion_items(&self.completion_ctx());
         self.store_at_ref_labels(&items);
     }
 
@@ -1117,16 +1122,9 @@ impl App {
         if self.file_completion.is_active() {
             self.file_completion.sync_query(&query);
         } else {
-            let models = self
-                .available_models
-                .load_full()
-                .map(|arc| (*arc).clone())
-                .unwrap_or_default();
-            let ctx = CompletionCtx {
-                mode: self.state.mode.id_key(),
-                models,
-            };
-            let items = self.lua_event_handle.collect_completion_items(&ctx);
+            let items = self
+                .lua_event_handle
+                .collect_completion_items(&self.completion_ctx());
             self.store_at_ref_labels(&items);
             self.file_completion.open(&cwd, items, &query, (start, end));
         }
