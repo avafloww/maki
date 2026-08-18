@@ -791,7 +791,7 @@ fn tab_in_palette_completes_command() {
 }
 
 #[test]
-fn ctrl_p_n_navigation() {
+fn chat_navigation_actions() {
     let mut app = test_app();
     app.status = Status::Streaming;
     app.run_id = 1;
@@ -803,16 +803,16 @@ fn ctrl_p_n_navigation() {
     assert_eq!(app.chats.len(), 2);
     assert_eq!(app.active_chat, 0);
 
-    app.update(Msg::Key(kb::NEXT_CHAT.to_key_event()));
+    app.run_builtin(BuiltinAction::NextChat);
     assert_eq!(app.active_chat, 1);
 
-    app.update(Msg::Key(kb::NEXT_CHAT.to_key_event()));
+    app.run_builtin(BuiltinAction::NextChat);
     assert_eq!(app.active_chat, 1);
 
-    app.update(Msg::Key(kb::PREV_CHAT.to_key_event()));
+    app.run_builtin(BuiltinAction::PrevChat);
     assert_eq!(app.active_chat, 0);
 
-    app.update(Msg::Key(kb::PREV_CHAT.to_key_event()));
+    app.run_builtin(BuiltinAction::PrevChat);
     assert_eq!(app.active_chat, 0);
 }
 
@@ -1290,8 +1290,7 @@ fn picker_enter_stays_at_navigated() {
 }
 
 const OVERLAY_BLOCKED_KEYS: &[KeyEvent] = &[
-    kb::NEXT_CHAT.to_key_event(),
-    kb::PREV_CHAT.to_key_event(),
+    kb::SESSIONS.to_key_event(),
     kb::SCROLL_HALF_UP.to_key_event(),
     kb::SCROLL_HALF_DOWN.to_key_event(),
     kb::HELP.to_key_event(),
@@ -4256,7 +4255,7 @@ fn permission_prompt_takes_bottom_precedence_over_below_split() {
 
 fn app_with_active_subagent() -> App {
     let mut app = app_with_subagent();
-    app.update(Msg::Key(kb::NEXT_CHAT.to_key_event()));
+    app.run_builtin(BuiltinAction::NextChat);
     assert_eq!(app.active_chat, 1);
     app
 }
@@ -4303,7 +4302,7 @@ fn esc_in_main_chat_with_active_subagent_no_cancel() {
 fn cancel_subagent_removes_answer_sender() {
     let (mut app, _sub_rx, _main_rx) = app_with_subagent_tx(TASK_ID);
     assert!(!app.subagent_channels.is_empty());
-    app.update(Msg::Key(kb::NEXT_CHAT.to_key_event()));
+    app.run_builtin(BuiltinAction::NextChat);
     assert_eq!(app.active_chat, 1);
     app.last_esc = Some(Instant::now());
     app.update(Msg::Key(key(KeyCode::Esc)));
@@ -4350,7 +4349,7 @@ fn subagent_cancel_then_navigate_back_main_unaffected() {
     app.update(Msg::Key(key(KeyCode::Esc)));
     assert!(app.chats[1].is_finished());
 
-    app.update(Msg::Key(kb::PREV_CHAT.to_key_event()));
+    app.run_builtin(BuiltinAction::PrevChat);
     assert_eq!(app.active_chat, 0);
     assert_eq!(app.status, Status::Streaming);
     assert!(!app.chats[0].is_finished());
@@ -5453,4 +5452,25 @@ fn test_splash_still_repulls_once_on_version_change() {
         );
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
+}
+
+#[test]
+fn run_builtin_model_picker_opens_and_refreshes() {
+    let mut app = test_app();
+    let actions = app.run_builtin(BuiltinAction::ModelPicker);
+    assert!(app.model_picker.is_open());
+    assert!(matches!(&actions[..], [Action::RefreshModels]));
+}
+
+#[test]
+fn alt_m_opens_model_picker() {
+    let mut app = test_app();
+    let key = KeyEvent {
+        code: KeyCode::Char('m'),
+        modifiers: KeyModifiers::CONTROL,
+        kind: crossterm::event::KeyEventKind::Press,
+        state: crossterm::event::KeyEventState::NONE,
+    };
+    app.update(Msg::Key(key));
+    assert!(app.model_picker.is_open());
 }

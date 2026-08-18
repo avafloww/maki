@@ -442,6 +442,7 @@ pub enum BuiltinAction {
     PopQueue,
     PrevChat,
     NextChat,
+    ModelPicker,
 }
 
 pub enum UiAction {
