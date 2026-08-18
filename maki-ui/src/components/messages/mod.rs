@@ -85,6 +85,24 @@ pub struct MessagesPanel {
     show_thinking: bool,
     thinking_collapsed: bool,
     clock_format: ClockFormat,
+    /// Last-seen reported latest version; drives the Lua-side version store and
+    /// a one-shot repull when a newer version arrives.
+    last_seen_latest: Option<&'static str>,
+    /// One extra `splash.render` pull owed because the version changed; a
+    /// settled still splash re-renders its update notice exactly once.
+    force_pull_once: bool,
+    /// Whether version/update info has been forwarded to the Lua store yet.
+    /// Seeds `current` on the first pull so the notice never shows a blank
+    /// version before an update ever gets reported.
+    version_seeded: bool,
+    /// True once discovery marked the renderer dead so we stop hammering a
+    /// host with no splash.render. Reset on `SplashShown`.
+    splash_pull_suppressed: bool,
+    /// Whether the idle splash is currently shown; transitions queue a
+    /// `SplashShown`/`SplashHidden` event for the app to fire.
+    splash_shown: bool,
+    pending_splash_event: Option<bool>,
+    last_splash_area: Rect,
     /// One re-bake per tool per generation; `snapshot_theme_gen`
     /// only bumps when colors actually land.
     rebake_requested: HashMap<String, u64>,
@@ -132,6 +150,13 @@ impl MessagesPanel {
             show_thinking: ui_config.show_thinking,
             thinking_collapsed: !ui_config.show_thinking,
             clock_format: ui_config.clock_format,
+            last_seen_latest: None,
+            force_pull_once: false,
+            version_seeded: false,
+            splash_pull_suppressed: false,
+            splash_shown: false,
+            pending_splash_event: None,
+            last_splash_area: Rect::default(),
             rebake_requested: HashMap::new(),
             prompt_progress: None,
         }
@@ -698,10 +723,77 @@ impl MessagesPanel {
     /// was animating: it was the only way to keep them fed.
     pub fn tick(&mut self) -> Dirty {
         let mut dirty = self.drain_highlights() | self.poll_live_bufs();
+
+        let shown_now = self.show_idle_splash();
+        if shown_now != self.splash_shown {
+            self.splash_shown = shown_now;
+            self.pending_splash_event = Some(shown_now);
+            if shown_now {
+                self.splash_pull_suppressed = false;
+            }
+        }
+
         if self.show_idle_splash() {
-            dirty |= self.idle_splash.poll_update(update::latest_version());
+            dirty |= self.pull_splash_frame();
         }
         dirty
+    }
+
+    /// Pull the Lua `splash.render` frame when the splash should animate (or
+    /// the entry fade runs) and forward version changes into the Lua store.
+    /// A dead renderer returns `None` once and is suppressed until `SplashShown`.
+    fn pull_splash_frame(&mut self) -> Dirty {
+        let latest = update::latest_version();
+        if !self.version_seeded || latest != self.last_seen_latest {
+            self.version_seeded = true;
+            self.last_seen_latest = latest;
+            self.lua_event_handle.set_version(update::CURRENT, latest);
+            self.force_pull_once = true;
+        }
+
+        let area = self.last_splash_area;
+        if area.width == 0 {
+            return Dirty::NO;
+        }
+        let animating = self.idle_splash.cadence() == Cadence::SMOOTH;
+        // Regular pulls follow the cadence (animate or entry fade), gated by
+        // dead-renderer suppression; a version change forces exactly one.
+        if !self.force_pull_once && !(animating && !self.splash_pull_suppressed) {
+            return Dirty::NO;
+        }
+        self.force_pull_once = false;
+
+        let (t, fade) = self.idle_splash.frame_inputs();
+        match self
+            .lua_event_handle
+            .splash_frame(area.width, area.height, t, fade)
+        {
+            Some(frame) => {
+                self.idle_splash.set_frame(Some(frame));
+                self.splash_pull_suppressed = false;
+                Dirty::YES
+            }
+            None => {
+                self.splash_pull_suppressed = true;
+                self.idle_splash.set_frame(None);
+                Dirty::NO
+            }
+        }
+    }
+
+    /// The app drains this each tick and fires the matching autocmd.
+    pub fn take_splash_event(&mut self) -> Option<bool> {
+        self.pending_splash_event.take()
+    }
+
+    #[doc(hidden)]
+    pub fn splash_frame(&self) -> Option<&maki_lua::SplashFrame> {
+        self.idle_splash.frame()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn advance_splash_past_fade(&mut self) {
+        self.idle_splash.advance_past_fade();
     }
 
     pub fn cadence(&self) -> Cadence {
@@ -746,6 +838,7 @@ impl MessagesPanel {
         }
 
         if self.show_idle_splash() {
+            self.last_splash_area = area;
             let accent = self.accent.resolve();
             self.idle_splash.render(area, frame.buffer_mut(), accent);
             return;

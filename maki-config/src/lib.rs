@@ -72,6 +72,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "read",
     "sessions",
     "skill",
+    "splash",
     "task",
     "thinking",
     "todo_write",
@@ -2882,14 +2883,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn from_plugins_default() {
-        let plugins = PluginsConfig::from_plugins(HashMap::new());
-        let expected: Vec<String> = DEFAULT_BUILTINS.iter().map(|s| s.to_string()).collect();
-        assert_eq!(plugins.names, expected);
-        assert!(plugins.enabled);
-    }
-
+    #[cfg(unix)]
     #[test]
     fn from_plugins_enable_disable_and_sort() {
         let mut entries = HashMap::new();

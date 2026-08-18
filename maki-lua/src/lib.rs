@@ -6,6 +6,7 @@ pub mod language;
 mod loader;
 pub(crate) mod plugin_permissions;
 mod runtime;
+mod splash;
 
 pub use api::keymap::{KeymapEntry, KeymapReader, KeymapSnapshot};
 pub use api::options::{OptionSpec, OptionType, PluginOptionSpecs};
@@ -19,6 +20,7 @@ pub use error::PluginError;
 pub use loader::{EventHandle, PluginHost, TestCompletionBackend};
 pub use plugin_permissions::{Permission, PluginPermissions};
 pub use runtime::{KILL_GRACE, RestoreItem, WARM_TOOL_CAP};
+pub use splash::{SPLASH_PULL_TIMEOUT, SplashFrame, SplashRow, SplashStyle, VersionInfo};
 
 pub use api::completion::{AtToken, CompletionCtx, ItemSpec, at_is_token_start, parse_at_tokens};
 
@@ -27,7 +29,7 @@ pub mod test_support {
     use crate::api::util::command::{
         HintEntries, HintReader, HintWriter, LuaCommandInfo, LuaCommandReader, LuaCommandWriter,
     };
-    use crate::{EventHandle, KeymapReader, TestCompletionBackend};
+use crate::{EventHandle, KeymapReader, PluginHost, TestCompletionBackend};
 
     pub struct LuaCommandWriterHandle(LuaCommandWriter);
 
@@ -108,6 +110,43 @@ pub mod test_support {
     pub fn probed_event_handle() -> (crate::EventHandle, RequestProbe) {
         let (tx, rx) = flume::unbounded();
         (crate::EventHandle::probed_for_test(tx), RequestProbe(rx))
+    }
+
+    /// Boots a real `PluginHost` (background Lua thread) pre-loading the given
+    /// builtins, returning a live `EventHandle` plus a guard that keeps the
+    /// host alive until it drops. Real-host tests use this instead of the
+    /// disconnected/probed handles so end-to-end Lua behavior (e.g. pulling a
+    /// `splash.render` frame) can be exercised.
+    pub fn spawn_host_for_tests(plugins: &[&str]) -> (crate::EventHandle, PluginHostGuard) {
+        use maki_config::PluginsConfig;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        let reg: Arc<maki_agent::tools::ToolRegistry> =
+            Arc::new(maki_agent::tools::ToolRegistry::new());
+        let mut host = crate::PluginHost::new(Arc::clone(&reg)).unwrap();
+        let cfg = PluginsConfig {
+            enabled: true,
+            names: plugins.iter().map(|s| s.to_string()).collect(),
+            opts: HashMap::new(),
+        };
+        host.load_builtins(&cfg).unwrap();
+        let handle = host.event_handle();
+        (handle, PluginHostGuard { host })
+    }
+
+    /// Keeps a booted [`PluginHost`] alive (its `Drop` joins the Lua thread).
+    pub struct PluginHostGuard {
+        host: PluginHost,
+    }
+
+    impl PluginHostGuard {
+        pub fn host(&self) -> &PluginHost {
+            &self.host
+        }
+    }
+
+    impl Drop for PluginHostGuard {
+        fn drop(&mut self) {}
     }
 
     pub fn keymap_reader_with(entries: Vec<KeymapEntry>) -> KeymapReader {

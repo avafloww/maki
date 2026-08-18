@@ -85,6 +85,30 @@ fn build_app_with_lua(
     writer: Arc<StorageWriter>,
     lua_commands: LuaCommandReader,
 ) -> App {
+    build_app_with_handle(
+        dir,
+        writer,
+        lua_commands,
+        maki_lua::EventHandle::disconnected_for_test(),
+    )
+}
+
+fn build_app_with_handle(
+    dir: StateDir,
+    writer: Arc<StorageWriter>,
+    lua_commands: LuaCommandReader,
+    handle: maki_lua::EventHandle,
+) -> App {
+    build_app_with_full(dir, writer, lua_commands, handle, UiConfig::default())
+}
+
+fn build_app_with_full(
+    dir: StateDir,
+    writer: Arc<StorageWriter>,
+    lua_commands: LuaCommandReader,
+    handle: maki_lua::EventHandle,
+    ui: UiConfig,
+) -> App {
     let model = test_model();
     App::new(
         &model,
@@ -97,7 +121,7 @@ fn build_app_with_lua(
         KeymapReader::empty(),
         HintReader::empty(),
         writer,
-        UiConfig::default(),
+        ui,
         100,
         Arc::new(PermissionManager::new(
             PermissionsConfig {
@@ -107,7 +131,7 @@ fn build_app_with_lua(
             PathBuf::from("/tmp"),
         )),
         Arc::from([]),
-        maki_lua::EventHandle::disconnected_for_test(),
+        handle,
         Arc::new(maki_config::ModelPolicy::default()),
     )
 }
@@ -5318,4 +5342,95 @@ fn bell_on_ask_predicate(needs_input: bool, ask: bool) {
     let mut app = test_app();
     app.ui_config.bell.ask = ask;
     assert_eq!(app.bell_on_ask(needs_input), needs_input && ask);
+}
+
+// ---- home-screen splash via the Lua plugin ----
+
+#[test]
+fn test_idle_splash_pulls_lua_frame() {
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let dir = StateDir::from_path(env::temp_dir());
+    let writer = Arc::new(test_writer(dir.clone()));
+    let mut app = build_app_with_handle(dir, writer, LuaCommandReader::empty(), handle);
+    rendered(&mut app); // assigns the splash area in view
+    let _ = app.tick(); // cadence is SMOOTH at startup => a frame is pulled
+    let frame = app.main_chat().splash_frame().expect("a frame was pulled");
+    let all: String = frame.rows.iter().map(|r| r.glyphs.as_str()).collect();
+    assert!(
+        all.contains("luna-maki"),
+        "idle splash renders the bundled logo"
+    );
+}
+
+#[test]
+fn test_splash_lifecycle_events() {
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    let dir = StateDir::from_path(env::temp_dir());
+    let writer = Arc::new(test_writer(dir.clone()));
+    let mut app = build_app_with_handle(dir, writer, LuaCommandReader::empty(), handle);
+
+    let _ = app.tick();
+    let ev = probe.try_recv_autocmd();
+    assert_eq!(
+        ev.as_ref().map(|(e, _)| e.as_str()),
+        Some("SplashShown"),
+        "startup: {ev:?}"
+    );
+
+    app.update(agent_msg(AgentEvent::TextDelta { text: "hi".into() }));
+    let _ = app.tick();
+    let ev = probe.try_recv_autocmd();
+    assert_eq!(
+        ev.as_ref().map(|(e, _)| e.as_str()),
+        Some("SplashHidden"),
+        "on message: {ev:?}"
+    );
+}
+
+#[test]
+fn test_splash_off_settles_idle() {
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let dir = StateDir::from_path(env::temp_dir());
+    let writer = Arc::new(test_writer(dir.clone()));
+    let ui = UiConfig {
+        splash_animation: false,
+        ..Default::default()
+    };
+    let mut app = build_app_with_full(dir, writer, LuaCommandReader::empty(), handle, ui);
+    rendered(&mut app); // start the entry fade
+    app.main_chat().advance_splash_past_fade();
+    let _ = app.tick(); // settle: fade over, still splash is IDLE
+    assert_eq!(
+        app.tick(),
+        Dirty::NO,
+        "settled still splash owes no repaint"
+    );
+}
+
+#[test]
+fn test_splash_still_repulls_once_on_version_change() {
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let dir = StateDir::from_path(env::temp_dir());
+    let writer = Arc::new(test_writer(dir.clone()));
+    let ui = UiConfig {
+        splash_animation: false,
+        ..Default::default()
+    };
+    let mut app = build_app_with_full(dir, writer, LuaCommandReader::empty(), handle, ui);
+    rendered(&mut app);
+    let _ = app.tick(); // consume SplashShown, pull the fading still frame
+    app.main_chat().advance_splash_past_fade();
+    let _ = app.tick(); // settle to IDLE, no further pulls
+
+    assert!(
+        crate::update::set_latest_for_test("9.9.9"),
+        "changed untouched by prior tests"
+    );
+    let _ = app.tick(); // newer version => exactly one forced repull
+    let frame = app.main_chat().splash_frame().expect("repulled frame");
+    let all: String = frame.rows.iter().map(|r| r.glyphs.as_str()).collect();
+    assert!(
+        all.contains("run maki update to get v9.9.9"),
+        "notice reached the settled still splash: {all}"
+    );
 }

@@ -1868,7 +1868,7 @@ impl App {
     /// see [`crate::repaint`] for why.
     pub fn tick(&mut self) -> Dirty {
         // `|` never short-circuits: every poller must run on every tick.
-        self.float_mgr.tick()
+        let mut dirty = self.float_mgr.tick()
             | self.tick_edge_scroll()
             | self.tick_error_expiry()
             | self.poll_image_paste()
@@ -1880,8 +1880,20 @@ impl App {
             | self.usage_modal.poll(&self.usage_slot)
             | self.hints.poll(self.hint_reader.load_full())
             | self.tick_file_picker()
-            | self.tick_file_completion()
-            | Dirty::any(self.chats.iter_mut().map(Chat::tick))
+            | self.tick_file_completion();
+        dirty |= self.tick_chats();
+        while let Some(shown) = self.chats[0].take_splash_event() {
+            dirty |= Dirty::YES;
+            self.fire_session_autocmd(
+                if shown { "SplashShown" } else { "SplashHidden" },
+                serde_json::json!({}),
+            );
+        }
+        dirty
+    }
+
+    fn tick_chats(&mut self) -> Dirty {
+        Dirty::any(self.chats.iter_mut().map(Chat::tick))
     }
 
     fn tick_file_picker(&mut self) -> Dirty {

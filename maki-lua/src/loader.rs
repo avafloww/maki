@@ -16,6 +16,7 @@ use crate::api::util::command::{HintReader, LuaCommandReader, UiAction};
 use crate::error::PluginError;
 use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
 use crate::runtime::{self, ClickFallback, LuaThread, Request, RestoreItem};
+use crate::splash::{SPLASH_PULL_TIMEOUT, SplashFrame};
 use maki_agent::prompt::ResolvedSlots;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -123,6 +124,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
     BundledPlugin {
         name: "list",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/list"),
+    },
+    BundledPlugin {
+        name: "splash",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/splash"),
     },
 ];
 
@@ -727,6 +732,43 @@ impl EventHandle {
         let _ = self.tx.try_send(Request::FireAutocmd {
             event: event.to_owned(),
             data,
+        });
+    }
+
+    /// Pull one `splash.render` frame from the live host. Bounded reply plus a
+    /// short `recv_timeout` keeps it non-hanging: a disconnected sender fails
+    /// at the send (timeout skipped) and a dead host simply times out.
+    /// High-frequency per-frame, hence the priority lane.
+    pub fn splash_frame(
+        &self,
+        width: u16,
+        height: u16,
+        elapsed_secs: f32,
+        fade: f32,
+    ) -> Option<SplashFrame> {
+        if self.tx.is_disconnected() && self.prio_tx.is_disconnected() {
+            return None;
+        }
+        let (reply_tx, reply_rx) = flume::bounded(1);
+        self.prio_tx
+            .try_send(Request::SplashFrame {
+                width,
+                height,
+                elapsed_secs,
+                fade,
+                reply: reply_tx,
+            })
+            .ok()?;
+        reply_rx.recv_timeout(SPLASH_PULL_TIMEOUT).ok().flatten()
+    }
+
+    /// Push fresh version/update info into the Lua-side `VersionStore` via the
+    /// priority lane so a frame pull queued right after sees it in channel
+    /// order. Only called when the reported version actually changes.
+    pub fn set_version(&self, current: &str, latest: Option<&str>) {
+        let _ = self.prio_tx.try_send(Request::SetVersion {
+            current: current.to_owned(),
+            latest: latest.map(str::to_owned),
         });
     }
 
