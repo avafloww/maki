@@ -53,30 +53,12 @@ fn build_app_with_handle(
     writer: Arc<StorageWriter>,
     handle: maki_lua::EventHandle,
 ) -> App {
-    let model = test_model();
-    App::new(
-        &model,
-        AppSession::new("test-model", "/tmp/test"),
+    build_app_with_full(
         dir,
-        Arc::new(ArcSwapOption::empty()),
-        McpSnapshotReader::empty(),
-        McpConfigErrors::new(PathBuf::new()),
-        LuaCommandReader::empty(),
-        KeymapReader::empty(),
-        HintReader::empty(),
         writer,
-        UiConfig::default(),
-        100,
-        Arc::new(PermissionManager::new(
-            PermissionsConfig {
-                rules: vec![],
-                ..Default::default()
-            },
-            PathBuf::from("/tmp"),
-        )),
-        Arc::from([]),
+        LuaCommandReader::empty(),
         handle,
-        Arc::new(maki_config::ModelPolicy::default()),
+        UiConfig::default(),
     )
 }
 
@@ -85,21 +67,13 @@ fn build_app_with_lua(
     writer: Arc<StorageWriter>,
     lua_commands: LuaCommandReader,
 ) -> App {
-    build_app_with_handle(
+    build_app_with_full(
         dir,
         writer,
         lua_commands,
         maki_lua::EventHandle::disconnected_for_test(),
+        UiConfig::default(),
     )
-}
-
-fn build_app_with_handle(
-    dir: StateDir,
-    writer: Arc<StorageWriter>,
-    lua_commands: LuaCommandReader,
-    handle: maki_lua::EventHandle,
-) -> App {
-    build_app_with_full(dir, writer, lua_commands, handle, UiConfig::default())
 }
 
 fn build_app_with_full(
@@ -5351,7 +5325,7 @@ fn test_idle_splash_pulls_lua_frame() {
     let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
     let dir = StateDir::from_path(env::temp_dir());
     let writer = Arc::new(test_writer(dir.clone()));
-    let mut app = build_app_with_handle(dir, writer, LuaCommandReader::empty(), handle);
+    let mut app = build_app_with_handle(dir, writer, handle);
     rendered(&mut app); // assigns the splash area in view
     // Cadence is SMOOTH at startup so ticks keep pulling; the first frame or
     // two can miss the pull timeout while the Lua JIT warms up, so loop.
@@ -5385,7 +5359,7 @@ fn test_splash_lifecycle_events() {
     let (handle, probe) = maki_lua::test_support::probed_event_handle();
     let dir = StateDir::from_path(env::temp_dir());
     let writer = Arc::new(test_writer(dir.clone()));
-    let mut app = build_app_with_handle(dir, writer, LuaCommandReader::empty(), handle);
+    let mut app = build_app_with_handle(dir, writer, handle);
 
     let _ = app.tick();
     let ev = probe.try_recv_autocmd();
