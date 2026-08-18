@@ -757,11 +757,10 @@ impl MessagesPanel {
         }
         let animating = self.idle_splash.cadence() == Cadence::SMOOTH;
         // Regular pulls follow the cadence (animate or entry fade), gated by
-        // dead-renderer suppression; a version change forces exactly one.
+        // dead-renderer suppression; a version change forces a repull.
         if !self.force_pull_once && !(animating && !self.splash_pull_suppressed) {
             return Dirty::NO;
         }
-        self.force_pull_once = false;
 
         let (t, fade) = self.idle_splash.frame_inputs();
         match self
@@ -771,6 +770,7 @@ impl MessagesPanel {
             maki_lua::SplashPull::Frame(frame) => {
                 self.idle_splash.set_frame(Some(frame));
                 self.splash_pull_suppressed = false;
+                self.force_pull_once = false;
                 Dirty::YES
             }
             // The renderer answered that it has nothing: treat it as dead and
@@ -778,10 +778,13 @@ impl MessagesPanel {
             maki_lua::SplashPull::Missing => {
                 self.splash_pull_suppressed = true;
                 self.idle_splash.set_frame(None);
+                self.force_pull_once = false;
                 Dirty::NO
             }
             // Still computing (cold JIT) or dead handle: keep any last frame
-            // and retry on the next cadence instead of suppressing.
+            // and retry on the next cadence instead of suppressing. A version
+            // change still owns its repull, so keep `force_pull_once` armed
+            // until a real frame actually lands.
             maki_lua::SplashPull::Unknown => Dirty::NO,
         }
     }

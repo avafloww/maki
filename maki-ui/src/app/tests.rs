@@ -5460,11 +5460,23 @@ fn test_splash_still_repulls_once_on_version_change() {
         crate::update::set_latest_for_test("9.9.9"),
         "changed untouched by prior tests"
     );
-    let _ = app.tick(); // newer version => exactly one forced repull
-    let frame = app.main_chat().splash_frame().expect("repulled frame");
-    let all: String = frame.rows.iter().map(|r| r.glyphs.as_str()).collect();
-    assert!(
-        all.contains("run maki update to get v9.9.9"),
-        "notice reached the settled still splash: {all}"
-    );
+    // A newer version forces a repull; a single pull can still come back
+    // `Unknown` under load (the force stays armed), so converge on the
+    // notice appearing rather than expecting the very first frame.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let _ = app.tick();
+        let frame = app.main_chat().splash_frame();
+        let all: String = frame
+            .map(|f| f.rows.iter().map(|r| r.glyphs.as_str()).collect())
+            .unwrap_or_default();
+        if all.contains("run maki update to get v9.9.9") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "notice never reached the settled still splash: {all}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
