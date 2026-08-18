@@ -156,7 +156,7 @@ end)
 drop into `~/.config/maki/lua/` and `require` to explore different home
 screens: a spinning pentagram, rising flowers, an ASCII printer, a perspective
 tunnel, shooting comets, and a wave banner. They work exactly like the example
-above. See [`examples/splash/README.md`](../../../examples/splash/README.md)
+above. See [`examples/splash/README.md`](../../../../examples/splash/README.md)
 for how to copy and switch between them.
 
 Two notes on writing overrides:
