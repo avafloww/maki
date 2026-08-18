@@ -562,7 +562,7 @@ fn submit_prompt_queues_while_streaming() {
     app.status = Status::Streaming;
     assert!(matches!(
         app.submit_prompt(queued_msg("hi")),
-        SubmitOutcome::Queued(_)
+        SubmitOutcome::Queued
     ));
     assert_eq!(app.queue.len(), 1);
 }
@@ -5158,7 +5158,7 @@ fn app_with_subagent_input_tx(id: &str) -> (App, flume::Receiver<String>) {
 fn submit_in_subagent_chat_routes_to_subagent_queue() {
     let (mut app, input_rx) = app_with_subagent_input_tx(TASK_ID);
     let outcome = app.submit_prompt(queued_msg("do more"));
-    assert!(matches!(outcome, SubmitOutcome::Queued(_)));
+    assert!(matches!(outcome, SubmitOutcome::Queued));
     assert_eq!(
         input_rx.try_recv().unwrap(),
         "do more",

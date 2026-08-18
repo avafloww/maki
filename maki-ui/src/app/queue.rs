@@ -16,7 +16,7 @@ pub(crate) const NO_SUBAGENT_ERR: &str = "subagent is no longer accepting messag
 
 pub(crate) enum SubmitOutcome {
     Started(Vec<Action>),
-    Queued(Vec<Action>),
+    Queued,
     Rejected(String),
 }
 
@@ -144,7 +144,7 @@ impl App {
         msg.text = expanded;
         if self.status == Status::Streaming {
             if self.queue_and_notify(msg) {
-                SubmitOutcome::Queued(vec![])
+                SubmitOutcome::Queued
             } else {
                 SubmitOutcome::Rejected(NO_QUEUE_ERR.into())
             }
@@ -158,7 +158,7 @@ impl App {
     pub(super) fn submit_or_queue(&mut self, msg: QueuedMessage) -> Vec<Action> {
         match self.submit_prompt(msg) {
             SubmitOutcome::Started(actions) => actions,
-            SubmitOutcome::Queued(actions) => actions,
+            SubmitOutcome::Queued => vec![],
             SubmitOutcome::Rejected(e) => {
                 self.flash(e);
                 vec![]
@@ -197,7 +197,7 @@ impl App {
         if input_tx.try_send(msg.text).is_err() {
             return SubmitOutcome::Rejected(NO_SUBAGENT_ERR.into());
         }
-        SubmitOutcome::Queued(vec![])
+        SubmitOutcome::Queued
     }
 
     /// Deferred path: the agent is busy, so park the message and let
