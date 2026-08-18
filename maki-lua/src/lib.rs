@@ -31,7 +31,7 @@ pub mod test_support {
     use crate::api::util::command::{
         HintEntries, HintReader, HintWriter, LuaCommandInfo, LuaCommandReader, LuaCommandWriter,
     };
-use crate::{EventHandle, KeymapReader, PluginHost, TestCompletionBackend};
+    use crate::{EventHandle, KeymapReader, PluginHost, TestCompletionBackend};
 
     pub struct LuaCommandWriterHandle(LuaCommandWriter);
 
