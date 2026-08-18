@@ -5,8 +5,11 @@ use mlua::{Lua, Result as LuaResult, Table, Value};
 use crate::docs::FnDoc;
 
 /// Max time the UI waits for a splash frame from the host. The pull is
-/// best-effort: a dead or bogged-down renderer never freezes a frame.
-pub const SPLASH_PULL_TIMEOUT: Duration = Duration::from_millis(8);
+/// best-effort: a dead or bogged-down renderer never freezes a frame. It
+/// blocks at most this long only when the host is slow (a fast host replies
+/// immediately), so a generous value keeps a load-starved Lua host from
+/// failing a frame without slowing the common case.
+pub const SPLASH_PULL_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Style of one splash segment. `Field` keeps the fixed `" .:+*"` LUT so the
 /// bundled starfield is one segment per background row with no per-cell hex.

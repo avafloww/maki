@@ -2048,6 +2048,7 @@ mod tests {
     use tempfile::TempDir;
     use test_case::test_case;
 
+    #[cfg(unix)]
     fn plugin_enabled(enabled: bool) -> PluginFileConfig {
         PluginFileConfig {
             enabled: Some(enabled),

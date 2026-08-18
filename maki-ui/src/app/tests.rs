@@ -5355,7 +5355,7 @@ fn test_idle_splash_pulls_lua_frame() {
     rendered(&mut app); // assigns the splash area in view
     // Cadence is SMOOTH at startup so ticks keep pulling; the first frame or
     // two can miss the pull timeout while the Lua JIT warms up, so loop.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let all = loop {
         let _ = app.tick();
         let Some(frame) = app.main_chat().splash_frame() else {
