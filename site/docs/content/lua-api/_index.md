@@ -147,6 +147,27 @@ maki.split("x*y*z", "*", { plain = true }) -- { "x", "y", "z" }
 maki.split("\nhello\nworld\n", "\n", { trimempty = true }) -- { "hello", "world" }
 ```
 
+---
+
+### `maki.version()` {#maki-version}
+
+```lua
+maki.version()
+```
+
+Read the current maki version and, if the built-in update check found one, the newer version. Rust owns the update check; plugins only mirror it, so the version text and update notice belong to whoever draws them.
+
+**Returns:** (`table`) { current = string, latest = string|nil, update_available = boolean }
+
+**Example:**
+
+```lua
+local v = maki.version()
+if v.update_available then
+  print("run maki update to get v" .. v.latest)
+end
+```
+
 
 ## maki.api {#maki-api}
 
@@ -561,9 +582,9 @@ Listen for one or more events. Returns an id you can pass to
 `del_autocmd` later to remove the listener.
 
 Built-in events fired by the host: `"TurnStart"`, `"TurnEnd"`,
-`"TurnError"`, `"ToolStart"`, `"ToolDone"`, `"SessionReset"`, and
-`"SessionFocusChanged"`. Plugins can also fire their own events with
-`exec_autocmds`.
+`"TurnError"`, `"ToolStart"`, `"ToolDone"`, `"SessionReset"`,
+`"SessionFocusChanged"`, `"SplashShown"`, and `"SplashHidden"`. Plugins can
+also fire their own events with `exec_autocmds`.
 
 Each host event carries `data.session_id`. For `"SessionReset"` that
 is the session being left behind; the other events name the session now
