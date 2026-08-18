@@ -32,17 +32,19 @@ Maki is an AI coding agent (like Claude Code and opencode), that is built bottom
 
 ## Testing
 
-- cargo clippy --all --tests -- -D warnings
-- cargo nextest run --workspace
+Cheapest first, and scope to the crate you touched while iterating:
+
+- `just check` (or `cargo check -p <crate> --tests`)
+- `just lint` - `cargo clippy --all --tests -- -D warnings`
+- `just test` - `cargo nextest run --workspace`
 
 Read `justfile` for more.
 
+Dev builds skip debug info for deps and vendored C (our crates keep it); to debug into a dep set `[profile.dev.package.<name>] debug = true`.
+
 ## Nix
 
-- `nix build` — build the project in a sandboxed environment
-- `nix develop` — enter the dev shell (Rust toolchain, formatters, CLI tools)
-- `nix fmt` — format all `.nix` files with `nixfmt`
-- `nix flake check` — run all flake checks (including git-dep-hashes drift detection)
+`nix develop` (dev shell; exports `OPENSSL_NO_VENDOR`, saves ~80s cold build - export it yourself outside the shell if you have libssl-dev), `nix build`, `nix fmt` (nixfmt), `nix flake check` (includes git-dep-hashes drift).
 
 ## Architecture
 
