@@ -505,13 +505,7 @@ Returns its candidates as an array of `{ label, kind, insertion, description? }`
 
 **Parameters:**
 
-- `{prefix}` (`string`) The prefix this source owns (e.g. "skill"). Labels
-
-  typically carry the prefix (`skill:review`) so the unified fuzzy filter
-
-
-  narrows by kind as the user types.
-
+- `{prefix}` (`string`) The prefix this source owns (e.g. "skill"); labels typically carry the prefix (`skill:review`) so the fuzzy filter narrows by kind as the user types.
 - `{spec}` (`table`) `{ get_items = function(ctx) -> { {label, kind, insertion, description?} } }`.
 
 **Example:**

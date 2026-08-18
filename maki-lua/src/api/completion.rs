@@ -72,9 +72,7 @@ fn install_store<T: Default + Send + Sync + 'static>(lua: &Lua) {
 /// called once when the `@` popup opens; `ctx` is `{ mode = "...", models = {...} }`.
 /// Returns its candidates as an array of `{ label, kind, insertion, description? }`.
 ///
-/// @param prefix string The prefix this source owns (e.g. "skill"). Labels
-///   typically carry the prefix (`skill:review`) so the unified fuzzy filter
-///   narrows by kind as the user types.
+/// @param prefix string The prefix this source owns (e.g. "skill"); labels typically carry the prefix (`skill:review`) so the fuzzy filter narrows by kind as the user types.
 /// @param spec table `{ get_items = function(ctx) -> { {label, kind, insertion, description?} } }`.
 /// @return
 /// @example
