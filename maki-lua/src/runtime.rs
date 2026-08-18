@@ -2552,6 +2552,48 @@ pub(crate) struct LuaThread {
     pub modes: Arc<maki_agent::ModeRegistry>,
 }
 
+/// Pulls one `splash.render` frame. The shared Lua keeps the last task's
+/// handle in app_data, so the slot call runs under a fresh detached scope:
+/// a stale cancelled handle (a turn reset mid-flight) would otherwise let
+/// the watchdog interrupt the render and the UI would read the raise as a
+/// missing renderer.
+fn splash_frame(
+    lua: &Lua,
+    width: u16,
+    height: u16,
+    elapsed_secs: f32,
+    fade: f32,
+) -> Option<crate::splash::SplashFrame> {
+    let args = mlua::MultiValue::from_vec(vec![
+        LuaValue::Integer(width as i64),
+        LuaValue::Integer(height as i64),
+        LuaValue::Number(elapsed_secs as f64),
+        LuaValue::Number(fade as f64),
+    ]);
+    let scope = TaskScope::detached(lua);
+    let frame: Option<crate::splash::SplashFrame> =
+        match crate::api::slot::invoke_slot_from_host(lua, "splash.render", args) {
+            Err(e) => {
+                tracing::warn!(error = %e, "splash.render failed");
+                None
+            }
+            Ok(mv) => mv.into_iter().next().and_then(|v| {
+                if matches!(v, LuaValue::Nil) {
+                    return None;
+                }
+                match crate::splash::frame_from_lua(v, width, height) {
+                    Ok(f) => Some(f),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "splash.render bad frame");
+                        None
+                    }
+                }
+            }),
+        };
+    drop(scope);
+    frame
+}
+
 /// Lua lives on its own OS thread (no Send needed). `smol::block_on`
 /// drives async, load/clear requests wait for in-flight tools.
 pub fn spawn(
@@ -2870,37 +2912,7 @@ pub fn spawn(
                             fade,
                             reply,
                         } => {
-                            let args = mlua::MultiValue::from_vec(vec![
-                                LuaValue::Integer(width as i64),
-                                LuaValue::Integer(height as i64),
-                                LuaValue::Number(elapsed_secs as f64),
-                                LuaValue::Number(fade as f64),
-                            ]);
-                            let frame: Option<crate::splash::SplashFrame> =
-                                match crate::api::slot::invoke_slot_from_host(
-                                    &rt.lua,
-                                    "splash.render",
-                                    args,
-                                ) {
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "splash.render failed");
-                                        None
-                                    }
-                                    Ok(mv) => mv.into_iter().next().and_then(|v| {
-                                        if matches!(v, LuaValue::Nil) {
-                                            return None;
-                                        }
-                                        match crate::splash::frame_from_lua(
-                                            v, width, height,
-                                        ) {
-                                            Ok(f) => Some(f),
-                                            Err(e) => {
-                                                tracing::warn!(error = %e, "splash.render bad frame");
-                                                None
-                                            }
-                                        }
-                                    }),
-                                };
+                            let frame = splash_frame(&rt.lua, width, height, elapsed_secs, fade);
                             let _ = reply.send(frame);
                         }
                         Request::SetVersion { current, latest } => {
@@ -4107,6 +4119,47 @@ mod tests {
         drop(scope);
 
         assert!(result.unwrap());
+    }
+
+    /// Session reset mid-turn leaves the cancelled handle of the doomed tool
+    /// task in app_data (scopes restore their captured prev). The splash pull
+    /// is the hot host-side slot call; unscoped, the watchdog interrupts the
+    /// render and the UI reads the raise as a missing renderer, suppressing
+    /// the splash on the fresh empty session.
+    #[test]
+    fn splash_frame_survives_a_stale_cancelled_handle() {
+        let (lua, _watchdog) = watchdog_lua(false);
+        lua.set_app_data(crate::api::slot::SlotStore::default());
+        let render = lua
+            .load(
+                // Long enough that a watchdog poke is armed while the slot
+                // runs; the armed one-shot then kills at the first safepoint
+                // if the call sits under the doomed handle.
+                "local t = os.clock() while os.clock() - t < 0.1 do end \
+                 return { { { glyphs = 'maki', style = '#ffffff' } } }",
+            )
+            .into_function()
+            .unwrap();
+        {
+            let mut store = lua.app_data_mut::<crate::api::slot::SlotStore>().unwrap();
+            store.slots.insert(
+                "splash.render".to_owned(),
+                crate::api::slot::SlotEntry {
+                    owner: Some(Arc::from("splash")),
+                    default: Some(render),
+                    layers: Vec::new(),
+                },
+            );
+        }
+        let handle = cancelled_handle();
+        lua.set_app_data::<TaskHandle>(Arc::clone(&handle));
+        lock_cell(&handle).kill_at.set(Some(Instant::now()));
+
+        let frame = splash_frame(&lua, 80, 24, 0.0, 1.0);
+        assert!(
+            frame.is_some(),
+            "watchdog killed the render under the stale handle"
+        );
     }
 
     #[test]
