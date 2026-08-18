@@ -53,30 +53,12 @@ fn build_app_with_handle(
     writer: Arc<StorageWriter>,
     handle: maki_lua::EventHandle,
 ) -> App {
-    let model = test_model();
-    App::new(
-        &model,
-        AppSession::new("test-model", "/tmp/test"),
+    build_app_with_full(
         dir,
-        Arc::new(ArcSwapOption::empty()),
-        McpSnapshotReader::empty(),
-        McpConfigErrors::new(PathBuf::new()),
-        LuaCommandReader::empty(),
-        KeymapReader::empty(),
-        HintReader::empty(),
         writer,
-        UiConfig::default(),
-        100,
-        Arc::new(PermissionManager::new(
-            PermissionsConfig {
-                rules: vec![],
-                ..Default::default()
-            },
-            PathBuf::from("/tmp"),
-        )),
-        Arc::from([]),
+        LuaCommandReader::empty(),
         handle,
-        Arc::new(maki_config::ModelPolicy::default()),
+        UiConfig::default(),
     )
 }
 
@@ -84,6 +66,22 @@ fn build_app_with_lua(
     dir: StateDir,
     writer: Arc<StorageWriter>,
     lua_commands: LuaCommandReader,
+) -> App {
+    build_app_with_full(
+        dir,
+        writer,
+        lua_commands,
+        maki_lua::EventHandle::disconnected_for_test(),
+        UiConfig::default(),
+    )
+}
+
+fn build_app_with_full(
+    dir: StateDir,
+    writer: Arc<StorageWriter>,
+    lua_commands: LuaCommandReader,
+    handle: maki_lua::EventHandle,
+    ui: UiConfig,
 ) -> App {
     let model = test_model();
     App::new(
@@ -97,7 +95,7 @@ fn build_app_with_lua(
         KeymapReader::empty(),
         HintReader::empty(),
         writer,
-        UiConfig::default(),
+        ui,
         100,
         Arc::new(PermissionManager::new(
             PermissionsConfig {
@@ -107,7 +105,7 @@ fn build_app_with_lua(
             PathBuf::from("/tmp"),
         )),
         Arc::from([]),
-        maki_lua::EventHandle::disconnected_for_test(),
+        handle,
         Arc::new(maki_config::ModelPolicy::default()),
     )
 }
@@ -5318,4 +5316,141 @@ fn bell_on_ask_predicate(needs_input: bool, ask: bool) {
     let mut app = test_app();
     app.ui_config.bell.ask = ask;
     assert_eq!(app.bell_on_ask(needs_input), needs_input && ask);
+}
+
+// ---- home-screen splash via the Lua plugin ----
+
+#[test]
+fn test_idle_splash_pulls_lua_frame() {
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let dir = StateDir::from_path(env::temp_dir());
+    let writer = Arc::new(test_writer(dir.clone()));
+    let mut app = build_app_with_handle(dir, writer, handle);
+    rendered(&mut app); // assigns the splash area in view
+    // Cadence is SMOOTH at startup so ticks keep pulling; the first frame or
+    // two can miss the pull timeout while the Lua JIT warms up, so loop.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let all = loop {
+        let _ = app.tick();
+        let Some(frame) = app.main_chat().splash_frame() else {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no splash frame pulled"
+            );
+            continue;
+        };
+        let all: String = frame.rows.iter().map(|r| r.glyphs.as_str()).collect();
+        if all.contains("luna-maki") {
+            break all;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "idle splash missed the logo"
+        );
+    };
+    assert!(
+        all.contains("luna-maki"),
+        "idle splash renders the bundled logo"
+    );
+}
+
+#[test]
+fn test_splash_lifecycle_events() {
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    let dir = StateDir::from_path(env::temp_dir());
+    let writer = Arc::new(test_writer(dir.clone()));
+    let mut app = build_app_with_handle(dir, writer, handle);
+
+    let _ = app.tick();
+    let ev = probe.try_recv_autocmd();
+    assert_eq!(
+        ev.as_ref().map(|(e, _)| e.as_str()),
+        Some("SplashShown"),
+        "startup: {ev:?}"
+    );
+
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    app.update(agent_msg(AgentEvent::TextDelta { text: "hi".into() }));
+    let _ = app.tick();
+    let ev = probe.try_recv_autocmd();
+    assert_eq!(
+        ev.as_ref().map(|(e, _)| e.as_str()),
+        Some("SplashHidden"),
+        "on message: {ev:?}"
+    );
+}
+
+#[test]
+fn test_splash_off_settles_idle() {
+    // A still splash only ever animates during its entry fade; after that the
+    // cadence is IDLE and no frame is owed. Use a disconnected handle so this
+    // test is about the cadence/tick, not host behavior (and immune to the
+    // parallel version-change test that bumps the shared update global).
+    let (handle, _guard) = (maki_lua::EventHandle::disconnected_for_test(), ());
+    let dir = StateDir::from_path(env::temp_dir());
+    let writer = Arc::new(test_writer(dir.clone()));
+    let ui = UiConfig {
+        splash_animation: false,
+        ..Default::default()
+    };
+    let mut app = build_app_with_full(dir, writer, LuaCommandReader::empty(), handle, ui);
+    rendered(&mut app); // start the entry fade
+    app.main_chat().advance_splash_past_fade();
+    let _ = app.tick(); // settle: fade over, still splash is IDLE
+    assert_eq!(
+        app.tick(),
+        Dirty::NO,
+        "settled still splash owes no repaint"
+    );
+}
+
+#[test]
+fn test_splash_still_repulls_once_on_version_change() {
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let dir = StateDir::from_path(env::temp_dir());
+    let writer = Arc::new(test_writer(dir.clone()));
+    let ui = UiConfig {
+        splash_animation: false,
+        ..Default::default()
+    };
+    let mut app = build_app_with_full(dir, writer, LuaCommandReader::empty(), handle.clone(), ui);
+    // Warm the Lua JIT so the still-splash pull and the forced repull below
+    // fit inside the pull timeout even under parallel test load.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while handle.splash_frame(80, 20, 0.0, 1.0).is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "splash never warmed up"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    rendered(&mut app);
+    let _ = app.tick(); // consume SplashShown, pull the fading still frame
+    app.main_chat().advance_splash_past_fade();
+    let _ = app.tick(); // settle to IDLE, no further pulls
+
+    assert!(
+        crate::update::set_latest_for_test("9.9.9"),
+        "changed untouched by prior tests"
+    );
+    // A newer version forces a repull; a single pull can still come back
+    // `Unknown` under load (the force stays armed), so converge on the
+    // notice appearing rather than expecting the very first frame.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let _ = app.tick();
+        let frame = app.main_chat().splash_frame();
+        let all: String = frame
+            .map(|f| f.rows.iter().map(|r| r.glyphs.as_str()).collect())
+            .unwrap_or_default();
+        if all.contains("run maki update to get v9.9.9") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "notice never reached the settled still splash: {all}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }

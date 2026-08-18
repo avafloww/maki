@@ -90,6 +90,7 @@ pub(crate) fn create_maki_global(
         "keymap",
         keymap::create_keymap_table(lua, Arc::clone(&plugin))?,
     )?;
+    crate::splash::register_version_api(lua, &maki)?;
 
     Ok(maki)
 }

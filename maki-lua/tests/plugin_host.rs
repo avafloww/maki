@@ -4142,3 +4142,156 @@ mod read_tool_required_params {
         );
     }
 }
+
+// ---- splash plugin (home-screen) ----
+
+fn wait_for_splash_text(handle: &maki_lua::EventHandle, needle: &str) -> maki_lua::SplashFrame {
+    // Each timed-out pull leaves a render queued on the host, so a tight loop
+    // floods its request channel and starves it (especially during JIT warmup).
+    // Back off so the host drains the backlog and a warm frame fits the pull
+    // timeout even under heavy parallel test load.
+    const DEADLINE: Duration = Duration::from_secs(30);
+    const BACKOFF: Duration = Duration::from_millis(100);
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(frame) = handle.splash_frame(80, 20, 10.0, 1.0) {
+            let all: String = frame.rows.iter().map(|r| r.glyphs.as_str()).collect();
+            if all.contains(needle) {
+                return frame;
+            }
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "splash never contained '{needle}'"
+        );
+        std::thread::sleep(BACKOFF);
+    }
+}
+
+fn frame_has_text(frame: &maki_lua::SplashFrame, needle: &str) -> bool {
+    frame
+        .rows
+        .iter()
+        .any(|r| matches!(r.style, maki_lua::SplashStyle::Rgba { .. }) && r.glyphs.contains(needle))
+}
+
+#[test]
+fn test_splash_host_boots_and_serves_frames() {
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let frame = wait_for_splash_text(&handle, "luna-maki");
+    assert_eq!(frame.width, 80);
+    assert_eq!(frame.height, 20);
+    assert!(!frame.rows.is_empty(), "frame has rows");
+}
+
+#[test]
+fn test_splash_slot_default() {
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    handle.set_version("0.4.8-luna", None);
+    let frame = wait_for_splash_text(&handle, "luna-maki");
+    assert!(frame_has_text(&frame, "luna-maki"), "{frame:?}");
+    assert!(
+        frame_has_text(&frame, "v0.4.8-luna"),
+        "version current in default rows"
+    );
+    assert!(
+        frame
+            .rows
+            .iter()
+            .any(|r| r.style == maki_lua::SplashStyle::Field),
+        "background is field-style"
+    );
+
+    // A newer version pushed into the Lua store surfaces as the update notice.
+    handle.set_version("0.4.8-luna", Some("9.9.9"));
+    let frame = wait_for_splash_text(&handle, "run maki update to get v9.9.9");
+    assert!(frame_has_text(&frame, "0.4.8-luna"), "still shows current");
+}
+
+#[test]
+fn test_splash_slot_override() {
+    let (handle, guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    guard
+        .host()
+        .load_source(
+            "matrix",
+            r##"
+maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
+  local rows = {}
+  for i = 1, h do
+    rows[i] = { { glyphs = string.rep("x", w), style = "#00ff41" } }
+  end
+  return rows
+end)
+"##,
+        )
+        .unwrap();
+    let frame = loop {
+        if let Some(f) = handle.splash_frame(80, 20, 0.0, 1.0) {
+            break f;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        frame
+            .rows
+            .iter()
+            .all(|r| r.glyphs.chars().all(|c| c == 'x')),
+        "override replaces the whole screen"
+    );
+    assert!(
+        frame
+            .rows
+            .iter()
+            .any(|r| matches!(r.style, maki_lua::SplashStyle::Hex(0, 0xff, 0x41))),
+        "green override style present"
+    );
+}
+
+#[test]
+fn test_splash_renderer_error_suppresses() {
+    let (handle, guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    guard
+        .host()
+        .load_source(
+            "broken_splash",
+            r#"
+maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
+  return "not a table"
+end)
+"#,
+        )
+        .unwrap();
+    assert!(
+        handle.splash_frame(80, 20, 0.0, 1.0).is_none(),
+        "a failing renderer yields no frame"
+    );
+}
+
+#[test]
+fn test_version_api() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let handle = host.event_handle();
+    host.load_source(
+        "vprobe",
+        r#"
+maki.api.register_tool({
+  name = "vprobe",
+  description = "probe maki.version",
+  schema = { type = "object", properties = {}, additionalProperties = false },
+  handler = function()
+    local v = maki.version()
+    return string.format("%s|%s|%s", v.current, v.latest or "nil", tostring(v.update_available))
+  end,
+})
+"#,
+    )
+    .unwrap();
+    let out = exec_tool(&reg, "vprobe", json!({})).unwrap();
+    assert!(out.contains("|nil|false"), "unset store: {out}");
+
+    handle.set_version("1.2.3", Some("9.9.9"));
+    let out = exec_tool(&reg, "vprobe", json!({})).unwrap();
+    assert_eq!(out, "1.2.3|9.9.9|true", "set store: {out}");
+}

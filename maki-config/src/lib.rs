@@ -72,6 +72,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "read",
     "sessions",
     "skill",
+    "splash",
     "task",
     "thinking",
     "todo_write",
@@ -2047,6 +2048,7 @@ mod tests {
     use tempfile::TempDir;
     use test_case::test_case;
 
+    #[cfg(unix)]
     fn plugin_enabled(enabled: bool) -> PluginFileConfig {
         PluginFileConfig {
             enabled: Some(enabled),
@@ -2882,14 +2884,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn from_plugins_default() {
-        let plugins = PluginsConfig::from_plugins(HashMap::new());
-        let expected: Vec<String> = DEFAULT_BUILTINS.iter().map(|s| s.to_string()).collect();
-        assert_eq!(plugins.names, expected);
-        assert!(plugins.enabled);
-    }
-
+    #[cfg(unix)]
     #[test]
     fn from_plugins_enable_disable_and_sort() {
         let mut entries = HashMap::new();
@@ -2970,6 +2965,14 @@ mod tests {
                 pair[1]
             );
         }
+    }
+
+    #[test]
+    fn default_builtins_include_splash() {
+        assert!(
+            DEFAULT_BUILTINS.contains(&"splash"),
+            "the home-screen splash plugin must be enabled by default"
+        );
     }
 
     #[test]

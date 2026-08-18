@@ -24,3 +24,10 @@ pub fn spawn_check() {
     })
     .detach();
 }
+
+/// Test-only: plant a reported latest version to drive the "still splash
+/// repaints once on a newer version" regression check. `OnceLock` sets once.
+#[cfg(test)]
+pub fn set_latest_for_test(v: &'static str) -> bool {
+    LATEST.set(v.to_owned()).is_ok()
+}

@@ -231,6 +231,20 @@ impl Chat {
         self.messages_panel.tick()
     }
 
+    pub fn take_splash_event(&mut self) -> Option<bool> {
+        self.messages_panel.take_splash_event()
+    }
+
+    #[doc(hidden)]
+    pub fn splash_frame(&self) -> Option<&maki_lua::SplashFrame> {
+        self.messages_panel.splash_frame()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn advance_splash_past_fade(&mut self) {
+        self.messages_panel.advance_splash_past_fade();
+    }
+
     pub fn cadence(&self) -> Cadence {
         self.messages_panel.cadence()
     }

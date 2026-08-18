@@ -163,6 +163,16 @@ fn make_callable(lua: &Lua, name: String) -> LuaResult<Function> {
     })
 }
 
+/// Invoke a slot from the Rust host side (no user-provided `prev`). Used by
+/// the runtime request handler to pull a `splash.render` frame.
+pub(crate) fn invoke_slot_from_host(
+    lua: &Lua,
+    name: &str,
+    args: MultiValue,
+) -> LuaResult<MultiValue> {
+    make_callable(lua, name.to_owned())?.call(args)
+}
+
 /// Create a named extension point owned by your plugin. You provide a
 /// {default} function, and other plugins can wrap it with layers using
 /// `set_slot`. The returned callable runs the full chain: outermost

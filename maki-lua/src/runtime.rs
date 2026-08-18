@@ -22,6 +22,8 @@ use maki_agent::tools::{
 };
 use maki_agent::{BufferSnapshot, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle};
 use mlua::{Chunk, ChunkMode, Compiler, Function, Lua, RegistryKey, Table, Value as LuaValue, ffi};
+
+use crate::splash::SplashFrame;
 use serde_json::Value;
 
 use maki_config::RawConfig;
@@ -184,6 +186,23 @@ pub enum Request {
     FireAutocmd {
         event: String,
         data: Value,
+    },
+    /// Host-driven pull of the `splash.render` slot. Non-blocking: the host
+    /// `recv_timeout`s on `reply` (`SPLASH_PULL_TIMEOUT`) and gives up on a
+    /// dead renderer. Route on the priority lane so a queued bulk restore
+    /// never delays a frame.
+    SplashFrame {
+        width: u16,
+        height: u16,
+        elapsed_secs: f32,
+        fade: f32,
+        reply: flume::Sender<Option<SplashFrame>>,
+    },
+    /// Push fresh version/update info into the Lua-side `VersionStore`, read
+    /// back by plugins via `maki.version()`. Low-frequency (only on change).
+    SetVersion {
+        current: String,
+        latest: Option<String>,
     },
     ClickTool {
         tool_use_id: String,
@@ -1422,6 +1441,7 @@ impl LuaRuntime {
         lua.set_app_data(PluginOptionSpecs::default());
         lua.set_app_data(AutocmdStore::default());
         lua.set_app_data(SlotStore::default());
+        lua.set_app_data(crate::splash::VersionInfo::default());
         lua.set_app_data(KeymapStore::new());
         lua.set_app_data(keymap_writer);
         lua.set_app_data(HintStore::new());
@@ -2841,6 +2861,52 @@ pub fn spawn(
                             crate::api::autocmd::dispatch(&rt.lua, &event, None, data);
                             if event == TURN_END_EVENT {
                                 rt.lua.gc_collect().ok();
+                            }
+                        }
+                        Request::SplashFrame {
+                            width,
+                            height,
+                            elapsed_secs,
+                            fade,
+                            reply,
+                        } => {
+                            let args = mlua::MultiValue::from_vec(vec![
+                                LuaValue::Integer(width as i64),
+                                LuaValue::Integer(height as i64),
+                                LuaValue::Number(elapsed_secs as f64),
+                                LuaValue::Number(fade as f64),
+                            ]);
+                            let frame: Option<crate::splash::SplashFrame> =
+                                match crate::api::slot::invoke_slot_from_host(
+                                    &rt.lua,
+                                    "splash.render",
+                                    args,
+                                ) {
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "splash.render failed");
+                                        None
+                                    }
+                                    Ok(mv) => mv.into_iter().next().and_then(|v| {
+                                        if matches!(v, LuaValue::Nil) {
+                                            return None;
+                                        }
+                                        match crate::splash::frame_from_lua(
+                                            v, width, height,
+                                        ) {
+                                            Ok(f) => Some(f),
+                                            Err(e) => {
+                                                tracing::warn!(error = %e, "splash.render bad frame");
+                                                None
+                                            }
+                                        }
+                                    }),
+                                };
+                            let _ = reply.send(frame);
+                        }
+                        Request::SetVersion { current, latest } => {
+                            if let Some(mut info) = rt.lua.app_data_mut::<crate::splash::VersionInfo>() {
+                                info.current = current;
+                                info.latest = latest;
                             }
                         }
                         Request::Describe {
