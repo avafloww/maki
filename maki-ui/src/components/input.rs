@@ -1318,7 +1318,7 @@ mod tests {
     #[test]
     fn at_token_spans_none_when_no_tokens() {
         let labels = labels_for(&["skill:committing"]);
-        for line in ["hello world", "foo@bar", "@skill", "@skill:"] {
+        for line in ["hello world", "foo@bar", "@skill:"] {
             assert!(
                 at_token_spans(line, &labels, AT_KNOWN_STYLE, AT_UNKNOWN_STYLE).is_none(),
                 "{line}"

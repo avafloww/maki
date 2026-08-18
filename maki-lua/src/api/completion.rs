@@ -137,8 +137,9 @@ lua_table! {
     ]
 }
 
-/// A parsed `@prefix:value` token: the lowercase prefix, the value, and its
-/// byte range in the source text (including the leading `@`).
+/// A parsed `@` reference token: the lowercase prefix (empty for file
+/// references like `@src/main.rs`), the value, and its byte range in the
+/// source text (including the leading `@`).
 pub struct AtToken {
     pub prefix: String,
     pub value: String,
@@ -146,8 +147,9 @@ pub struct AtToken {
 }
 
 /// Scan `text` for `@`-tokens at token boundaries. A token is `@prefix:value`
-/// running to the next whitespace; tokens without a `:` or an empty value are
-/// not references and are skipped here (they pass through unchanged).
+/// running to the next whitespace; a token without a `:` is a file reference
+/// (empty prefix). An empty value (e.g. `@skill:`) is not a reference yet and
+/// is skipped.
 pub fn parse_at_tokens(text: &str) -> Vec<AtToken> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -163,12 +165,19 @@ pub fn parse_at_tokens(text: &str) -> Vec<AtToken> {
                 }
                 j += cc.len_utf8();
             }
-            if let Some((prefix, value)) = text[start + 1..j].split_once(':')
+            let content = &text[start + 1..j];
+            if let Some((prefix, value)) = content.split_once(':')
                 && !value.is_empty()
             {
                 out.push(AtToken {
                     prefix: prefix.to_ascii_lowercase(),
                     value: value.to_string(),
+                    range: start..j,
+                });
+            } else if !content.contains(':') {
+                out.push(AtToken {
+                    prefix: String::new(),
+                    value: content.to_string(),
                     range: start..j,
                 });
             }
@@ -202,11 +211,12 @@ fn pair_from_multivalue(mv: MultiValue) -> Pair<String> {
     (value, err)
 }
 
-/// Rewrite `text` by dispatching each `@prefix:value` token to its registered
-/// expander. Recognized tokens are replaced in-place with the returned string;
-/// unknown prefixes pass through verbatim. The first expander `Err` aborts and
-/// is surfaced to the user as a flash. Async because expanders may call
-/// yield-bridged FFI (e.g. `maki.fs`); callers must be a Lua task scope.
+/// Rewrite `text` by dispatching each `@` reference token to the expander
+/// registered for its prefix. Recognized tokens are replaced in place with the
+/// returned string; unknown prefixes and file references (empty prefix) pass
+/// through verbatim. The first expander `Err` aborts and is surfaced to the
+/// user as a flash. Async because expanders may call yield-bridged FFI (e.g.
+/// `maki.fs`); callers must be a Lua task scope.
 pub(crate) async fn expand_references(lua: &Lua, text: &str) -> Result<String, String> {
     let tokens = parse_at_tokens(text);
     if tokens.is_empty() {
@@ -404,6 +414,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_file_reference_has_empty_prefix() {
+        let tokens = parse_at_tokens("read @src/main.rs and @/abs/path ok");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].prefix, "");
+        assert_eq!(tokens[0].value, "src/main.rs");
+        assert_eq!(tokens[0].range, 5..17);
+        assert_eq!(tokens[1].prefix, "");
+        assert_eq!(tokens[1].value, "/abs/path");
+    }
+
+    #[test]
     fn expand_in_place_replacement() {
         let lua = lua_with_stores();
         register_expander(&lua, "subagent", |v| {
@@ -427,6 +448,16 @@ mod tests {
         assert_eq!(
             smol::block_on(expand_references(&lua, "foo@bar @nothing:whatever fix it")).unwrap(),
             "foo@bar @nothing:whatever fix it"
+        );
+    }
+
+    #[test]
+    fn expand_file_reference_passes_through() {
+        let lua = lua_with_stores();
+        register_expander(&lua, "skill", |v| (Some(format!("<skill:{v}>")), None));
+        assert_eq!(
+            smol::block_on(expand_references(&lua, "@src/main.rs @skill:rev")).unwrap(),
+            "@src/main.rs <skill:rev>"
         );
     }
 
