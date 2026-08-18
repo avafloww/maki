@@ -101,8 +101,10 @@ pub enum CompletionAction {
 struct Session {
     nucleo: Nucleo<()>,
     matcher: Matcher,
-    /// The current query, kept so the file and ref pipelines compute
-    /// highlight indices through one shared implementation.
+    /// The current query, lowercased. Kept so the file and ref pipelines
+    /// compute highlight indices through one shared implementation. The
+    /// matcher is case-insensitive and contractually requires a lowercase
+    /// needle; an uppercase needle panics in its optimal path.
     query: String,
     /// Non-file candidates from Lua sources, as `(matchable label, item)`.
     /// Re-fuzzy-matched against each new query in `sync_query`.
@@ -175,7 +177,7 @@ impl FileCompletionMenu {
         let session = Session {
             nucleo,
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
-            query: query.to_string(),
+            query: String::new(),
             ref_items,
             ref_matches: Vec::new(),
             file_matches: Vec::new(),
@@ -236,11 +238,11 @@ impl FileCompletionMenu {
         s.nucleo
             .pattern
             .reparse(0, query, CaseMatching::Smart, Normalization::Smart, false);
-        s.query = query.to_string();
+        s.query = query.to_lowercase();
         s.selected = 0;
         s.scroll_offset = 0;
 
-        s.ref_matches = fuzzy_match(&mut s.matcher, query, s.ref_items.iter().cloned());
+        s.ref_matches = fuzzy_match(&mut s.matcher, &s.query, s.ref_items.iter().cloned());
         rebuild_combined(s);
     }
 
@@ -394,7 +396,8 @@ impl FileCompletionMenu {
 /// Character indices of `query` fuzzy-matched within `label`, for
 /// highlighting. `None` when the query does not match. One shared
 /// implementation for the file and ref pipelines, so prefix and fuzzy
-/// highlights always agree.
+/// highlights always agree. The needle must be lowercase: the matcher is
+/// case-insensitive and panics on uppercase needles.
 fn highlight_indices(matcher: &mut Matcher, label: &str, query: &str) -> Option<Vec<u32>> {
     let mut needle_buf = Vec::new();
     let needle = Utf32Str::new(query, &mut needle_buf);
@@ -606,7 +609,7 @@ mod tests {
     use std::time::Instant;
 
     use crossterm::event::{KeyEventKind, KeyEventState, KeyModifiers};
-    use nucleo::{Config, Nucleo};
+    use nucleo::{Config, Nucleo, Utf32String};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -1140,5 +1143,51 @@ mod tests {
                 assert_eq!(rect.y, 10 - rect.height);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn uppercase_file_query_does_not_panic() {
+        // The ignore_case matcher panics on an uppercase needle (its prefilter
+        // is case-insensitive, the optimal matrix is not), so the session must
+        // store a lowercased query. Backspacing `@Cargo.lock` is the original
+        // crash: query `Cargo` matched `Cargo.lock` case-sensitively, then the
+        // highlight pass ran with the raw uppercase needle.
+        let mut menu = session_with_items(Vec::new());
+        let s = menu.session.as_mut().unwrap();
+        for path in ["Cargo.lock", "justfile", "maki-ui/src/app/mod.rs"] {
+            s.nucleo.injector().push((), |_, cols| {
+                cols[0] = Utf32String::from(path);
+            });
+        }
+        s.walking = false;
+        while s.nucleo.tick(0).running {}
+
+        menu.sync_query("Cargo");
+        for _ in 0..100 {
+            let (_, _) = menu.tick();
+            if !menu.session.as_ref().unwrap().file_matches.is_empty() {
+                break;
+            }
+        }
+        let s = menu.session.as_ref().unwrap();
+        assert_eq!(s.query, "cargo");
+        let c = s
+            .file_matches
+            .iter()
+            .find(|c| c.item.label == "Cargo.lock")
+            .expect("Cargo.lock matches the Cargo query");
+        assert_eq!(c.indices, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn uppercase_ref_query_does_not_panic() {
+        // Refs go through the same matcher in sync_query; `Model:` against
+        // `model:zai/glm-5` is the same uppercase-needle panic on the ref side.
+        let mut menu = session_with_all();
+        menu.sync_query("Model:");
+        let s = menu.session.as_ref().unwrap();
+        assert_eq!(s.query, "model:");
+        let labels: Vec<&str> = s.matches.iter().map(|c| c.item.label.as_str()).collect();
+        assert_eq!(labels, vec!["model:zai/glm-5", "model:anthropic/claude"]);
     }
 }
