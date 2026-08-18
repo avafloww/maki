@@ -365,6 +365,14 @@ impl<'t> EventLoop<'t> {
             }
         }
 
+        // Seed the highlight palette for the active theme synchronously. For a
+        // saved (non-config) theme `theme::set` never runs, so without this the
+        // palette only lands on the warmup thread and plugins that cache
+        // `theme_color` at load (e.g. the splash) bake the fallback instead of
+        // the real theme. Cheap: it only swaps the theme + a few UI colors; the
+        // expensive syntax-set build stays on the warmup thread.
+        crate::highlight::refresh_syntax_theme();
+
         static PROCESS_WARMUP: std::sync::Once = std::sync::Once::new();
         PROCESS_WARMUP.call_once(|| {
             std::thread::spawn(crate::highlight::warmup);

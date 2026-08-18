@@ -18,16 +18,27 @@ pub(crate) fn is_ready() -> bool {
 pub(crate) fn refresh_syntax_theme() {
     let theme = theme::current();
     maki_highlight::set_theme(theme.syntax.clone());
-    maki_highlight::set_ui_colors(
-        [
-            ("diff_old", theme.diff_old.bg),
-            ("diff_new", theme.diff_new.bg),
-        ]
-        .into_iter()
-        .filter_map(|(name, color)| match color {
+    let rgb = |name: &str, color: Option<Color>| -> Option<(String, (u8, u8, u8))> {
+        match color {
             Some(Color::Rgb(r, g, b)) => Some((name.to_owned(), (r, g, b))),
             _ => None,
-        })
+        }
+    };
+    // Seed the core UI colors so `maki.ui.theme_color` resolves them from the
+    // fast map instead of the syntect settings (which only carry fg/bg and
+    // would miss accent / todo_in_progress). Plugins that cache these at load
+    // (e.g. the splash) read the real theme, not a fallback.
+    maki_highlight::set_ui_colors(
+        [
+            rgb("background", Some(theme.background)),
+            rgb("foreground", Some(theme.foreground)),
+            rgb("accent", theme.accent.fg),
+            rgb("todo_in_progress", theme.todo_in_progress.fg),
+            rgb("diff_old", theme.diff_old.bg),
+            rgb("diff_new", theme.diff_new.bg),
+        ]
+        .into_iter()
+        .flatten()
         .collect(),
     );
 }

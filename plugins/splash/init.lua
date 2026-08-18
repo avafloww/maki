@@ -47,13 +47,18 @@ local function theme_or(name, fallback)
   return fallback
 end
 
--- theme_color returns nil for these names unless the UI seeded them, so the
--- fallback doubles as the dracula default (kept in sync with the Rust splash).
-local BG = theme_or("background", { 40, 42, 54 })
-local FG = theme_or("foreground", { 248, 248, 242 })
-local ACCENT = theme_or("accent", { 255, 184, 108 })
-local TIP = theme_or("todo_in_progress", { 241, 250, 140 })
-local BG_HEX = string.format("#%02x%02x%02x", BG[1], BG[2], BG[3])
+-- theme_color resolves these from the seeded UI palette; the fallback is the
+-- dracula default (kept in sync with the old Rust splash) for a host that has
+-- not seeded them yet. Resolved per frame (not cached at load) so the splash
+-- tracks the active theme and never bakes a pre-seed fallback.
+local BG, FG, ACCENT, TIP, BG_HEX
+local function refresh_colors()
+  BG = theme_or("background", { 40, 42, 54 })
+  FG = theme_or("foreground", { 248, 248, 242 })
+  ACCENT = theme_or("accent", { 255, 184, 108 })
+  TIP = theme_or("todo_in_progress", { 241, 250, 140 })
+  BG_HEX = string.format("#%02x%02x%02x", BG[1], BG[2], BG[3])
+end
 
 local function charlen(s)
   local n = 0
@@ -215,6 +220,7 @@ maki.api.create_autocmd("SplashShown", {
 })
 
 local function render_splash(w, h, t, fade)
+  refresh_colors()
   if w == 0 or h == 0 then
     return {}
   end
