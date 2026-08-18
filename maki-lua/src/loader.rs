@@ -479,6 +479,7 @@ pub struct EventHandle {
 /// In-memory completion/expander store for tests with no running Lua thread.
 /// Mirrors what the Lua-side stores offer, so `App` code is identical between
 /// production (RPC) and tests (direct lookup).
+#[derive(Default)]
 pub struct TestCompletionBackend {
     sources: std::sync::Mutex<HashMap<String, Vec<ItemSpec>>>,
     expanders: std::sync::Mutex<ExpanderMap>,
@@ -502,10 +503,6 @@ impl TestCompletionBackend {
             .insert(prefix.to_string(), items);
     }
 
-    pub fn remove_source(&self, prefix: &str) {
-        self.sources.lock().unwrap().remove(prefix);
-    }
-
     pub fn register_expander<F>(&self, prefix: &str, f: F)
     where
         F: Fn(&str) -> Result<String, String> + Send + Sync + 'static,
@@ -514,10 +511,6 @@ impl TestCompletionBackend {
             .lock()
             .unwrap()
             .insert(prefix.to_string(), Box::new(f));
-    }
-
-    pub fn remove_expander(&self, prefix: &str) {
-        self.expanders.lock().unwrap().remove(prefix);
     }
 
     fn collect(&self, _ctx: &CompletionCtx) -> Vec<ItemSpec> {
@@ -548,12 +541,6 @@ impl TestCompletionBackend {
         }
         out.push_str(&text[last_end..]);
         Ok(out)
-    }
-}
-
-impl Default for TestCompletionBackend {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
