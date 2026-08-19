@@ -15,8 +15,8 @@ local function refresh_renderers()
   if revision ~= renderers_revision then
     renderers = maki.api.collect(REGISTRY)
     renderers.default = {
-      label = "Default",
-      description = "The built-in maki splash",
+      label = "default",
+      description = "The standard Maki splash screen.",
     }
     renderers_revision = revision
   end
@@ -60,6 +60,15 @@ local function items()
     return a.label < b.label
   end)
   return out
+end
+
+local function item_index(list, name)
+  for index, item in ipairs(list) do
+    if item.name == name then
+      return index
+    end
+  end
+  return 1
 end
 
 local function invoke(selection, input)
@@ -226,12 +235,21 @@ end
 
 maki.api.set_slot("splash.render", render)
 
+local descriptions = {
+  aurora = "Drifting northern lights over a dark gradient.",
+  caustics = "Deep-water light patterns shimmering across the screen.",
+  kaleidoscope = "A mirrored fractal kaleidoscope with tenfold symmetry.",
+  matrix = "Green falling-code rain with persistent animated trails.",
+  metaballs = "Glowing metaballs that merge and flow together.",
+  voronoi = "Animated Voronoi cells with warm glowing borders.",
+}
+
 for _, module_name in ipairs({ "aurora", "caustics", "kaleidoscope", "matrix", "metaballs", "voronoi" }) do
   local ok, module = pcall(require, "splash." .. module_name)
   if ok and type(module) == "table" and type(module.render) == "function" then
     maki.api.register(REGISTRY, module_name, {
       label = module_name,
-      description = "Bundled splash renderer",
+      description = descriptions[module_name],
       activate = function()
         return module.render
       end,
@@ -277,6 +295,7 @@ local function command(opts)
   local picker_items = items()
   local result = ListPicker.open(picker_items, {
     title = "Splash gallery",
+    cursor = item_index(picker_items, committed.name),
     timeout_ms = 100,
     notify_initial = true,
     on_change = function(item)
