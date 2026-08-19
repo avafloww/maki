@@ -63,6 +63,16 @@ impl TextBuffer {
             + self.byte_x()
     }
 
+    pub fn set_cursor_byte_offset(&mut self, offset: usize) {
+        let mut remaining = offset.min(self.value().len());
+        let mut line = 0;
+        while line + 1 < self.lines.len() && remaining > self.lines[line].len() {
+            remaining -= self.lines[line].len() + 1;
+            line += 1;
+        }
+        self.set_cursor(line, Self::byte_to_char(&self.lines[line], remaining));
+    }
+
     fn current_line(&self) -> &str {
         &self.lines[self.cursor_y]
     }
@@ -613,6 +623,17 @@ mod tests {
         buf.raw_x = 2;
         buf.insert_text("X");
         assert_eq!(buf.value(), "a●Xb");
+    }
+
+    #[test]
+    fn absolute_byte_offset_restores_multiline_utf8_cursor() {
+        let mut buf = TextBuffer::new("first\nαβ target\nlast".into());
+        let offset = "first\nαβ ".len();
+
+        buf.set_cursor_byte_offset(offset);
+
+        assert_eq!((buf.y(), buf.x()), (1, 3));
+        assert_eq!(buf.cursor_byte_offset(), offset);
     }
 
     #[test]

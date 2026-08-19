@@ -1182,6 +1182,71 @@ case("set_highlight_toggle_keeps_lines_and_collapses_back", function()
   eq(buf.lines[4][1][1], "... (2 lines) (click to expand)")
 end)
 
+local function with_picker(events, opts, fn)
+  local original = { buf = maki.ui.buf, open_win = maki.ui.open_win }
+  local buf = mock_buf()
+  local cursors = {}
+  local event_index = 0
+  maki.ui.buf = function()
+    return buf
+  end
+  maki.ui.open_win = function()
+    return {
+      width = 40,
+      height = 10,
+      close = function() end,
+      set_cursor = function(_, line)
+        cursors[#cursors + 1] = line
+      end,
+      recv = function()
+        event_index = event_index + 1
+        return events[event_index]
+      end,
+    }
+  end
+  local ok, result = pcall(ListPicker.open, { "alpha", "beta", "gamma" }, opts)
+  maki.ui.buf, maki.ui.open_win = original.buf, original.open_win
+  assert(ok, tostring(result))
+  fn(result, buf, cursors)
+end
+
+case("list_picker_initial_callback_is_opt_in", function()
+  local changes = {}
+  with_picker({ { type = "close" } }, {
+    on_change = function(_, index)
+      changes[#changes + 1] = index
+    end,
+  }, function()
+    eq(#changes, 0, "initial selection does not notify by default")
+  end)
+  with_picker({ { type = "close" } }, {
+    notify_initial = true,
+    cursor = 2,
+    on_change = function(_, index)
+      changes[#changes + 1] = index
+    end,
+  }, function()
+    eq(changes[1], 2, "opt-in notifies the initial original index")
+  end)
+end)
+
+case("list_picker_navigation_filter_choice_and_cancel", function()
+  local changes = {}
+  with_picker({ { type = "key", key = "down" }, { type = "key", key = "a" }, { type = "key", key = "enter" } }, {
+    on_change = function(_, index)
+      changes[#changes + 1] = index
+    end,
+  }, function(result)
+    eq(result.type, "choice")
+    eq(result.index, 1, "filter resets to the best matching original item")
+    eq(changes[1], 2, "navigation notifies")
+    eq(changes[2], 1, "filter reset notifies")
+  end)
+  with_picker({ { type = "key", key = "esc" } }, {}, function(result)
+    eq(result.type, "close", "escape cancels")
+  end)
+end)
+
 local render_lines = ListPicker._render_lines
 
 case("render_lines_string_items_basic", function()
@@ -1300,6 +1365,31 @@ case("filter_items_case_insensitive", function()
   eq(indices[1], 1)
 end)
 
+case("filter_items_subsequence_scores_deterministically", function()
+  local items = { "alphabet", "alpha beta", "aXlYpZhQa" }
+  local filtered, indices = filter_items(items, "alp")
+  eq(filtered[1], "alphabet", "contiguous match ranks first")
+  eq(filtered[2], "alpha beta", "ties retain source order")
+  eq(filtered[3], "aXlYpZhQa", "scattered subsequence ranks last")
+  eq(indices[1], 1)
+  eq(indices[3], 3)
+end)
+
+case("filter_items_preserves_section_order", function()
+  local items = {
+    { label = "aXlYp", section = "first" },
+    { label = "alpha", section = "first" },
+    { label = "alpha", section = "second" },
+  }
+  local filtered, indices = filter_items(items, "alp")
+  eq(filtered[1].section, "first")
+  eq(filtered[1].label, "alpha", "scores sort within a section")
+  eq(filtered[2].section, "first")
+  eq(filtered[3].section, "second", "later sections cannot move ahead")
+  eq(indices[1], 2)
+  eq(indices[3], 3)
+end)
+
 case("filter_items_no_matches", function()
   local items = { "apple", "banana" }
   local filtered, indices = filter_items(items, "xyz")
@@ -1351,13 +1441,19 @@ case("filter_items_words_split_across_label_and_section", function()
   eq(filtered[1].label, "gotchas.md")
 end)
 
-case("highlight_spans_overlapping_words_merge", function()
-  local spans = ListPicker.highlight_spans("alphabet", { "alpha", "phab" }, "item", "match")
-  eq(#spans, 2)
-  eq(spans[1][1], "alphab", "alpha(1-5) + phab(3-6) merge into one span")
+case("highlight_spans_marks_subsequence_characters", function()
+  local spans = ListPicker.highlight_spans("alphabet", { "aht" }, "item", "match")
+  eq(#spans, 5)
+  eq(spans[1][1], "a")
   eq(spans[1][2], "match")
-  eq(spans[2][1], "et")
+  eq(spans[2][1], "lp")
   eq(spans[2][2], "item")
+  eq(spans[3][1], "h")
+  eq(spans[3][2], "match")
+  eq(spans[4][1], "abe")
+  eq(spans[4][2], "item")
+  eq(spans[5][1], "t")
+  eq(spans[5][2], "match")
 end)
 
 case("highlight_spans_multi_word", function()

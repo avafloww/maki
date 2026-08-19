@@ -11,7 +11,7 @@ use strum::{EnumString, VariantNames};
 pub(crate) const NO_UI_ERR: &str = "no interactive UI attached";
 const UI_DROPPED_ERR: &str = "ui event loop dropped the request";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CommandArgumentItem {
     pub label: String,
     pub insertion: String,
@@ -136,6 +136,9 @@ pub(crate) struct CommandEntry {
     pub description: Arc<str>,
     pub max_args: usize,
     pub argument_completion: Option<RegistryKey>,
+    pub completion_on_highlight: Option<RegistryKey>,
+    pub completion_on_accept: Option<RegistryKey>,
+    pub completion_on_cancel: Option<RegistryKey>,
 }
 
 pub(crate) type CommandHandlerMap = HashMap<Arc<str>, HashMap<Arc<str>, CommandEntry>>;
@@ -530,6 +533,9 @@ mod tests {
             description: Arc::from(desc),
             max_args: 0,
             argument_completion: None,
+            completion_on_highlight: None,
+            completion_on_accept: None,
+            completion_on_cancel: None,
         }
     }
 

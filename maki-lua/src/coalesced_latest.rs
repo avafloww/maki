@@ -70,6 +70,10 @@ impl<T> Clone for CoalescedLatest<T> {
 }
 
 impl<T> CoalescedWork<T> {
+    pub(crate) fn is_latest(&self) -> bool {
+        self.inner.state.lock().unwrap().pending.is_none()
+    }
+
     pub(crate) fn value(&self) -> &T {
         self.value.as_ref().unwrap()
     }
@@ -132,6 +136,45 @@ mod tests {
         last.finish(|value| delivered.push(value));
 
         assert_eq!(delivered, vec![3]);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn terminal_value_invalidates_queued_older_work() {
+        let (tx, rx) = flume::unbounded();
+        let latest = CoalescedLatest::new(move |work| tx.send(work).is_ok());
+
+        assert!(latest.submit("highlight-a"));
+        let first = rx.recv().unwrap();
+        assert!(latest.submit("highlight-b"));
+        assert!(latest.submit("cancel"));
+        assert!(!first.is_latest());
+        first.finish(drop);
+        let terminal = rx.recv().unwrap();
+        assert!(terminal.is_latest());
+        let mut delivered = Vec::new();
+        terminal.finish(|value| delivered.push(value));
+
+        assert_eq!(delivered, vec!["cancel"]);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn accept_invalidates_queued_highlight() {
+        let (tx, rx) = flume::unbounded();
+        let latest = CoalescedLatest::new(move |work| tx.send(work).is_ok());
+
+        assert!(latest.submit("highlight-a"));
+        let first = rx.recv().unwrap();
+        assert!(latest.submit("highlight-b"));
+        assert!(latest.submit("accept"));
+        assert!(!first.is_latest());
+        first.finish(drop);
+        let accepted = rx.recv().unwrap();
+        let mut delivered = Vec::new();
+        accepted.finish(|value| delivered.push(value));
+
+        assert_eq!(delivered, vec!["accept"]);
         assert!(rx.try_recv().is_err());
     }
 

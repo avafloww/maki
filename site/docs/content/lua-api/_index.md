@@ -336,7 +336,19 @@ browsing memory files or toggling settings.
     (registered slash name), `args` (raw argument string,
     never the full slash input), `arg` (argument under
     the cursor), `index` (zero-based argument index),
-    and `mode` (active mode id).
+    `mode` (active mode id), `session` (stable for one
+    popup session), and `generation` (increases for
+    each request in that session). Optional lifecycle
+    callbacks `on_highlight(ctx, item)`,
+    `on_accept(ctx, item)`, and `on_cancel(ctx)` run in
+    request order. The first result highlights its
+    selected candidate. A later highlight cancels a
+    running highlight callback. Accept runs after its
+    highlight and ends the session without on_cancel.
+    Dismissal, an empty result, or a new completion
+    session calls on_cancel once. `Tab` accepts and
+    keeps editing. `Enter` accepts; press `Enter` again
+    to execute the command.
 
 **Example:**
 
@@ -655,6 +667,24 @@ Returns a fresh table keyed by each contribution's stable identifier.
 - `{name}` (`string`) Registry name.
 
 **Returns:** table Map of contribution key to registered value.
+
+---
+
+### `maki.api.contribution_revision()` {#maki-api-contribution_revision}
+
+```lua
+maki.api.contribution_revision({name})
+```
+
+Return a monotonically increasing revision for a contribution registry.
+Consumers that cache contributed functions can compare this value before
+use and collect again after a contributor is loaded, reloaded, or unloaded.
+
+**Parameters:**
+
+- `{name}` (`string`) Registry name.
+
+**Returns:** integer Registry revision.
 
 ---
 
@@ -5353,7 +5383,8 @@ function M.replace(content, old_string, new_string, replace_all)
 -- Open a fuzzy-filter picker in a floating window and block until the user
 -- decides. {items} is a list of strings or { label, detail? } tables. {opts}:
 -- title, footer, cursor (initial index), submit_keys (extra submit keys
--- besides enter), on_change(item, index), on_timeout(), and timeout_ms.
+-- besides enter), on_change(item, index), notify_initial (call on_change for
+-- the initial item), on_timeout(), and timeout_ms.
 -- Returns { type = "choice"|"delete", index } or { type = "close" }.
 function ListPicker.open(items, opts)
 ListPicker.split_words = split_words

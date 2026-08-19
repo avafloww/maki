@@ -12,6 +12,7 @@ struct Contribution {
 #[derive(Default)]
 pub(crate) struct ContributionStore {
     registries: HashMap<String, HashMap<String, Contribution>>,
+    revisions: HashMap<String, u64>,
 }
 
 impl ContributionStore {
@@ -32,12 +33,17 @@ impl ContributionStore {
             )));
         }
         entries.insert(key, Contribution { owner, value });
+        *self.revisions.entry(name).or_default() += 1;
         Ok(())
     }
 
     pub(crate) fn clear_plugin(&mut self, plugin: &str) {
-        for entries in self.registries.values_mut() {
+        for (name, entries) in &mut self.registries {
+            let previous_len = entries.len();
             entries.retain(|_, entry| entry.owner.as_ref() != plugin);
+            if entries.len() != previous_len {
+                *self.revisions.entry(name.clone()).or_default() += 1;
+            }
         }
         self.registries.retain(|_, entries| !entries.is_empty());
     }
@@ -84,9 +90,23 @@ fn collect(lua: &Lua, name: String) -> LuaResult<Table> {
     Ok(result)
 }
 
+/// Return a monotonically increasing revision for a contribution registry.
+/// Consumers that cache contributed functions can compare this value before
+/// use and collect again after a contributor is loaded, reloaded, or unloaded.
+///
+/// @param name string Registry name.
+/// @return integer Registry revision.
+#[lua_fn]
+fn contribution_revision(lua: &Lua, name: String) -> LuaResult<u64> {
+    Ok(lua
+        .app_data_ref::<ContributionStore>()
+        .and_then(|store| store.revisions.get(&name).copied())
+        .unwrap_or_default())
+}
+
 lua_table! {
     extend "maki.api" => pub(crate) fn add_methods(plugin: Arc<str>), DOCS [
-        register(plugin), collect,
+        register(plugin), collect, contribution_revision,
     ]
 }
 
@@ -131,10 +151,13 @@ mod tests {
             store.registries["kind"]["key"].value,
             Value::Integer(2)
         ));
+        assert_eq!(store.revisions["kind"], 2);
 
         store.clear_plugin("b");
         assert!(store.registries.contains_key("kind"));
+        assert_eq!(store.revisions["kind"], 2);
         store.clear_plugin("a");
         assert!(store.registries.is_empty());
+        assert_eq!(store.revisions["kind"], 3);
     }
 }

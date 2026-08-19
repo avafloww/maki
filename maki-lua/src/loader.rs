@@ -18,7 +18,8 @@ use crate::coalesced_latest::CoalescedLatest;
 use crate::error::PluginError;
 use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
 use crate::runtime::{
-    self, ClickFallback, CommandArgumentRequest, LuaThread, Request, RestoreItem,
+    self, ClickFallback, CommandArgumentContext, CommandArgumentLifecycle,
+    CommandArgumentLifecycleRequest, CommandArgumentRequest, LuaThread, Request, RestoreItem,
     SplashFrameRequest,
 };
 use crate::splash::{SPLASH_PULL_TIMEOUT, SplashFrame, SplashPull};
@@ -487,6 +488,7 @@ impl PluginHost {
             modes: Arc::clone(&self.inner.modes),
             completion: None,
             command_arguments: self.inner.command_arguments.clone(),
+            command_argument_lifecycle: self.inner.command_argument_lifecycle.clone(),
             splash_frames: self.inner.splash_frames.clone(),
         }
     }
@@ -526,6 +528,7 @@ pub struct EventHandle {
     /// production, where the two RPC methods below talk to the Lua thread.
     completion: Option<Arc<TestCompletionBackend>>,
     command_arguments: CoalescedLatest<CommandArgumentRequest>,
+    command_argument_lifecycle: CoalescedLatest<CommandArgumentLifecycleRequest>,
     splash_frames: CoalescedLatest<SplashFrameRequest>,
 }
 
@@ -608,6 +611,10 @@ impl EventHandle {
                 let tx = tx.clone();
                 move |work| tx.send(Request::CollectCommandArgumentItems(work)).is_ok()
             }),
+            command_argument_lifecycle: CoalescedLatest::new({
+                let tx = tx.clone();
+                move |work| tx.send(Request::CommandArgumentLifecycle(work)).is_ok()
+            }),
             splash_frames: CoalescedLatest::new(move |work| {
                 tx.send(Request::SplashFrame(work)).is_ok()
             }),
@@ -633,6 +640,7 @@ impl EventHandle {
             modes,
             completion: None,
             command_arguments: CoalescedLatest::new(|_| false),
+            command_argument_lifecycle: CoalescedLatest::new(|_| false),
             splash_frames: CoalescedLatest::new(|_| false),
         }
     }
@@ -647,6 +655,7 @@ impl EventHandle {
             modes: Arc::new(maki_agent::ModeRegistry::builtin()),
             completion: Some(backend),
             command_arguments: CoalescedLatest::new(|_| false),
+            command_argument_lifecycle: CoalescedLatest::new(|_| false),
             splash_frames: CoalescedLatest::new(|_| false),
         }
     }
@@ -677,6 +686,10 @@ impl EventHandle {
                         .send(Request::CollectCommandArgumentItems(work))
                         .is_ok()
                 }
+            }),
+            command_argument_lifecycle: CoalescedLatest::new({
+                let shared = shared.clone();
+                move |work| shared.send(Request::CommandArgumentLifecycle(work)).is_ok()
             }),
             splash_frames: CoalescedLatest::new(move |work| {
                 shared.send(Request::SplashFrame(work)).is_ok()
@@ -724,25 +737,33 @@ impl EventHandle {
     /// host is connected.
     pub fn collect_command_argument_items(
         &self,
-        command: Arc<str>,
-        plugin: Arc<str>,
-        args: String,
-        arg: String,
-        index: usize,
-        mode: String,
+        context: CommandArgumentContext,
+        cancel: maki_agent::CancelToken,
     ) -> Option<flume::Receiver<Vec<crate::CommandArgumentItem>>> {
         let (reply, rx) = flume::bounded(1);
         self.command_arguments
             .submit(CommandArgumentRequest {
-                command,
-                plugin,
-                args,
-                arg,
-                index,
-                mode,
+                context,
+                cancel,
                 reply,
             })
             .then_some(rx)
+    }
+
+    pub fn command_argument_lifecycle(
+        &self,
+        context: CommandArgumentContext,
+        event: CommandArgumentLifecycle,
+        item: Option<crate::CommandArgumentItem>,
+        cancel: maki_agent::CancelToken,
+    ) {
+        self.command_argument_lifecycle
+            .submit(CommandArgumentLifecycleRequest {
+                context,
+                event,
+                item,
+                cancel,
+            });
     }
 
     pub fn collect_completion_items(&self, ctx: &CompletionCtx) -> Vec<ItemSpec> {
@@ -1036,6 +1057,7 @@ mod tests {
             modes: Arc::new(maki_agent::ModeRegistry::builtin()),
             completion: None,
             command_arguments: CoalescedLatest::new(|_| false),
+            command_argument_lifecycle: CoalescedLatest::new(|_| false),
             splash_frames: CoalescedLatest::new(move |work| {
                 prio_tx.send(Request::SplashFrame(work)).is_ok()
             }),
@@ -1071,12 +1093,17 @@ mod tests {
         let handle = EventHandle::probed_for_test(tx);
         let request = |arg: &str| {
             handle.collect_command_argument_items(
-                Arc::from("/deploy"),
-                Arc::from("deploy"),
-                format!("/deploy {arg}"),
-                arg.to_string(),
-                0,
-                "build".to_string(),
+                CommandArgumentContext {
+                    command: Arc::from("/deploy"),
+                    plugin: Arc::from("deploy"),
+                    args: format!("/deploy {arg}"),
+                    arg: arg.to_string(),
+                    index: 0,
+                    mode: "build".to_string(),
+                    session: 1,
+                    generation: 1,
+                },
+                maki_agent::CancelToken::none(),
             )
         };
 
@@ -1094,7 +1121,7 @@ mod tests {
             Request::CollectCommandArgumentItems(work) => work,
             _ => panic!("expected command argument request"),
         };
-        assert_eq!(pending.value().arg, "abc");
+        assert_eq!(pending.value().context.arg, "abc");
         pending.finish(|request| {
             let _ = request.reply.send(Vec::new());
         });

@@ -2589,6 +2589,161 @@ fn register_command_happy_path() {
     assert_eq!(snap.commands[0].plugin.as_ref(), "cmd_plugin");
 }
 
+#[test]
+fn command_completion_static_dynamic_and_lifecycle_hooks() {
+    let host = PluginHost::new(fresh_registry()).unwrap();
+    host.load_source(
+        "completion_plugin",
+        r#"
+        maki.api.register_command({
+            name = "/deploy",
+            nargs = 1,
+            completion = {
+                get_items = function(ctx)
+                    return {{ label = ctx.arg .. ":dynamic", insertion = "staging" }}
+                end,
+                on_highlight = function(ctx, item)
+                    maki.ui.flash("highlight:" .. ctx.session .. ":" .. ctx.generation .. ":" .. item.insertion)
+                end,
+                on_accept = function(_, item) maki.ui.flash("accept:" .. item.insertion) end,
+                on_cancel = function(ctx) maki.ui.flash("cancel:" .. ctx.command) end,
+            },
+            handler = function() end,
+        })
+        maki.api.register_command({
+            name = "/static",
+            nargs = 1,
+            completion = { items = {{ label = "prod", insertion = "production" }} },
+            handler = function() end,
+        })
+        "#,
+    )
+    .unwrap();
+    let handle = host.event_handle();
+    let context = maki_lua::CommandArgumentContext {
+        command: Arc::from("/deploy"),
+        plugin: Arc::from("completion_plugin"),
+        args: "sta".into(),
+        arg: "sta".into(),
+        index: 0,
+        mode: "build".into(),
+        session: 4,
+        generation: 6,
+    };
+    let items = handle
+        .collect_command_argument_items(context.clone(), maki_agent::CancelToken::none())
+        .unwrap()
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(items[0].insertion, "staging");
+
+    let item = items[0].clone();
+    let flashes = host.ui_action_rx();
+    let mut messages = Vec::new();
+    for (event, item) in [
+        (
+            maki_lua::CommandArgumentLifecycle::Highlight,
+            Some(item.clone()),
+        ),
+        (maki_lua::CommandArgumentLifecycle::Accept, Some(item)),
+        (maki_lua::CommandArgumentLifecycle::Cancel, None),
+    ] {
+        handle.command_argument_lifecycle(
+            context.clone(),
+            event,
+            item,
+            maki_agent::CancelToken::none(),
+        );
+        match flashes.recv_timeout(Duration::from_secs(5)).unwrap() {
+            maki_lua::UiAction::Flash(message) => messages.push(message),
+            _ => panic!("expected flash"),
+        }
+    }
+    assert_eq!(
+        messages,
+        ["highlight:4:6:staging", "accept:staging", "cancel:/deploy"]
+    );
+
+    let static_items = handle
+        .collect_command_argument_items(
+            maki_lua::CommandArgumentContext {
+                command: Arc::from("/static"),
+                plugin: Arc::from("completion_plugin"),
+                args: String::new(),
+                arg: String::new(),
+                index: 0,
+                mode: "build".into(),
+                session: 8,
+                generation: 1,
+            },
+            maki_agent::CancelToken::none(),
+        )
+        .unwrap()
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(static_items[0].insertion, "production");
+}
+
+#[test]
+fn command_completion_timeout_returns_empty_and_keeps_host_live() {
+    let host = PluginHost::new(fresh_registry()).unwrap();
+    host.load_source(
+        "slow_completion",
+        r#"
+        maki.api.register_command({
+            name = "/slow",
+            nargs = 1,
+            completion = {
+                get_items = function()
+                    while true do end
+                end,
+            },
+            handler = function() maki.ui.flash("recovered") end,
+        })
+        "#,
+    )
+    .unwrap();
+    let handle = host.event_handle();
+    let started = std::time::Instant::now();
+    let items = handle
+        .collect_command_argument_items(
+            maki_lua::CommandArgumentContext {
+                command: Arc::from("/slow"),
+                plugin: Arc::from("slow_completion"),
+                args: String::new(),
+                arg: String::new(),
+                index: 0,
+                mode: "build".into(),
+                session: 1,
+                generation: 1,
+            },
+            maki_agent::CancelToken::none(),
+        )
+        .unwrap()
+        .recv_timeout(Duration::from_secs(4))
+        .expect("completion timeout did not reply");
+    assert!(items.is_empty());
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "completion exceeded its bounded deadline"
+    );
+
+    let flashes = host.ui_action_rx();
+    handle
+        .run_command_for_test(
+            Arc::from("slow_completion"),
+            Arc::from("/slow"),
+            String::new(),
+            0,
+        )
+        .recv_timeout(Duration::from_secs(5))
+        .expect("timed-out completion stopped the Lua host");
+    assert!(matches!(
+        flashes.recv_timeout(Duration::from_secs(5)),
+        Ok(maki_lua::UiAction::Flash(message)) if message == "recovered"
+    ));
+}
+
 #[test_case::test_case("" => 0 ; "default_zero")]
 #[test_case::test_case("nargs = 0," => 0 ; "zero")]
 #[test_case::test_case("nargs = 1," => 1 ; "one")]

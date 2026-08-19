@@ -54,7 +54,6 @@ use crate::components::{
 use crate::image;
 use crate::repaint::{Cadence, Dirty, Watch};
 use crate::selection::{SelectionState, SelectionZone, ZoneRegistry};
-use crate::text_buffer::TextBuffer;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use maki_agent::permissions::PermissionManager;
@@ -580,7 +579,7 @@ impl App {
             return None;
         }
         if key::QUIT.matches(key) {
-            self.command_palette.close();
+            self.command_palette.close(&self.lua_event_handle);
             return Some(if !self.is_main_chat() || self.input_box.is_empty() {
                 if self.status == Status::Streaming {
                     return Some(self.handle_cancel());
@@ -988,10 +987,11 @@ impl App {
             return vec![];
         }
 
-        match self
-            .command_palette
-            .handle_key(key, &self.input_box.buffer.value())
-        {
+        match self.command_palette.handle_key(
+            key,
+            &self.input_box.buffer.value(),
+            &self.lua_event_handle,
+        ) {
             CommandAction::Consumed => return vec![],
             CommandAction::SelectionChanged => {
                 let input = self.input_box.buffer.value();
@@ -1012,18 +1012,14 @@ impl App {
                 self.command_palette.sync(&text);
                 self.refresh_at_ref_labels(&text);
                 self.input_box.set_input(text.clone());
-                self.input_box
-                    .buffer
-                    .set_cursor(0, TextBuffer::byte_to_char(&text, cursor));
+                self.input_box.buffer.set_cursor_byte_offset(cursor);
                 return vec![];
             }
             CommandAction::Complete { text, cursor } => {
                 self.command_palette.sync(&text);
                 self.refresh_at_ref_labels(&text);
                 self.input_box.set_input(text.clone());
-                self.input_box
-                    .buffer
-                    .set_cursor(0, TextBuffer::byte_to_char(&text, cursor));
+                self.input_box.buffer.set_cursor_byte_offset(cursor);
                 self.command_palette.sync_arguments(
                     &text,
                     cursor,
@@ -1919,6 +1915,7 @@ impl App {
     }
 
     pub fn close_all_overlays(&mut self) {
+        self.command_palette.close(&self.lua_event_handle);
         self.overlays_mut().iter_mut().for_each(|o| o.close());
     }
 
@@ -1939,7 +1936,7 @@ impl App {
             | self.hints.poll(self.hint_reader.load_full())
             | self.tick_file_picker()
             | self.tick_file_completion()
-            | self.command_palette.poll_arguments();
+            | self.command_palette.poll_arguments(&self.lua_event_handle);
         dirty |= self.tick_chats();
         while let Some(shown) = self.chats[0].take_splash_event() {
             // The autocmd is fire-and-forget; repainting is the frame pull's

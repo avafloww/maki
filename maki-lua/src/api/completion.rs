@@ -16,9 +16,12 @@ use maki_lua_macro::{lua_fn, lua_table};
 use mlua::{Function, Lua, MultiValue, Result as LuaResult, Table, Value};
 use serde::Deserialize;
 
-use crate::api::util::command::CommandArgumentItem;
-use crate::api::util::convert::lua_to_json;
+use crate::api::util::command::{CommandArgumentItem, CommandHandlerMap};
+use crate::api::util::convert::{json_to_lua, lua_to_json};
 use crate::api::util::pair::Pair;
+use crate::runtime::{
+    CommandArgumentContext, CommandArgumentLifecycle, CommandArgumentLifecycleRequest,
+};
 
 /// An `@` at `at_byte` begins a token only if nothing but whitespace precedes
 /// it (or it starts the text). Shared by the popup (via `maki-ui`) and the
@@ -322,60 +325,60 @@ pub(crate) async fn collect_completion_items(lua: &Lua, ctx: &CompletionCtx) -> 
     out
 }
 
+fn command_argument_ctx(lua: &Lua, context: &CommandArgumentContext) -> LuaResult<Table> {
+    let ctx = lua.create_table()?;
+    ctx.set("command", context.command.as_ref())?;
+    ctx.set("args", context.args.as_str())?;
+    ctx.set("arg", context.arg.as_str())?;
+    ctx.set("index", context.index)?;
+    ctx.set("mode", context.mode.as_str())?;
+    ctx.set("session", context.session)?;
+    ctx.set("generation", context.generation)?;
+    Ok(ctx)
+}
+
 pub(crate) async fn collect_command_argument_items(
     lua: &Lua,
-    plugin: &str,
-    command: &str,
-    args: &str,
-    arg: &str,
-    index: usize,
-    mode: &str,
+    context: &CommandArgumentContext,
 ) -> Vec<CommandArgumentItem> {
-    let value = lua
-        .app_data_ref::<crate::api::util::command::CommandHandlerMap>()
-        .and_then(|map| {
-            map.get(plugin).and_then(|commands| {
-                commands.get(command).and_then(|entry| {
-                    entry
-                        .argument_completion
-                        .as_ref()
-                        .and_then(|key| lua.registry_value::<Value>(key).ok())
-                })
+    let value = lua.app_data_ref::<CommandHandlerMap>().and_then(|map| {
+        map.get(&context.plugin).and_then(|commands| {
+            commands.get(&context.command).and_then(|entry| {
+                entry
+                    .argument_completion
+                    .as_ref()
+                    .and_then(|key| lua.registry_value::<Value>(key).ok())
             })
-        });
+        })
+    });
     let Some(value) = value else {
         return Vec::new();
     };
     let result = match value {
         Value::Table(items) => Ok(items),
-        Value::Function(function) => {
-            let ctx = match lua.create_table() {
-                Ok(ctx) => ctx,
-                Err(_) => return Vec::new(),
-            };
-            if ctx.set("command", command).is_err()
-                || ctx.set("args", args).is_err()
-                || ctx.set("arg", arg).is_err()
-                || ctx.set("index", index).is_err()
-                || ctx.set("mode", mode).is_err()
-            {
-                return Vec::new();
-            }
-            function
+        Value::Function(function) => match command_argument_ctx(lua, context) {
+            Ok(ctx) => function
                 .call_async::<Value>(ctx)
                 .await
-                .and_then(|v| match v {
-                    Value::Table(t) => Ok(t),
+                .and_then(|value| match value {
+                    Value::Table(items) => Ok(items),
                     _ => Err(mlua::Error::runtime(
                         "argument completion must return a table",
                     )),
-                })
-        }
+                }),
+            Err(error) => Err(error),
+        },
         _ => Err(mlua::Error::runtime(
             "argument completion must be a table or function",
         )),
     };
-    let Ok(items) = result else { return Vec::new() };
+    let items = match result {
+        Ok(items) => items,
+        Err(error) => {
+            tracing::warn!(plugin = %context.plugin, command = %context.command, error = %error, "command completion get_items failed");
+            return Vec::new();
+        }
+    };
     let Ok(json) = lua_to_json(lua, &Value::Table(items)) else {
         return Vec::new();
     };
@@ -388,7 +391,7 @@ pub(crate) async fn collect_command_argument_items(
             let insertion = item.get("insertion")?.as_str()?.to_owned();
             let description = item
                 .get("description")
-                .and_then(|v| v.as_str())
+                .and_then(|value| value.as_str())
                 .map(str::to_owned);
             Some(CommandArgumentItem {
                 label,
@@ -397,6 +400,51 @@ pub(crate) async fn collect_command_argument_items(
             })
         })
         .collect()
+}
+
+pub(crate) async fn run_command_argument_lifecycle(
+    lua: &Lua,
+    request: &CommandArgumentLifecycleRequest,
+) {
+    let function = lua.app_data_ref::<CommandHandlerMap>().and_then(|map| {
+        map.get(&request.context.plugin).and_then(|commands| {
+            commands.get(&request.context.command).and_then(|entry| {
+                let key = match request.event {
+                    CommandArgumentLifecycle::Highlight => &entry.completion_on_highlight,
+                    CommandArgumentLifecycle::Accept => &entry.completion_on_accept,
+                    CommandArgumentLifecycle::Cancel => &entry.completion_on_cancel,
+                };
+                key.as_ref()
+                    .and_then(|key| lua.registry_value::<Function>(key).ok())
+            })
+        })
+    });
+    let Some(function) = function else { return };
+    let ctx = match command_argument_ctx(lua, &request.context) {
+        Ok(ctx) => ctx,
+        Err(error) => {
+            tracing::warn!(plugin = %request.context.plugin, command = %request.context.command, hook = ?request.event, error = %error, "command completion hook context failed");
+            return;
+        }
+    };
+    let result = if let Some(item) = &request.item {
+        let item = match serde_json::to_value(item)
+            .map_err(mlua::Error::external)
+            .and_then(|value| json_to_lua(lua, &value))
+        {
+            Ok(item) => item,
+            Err(error) => {
+                tracing::warn!(plugin = %request.context.plugin, command = %request.context.command, hook = ?request.event, error = %error, "command completion hook item failed");
+                return;
+            }
+        };
+        function.call_async::<()>((ctx, item)).await
+    } else {
+        function.call_async::<()>(ctx).await
+    };
+    if let Err(error) = result {
+        tracing::warn!(plugin = %request.context.plugin, command = %request.context.command, hook = ?request.event, error = %error, "command completion hook failed");
+    }
 }
 
 /// Drop everything `plugin` registered. Called from `clear_plugin` so an
@@ -619,18 +667,25 @@ mod tests {
                     description: Arc::from("deploy"),
                     max_args: 1,
                     argument_completion: Some(key),
+                    completion_on_highlight: None,
+                    completion_on_accept: None,
+                    completion_on_cancel: None,
                 },
             )]),
         )]));
 
         let items = smol::block_on(collect_command_argument_items(
             &lua,
-            "test",
-            "/deploy",
-            " staging ",
-            "staging",
-            0,
-            "build",
+            &CommandArgumentContext {
+                command: Arc::from("/deploy"),
+                plugin: Arc::from("test"),
+                args: " staging ".into(),
+                arg: "staging".into(),
+                index: 0,
+                mode: "build".into(),
+                session: 7,
+                generation: 9,
+            },
         ));
 
         assert!(items.is_empty());

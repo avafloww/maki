@@ -76,6 +76,7 @@ const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Lua dispatcher for more than a couple of frame intervals.
 const SPLASH_RENDER_DEADLINE: Duration = Duration::from_millis(100);
 const SPLASH_RENDER_KILL_GRACE: Duration = Duration::from_millis(100);
+const COMMAND_COMPLETION_DEADLINE: Duration = Duration::from_secs(2);
 /// How long a doomed task may run without yielding before the watchdog
 /// shoots it. Cleanup after a cancel or a timeout (batch marking its
 /// children cancelled, rerendering its buf) is plain Lua running with the
@@ -227,20 +228,43 @@ pub enum Request {
         reply: flume::Sender<Vec<ItemSpec>>,
     },
     CollectCommandArgumentItems(CoalescedWork<CommandArgumentRequest>),
+    CommandArgumentLifecycle(CoalescedWork<CommandArgumentLifecycleRequest>),
     ExpandReferences {
         text: String,
         reply: flume::Sender<Result<String, String>>,
     },
 }
 
+#[derive(Clone)]
+pub struct CommandArgumentContext {
+    pub command: Arc<str>,
+    pub plugin: Arc<str>,
+    pub args: String,
+    pub arg: String,
+    pub index: usize,
+    pub mode: String,
+    pub session: u64,
+    pub generation: u64,
+}
+
 pub(crate) struct CommandArgumentRequest {
-    pub(crate) command: Arc<str>,
-    pub(crate) plugin: Arc<str>,
-    pub(crate) args: String,
-    pub(crate) arg: String,
-    pub(crate) index: usize,
-    pub(crate) mode: String,
+    pub(crate) context: CommandArgumentContext,
+    pub(crate) cancel: CancelToken,
     pub(crate) reply: flume::Sender<Vec<crate::api::util::command::CommandArgumentItem>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum CommandArgumentLifecycle {
+    Highlight,
+    Accept,
+    Cancel,
+}
+
+pub(crate) struct CommandArgumentLifecycleRequest {
+    pub(crate) context: CommandArgumentContext,
+    pub(crate) event: CommandArgumentLifecycle,
+    pub(crate) item: Option<crate::api::util::command::CommandArgumentItem>,
+    pub(crate) cancel: CancelToken,
 }
 
 pub(crate) struct SplashFrameRequest {
@@ -878,6 +902,33 @@ pub(crate) async fn run_command_scoped<F: Future>(lua: &Lua, depth: u8, fut: F) 
     let scope = TaskScope::detached(lua);
     lock_cell(scope.handle()).command_depth = depth;
     run_scoped(lua, scope, fut).await
+}
+
+async fn run_command_completion_scoped<F: Future>(
+    lua: &Lua,
+    cancel: CancelToken,
+    fut: F,
+) -> Option<F::Output> {
+    let scope = TaskScope::new(
+        lua,
+        TaskCell::new(
+            cancel.clone(),
+            Some(Instant::now() + COMMAND_COMPLETION_DEADLINE),
+            None,
+        ),
+    );
+    let deadline = smol::Timer::after(COMMAND_COMPLETION_DEADLINE);
+    let bounded = smol::future::or(async { Some(fut.await) }, async {
+        deadline.await;
+        None
+    });
+    let result = scope
+        .scope_future(cancel.race(bounded))
+        .await
+        .ok()
+        .flatten();
+    drop(scope);
+    result
 }
 
 async fn run_scoped<F: Future>(lua: &Lua, scope: TaskScope, fut: F) -> F::Output {
@@ -1578,10 +1629,18 @@ impl LuaRuntime {
                 if let Err(e) = self.lua.remove_registry_value(entry.handler) {
                     tracing::warn!(plugin = name, error = %e, "failed to drop command handler key");
                 }
-                if let Some(key) = entry.argument_completion
-                    && let Err(e) = self.lua.remove_registry_value(key)
+                for key in [
+                    entry.argument_completion,
+                    entry.completion_on_highlight,
+                    entry.completion_on_accept,
+                    entry.completion_on_cancel,
+                ]
+                .into_iter()
+                .flatten()
                 {
-                    tracing::warn!(plugin = name, error = %e, "failed to drop command completion key");
+                    if let Err(e) = self.lua.remove_registry_value(key) {
+                        tracing::warn!(plugin = name, error = %e, "failed to drop command completion key");
+                    }
                 }
             }
             drop(cmd_map);
@@ -2577,6 +2636,8 @@ pub(crate) struct LuaThread {
     pub tx: flume::Sender<Request>,
     pub prio_tx: flume::Sender<Request>,
     pub command_arguments: crate::coalesced_latest::CoalescedLatest<CommandArgumentRequest>,
+    pub command_argument_lifecycle:
+        crate::coalesced_latest::CoalescedLatest<CommandArgumentLifecycleRequest>,
     pub splash_frames: crate::coalesced_latest::CoalescedLatest<SplashFrameRequest>,
     pub join: Option<JoinHandle<()>>,
     pub shutdown: Arc<AtomicBool>,
@@ -2652,6 +2713,12 @@ pub fn spawn(
         let tx = tx.clone();
         crate::coalesced_latest::CoalescedLatest::new(move |work| {
             tx.send(Request::CollectCommandArgumentItems(work)).is_ok()
+        })
+    };
+    let command_argument_lifecycle = {
+        let tx = tx.clone();
+        crate::coalesced_latest::CoalescedLatest::new(move |work| {
+            tx.send(Request::CommandArgumentLifecycle(work)).is_ok()
         })
     };
     let splash_frames = {
@@ -3046,22 +3113,34 @@ pub fn spawn(
                         }
                         Request::CollectCommandArgumentItems(work) => {
                             let request = work.value();
-                            let items = run_detached(
+                            let items = run_command_completion_scoped(
                                 &rt.lua,
+                                request.cancel.clone(),
                                 crate::api::completion::collect_command_argument_items(
                                     &rt.lua,
-                                    &request.plugin,
-                                    &request.command,
-                                    &request.args,
-                                    &request.arg,
-                                    request.index,
-                                    &request.mode,
+                                    &request.context,
                                 ),
                             )
-                            .await;
+                            .await
+                            .unwrap_or_default();
                             work.finish(|request| {
                                 let _ = request.reply.send(items);
                             });
+                        }
+                        Request::CommandArgumentLifecycle(work) => {
+                            if work.is_latest() {
+                                let request = work.value();
+                                let _ = run_command_completion_scoped(
+                                    &rt.lua,
+                                    request.cancel.clone(),
+                                    crate::api::completion::run_command_argument_lifecycle(
+                                        &rt.lua,
+                                        request,
+                                    ),
+                                )
+                                .await;
+                            }
+                            work.finish(drop);
                         }
                         Request::ExpandReferences { text, reply } => {
                             let res =
@@ -3093,6 +3172,7 @@ pub fn spawn(
         tx,
         prio_tx,
         command_arguments,
+        command_argument_lifecycle,
         splash_frames,
         join: Some(handle),
         shutdown,

@@ -20,6 +20,7 @@ pub use docs::{DocKind, FnDoc, ModuleDoc, ParamDoc, api_docs};
 pub use error::PluginError;
 pub use loader::{EventHandle, PluginHost, TestCompletionBackend};
 pub use plugin_permissions::{Permission, PluginPermissions};
+pub use runtime::{CommandArgumentContext, CommandArgumentLifecycle};
 pub use runtime::{KILL_GRACE, RestoreItem, WARM_TOOL_CAP};
 pub use splash::{
     SPLASH_PULL_TIMEOUT, SplashFrame, SplashPull, SplashRow, SplashStyle, VersionInfo,
@@ -109,6 +110,50 @@ pub mod test_support {
             None
         }
 
+        pub fn try_finish_command_arguments(
+            &self,
+            items: Vec<crate::CommandArgumentItem>,
+        ) -> Option<(u64, u64)> {
+            use crate::runtime::Request;
+            while let Ok(req) = self.0.try_recv() {
+                if let Request::CollectCommandArgumentItems(work) = req {
+                    let stamp = (
+                        work.value().context.session,
+                        work.value().context.generation,
+                    );
+                    work.finish(|request| {
+                        let _ = request.reply.send(items);
+                    });
+                    return Some(stamp);
+                }
+            }
+            None
+        }
+
+        pub fn try_finish_command_argument_lifecycle(
+            &self,
+        ) -> Option<(&'static str, Option<String>, bool)> {
+            use crate::runtime::{CommandArgumentLifecycle, Request};
+            while let Ok(req) = self.0.try_recv() {
+                if let Request::CommandArgumentLifecycle(work) = req {
+                    let latest = work.is_latest();
+                    let event = match work.value().event {
+                        CommandArgumentLifecycle::Highlight => "highlight",
+                        CommandArgumentLifecycle::Accept => "accept",
+                        CommandArgumentLifecycle::Cancel => "cancel",
+                    };
+                    let insertion = work
+                        .value()
+                        .item
+                        .as_ref()
+                        .map(|item| item.insertion.clone());
+                    work.finish(drop);
+                    return Some((event, insertion, latest));
+                }
+            }
+            None
+        }
+
         pub fn try_finish_splash_frame(
             &self,
             frame: Option<crate::SplashFrame>,
@@ -138,25 +183,29 @@ pub mod test_support {
     /// disconnected/probed handles so end-to-end Lua behavior (e.g. pulling a
     /// `splash.render` frame) can be exercised.
     pub fn spawn_host_for_tests(plugins: &[&str]) -> (crate::EventHandle, PluginHostGuard) {
+        let state_dir = tempfile::tempdir().unwrap();
+        let host = spawn_host_for_tests_with_state(plugins, state_dir.path().to_owned());
+        let handle = host.event_handle();
+        (handle, PluginHostGuard { host, state_dir })
+    }
+
+    pub fn spawn_host_for_tests_with_state(
+        plugins: &[&str],
+        state_dir: std::path::PathBuf,
+    ) -> PluginHost {
         use maki_config::PluginsConfig;
         use std::collections::HashMap;
         use std::sync::Arc;
-        let reg: Arc<maki_agent::tools::ToolRegistry> =
-            Arc::new(maki_agent::tools::ToolRegistry::new());
-        let state_dir = tempfile::tempdir().unwrap();
-        let mut host = crate::PluginHost::with_state_dir_for_tests(
-            Arc::clone(&reg),
-            state_dir.path().to_owned(),
-        )
-        .unwrap();
-        let cfg = PluginsConfig {
+
+        let registry = Arc::new(maki_agent::tools::ToolRegistry::new());
+        let mut host = crate::PluginHost::with_state_dir_for_tests(registry, state_dir).unwrap();
+        let config = PluginsConfig {
             enabled: true,
             names: plugins.iter().map(|s| s.to_string()).collect(),
             opts: HashMap::new(),
         };
-        host.load_builtins(&cfg).unwrap();
-        let handle = host.event_handle();
-        (handle, PluginHostGuard { host, state_dir })
+        host.load_builtins(&config).unwrap();
+        host
     }
 
     /// Keeps a booted [`PluginHost`] alive (its `Drop` joins the Lua thread).

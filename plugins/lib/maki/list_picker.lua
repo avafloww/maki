@@ -14,38 +14,54 @@ local function split_words(query)
   return words
 end
 
+-- Returns matched byte positions and a lower-is-better score. Compact matches
+-- sort before scattered ones; ties retain the source order.
+local function fuzzy_match(text, word)
+  local positions = {}
+  local start = 1
+  local hay = text:lower()
+  for i = 1, #word do
+    local position = hay:find(word:sub(i, i), start, true)
+    if not position then
+      return nil
+    end
+    positions[#positions + 1] = position
+    start = position + 1
+  end
+  local gaps = positions[#positions] - positions[1] + 1 - #word
+  return positions, gaps * 1000 + positions[1]
+end
+
 -- Words may come in any order: "441 review" still hits "review gh pr 441".
 local function matches(label, words)
-  local hay = label:lower()
-  for _, w in ipairs(words) do
-    if not hay:find(w, 1, true) then
+  for _, word in ipairs(words) do
+    if not fuzzy_match(label, word) then
       return false
     end
   end
   return true
 end
 
--- Word hits can overlap ("alpha" and "phab" in "alphabet"), which would nest
--- highlights, so the ranges are merged before styling.
 local function match_ranges(label, words)
-  local hay = label:lower()
   local ranges = {}
-  for _, w in ipairs(words) do
-    local s, e = hay:find(w, 1, true)
-    if s then
-      ranges[#ranges + 1] = { s, e }
+  for _, word in ipairs(words) do
+    local positions = fuzzy_match(label, word)
+    if positions then
+      for _, position in ipairs(positions) do
+        ranges[#ranges + 1] = { position, position }
+      end
     end
   end
   table.sort(ranges, function(a, b)
     return a[1] < b[1]
   end)
   local merged = {}
-  for _, r in ipairs(ranges) do
+  for _, range in ipairs(ranges) do
     local last = merged[#merged]
-    if last and r[1] <= last[2] + 1 then
-      last[2] = math.max(last[2], r[2])
+    if last and range[1] <= last[2] + 1 then
+      last[2] = math.max(last[2], range[2])
     else
-      merged[#merged + 1] = r
+      merged[#merged + 1] = range
     end
   end
   return merged
@@ -111,13 +127,49 @@ local function filter_items(items, query)
     end
     return items, indices
   end
-  local filtered, indices = {}, {}
-  for i, item in ipairs(items) do
+  local matches = {}
+  for index, item in ipairs(items) do
     local section = item_section(item)
-    local hay = section and (item_label(item) .. " " .. section) or item_label(item)
-    if matches(hay, words) then
-      filtered[#filtered + 1] = item
-      indices[#indices + 1] = i
+    local label = item_label(item)
+    local score = 0
+    for _, word in ipairs(words) do
+      local _, label_score = fuzzy_match(label, word)
+      local section_score = nil
+      if section then
+        _, section_score = fuzzy_match(section, word)
+      end
+      local word_score = math.min(label_score or math.huge, section_score or math.huge)
+      if word_score == math.huge then
+        score = nil
+        break
+      end
+      score = score + word_score
+    end
+    if score then
+      matches[#matches + 1] = { item = item, index = index, score = score }
+    end
+  end
+  local groups = {}
+  for _, match in ipairs(matches) do
+    local section = item_section(match.item)
+    local group = groups[#groups]
+    if not group or group.section ~= section then
+      group = { section = section, matches = {} }
+      groups[#groups + 1] = group
+    end
+    group.matches[#group.matches + 1] = match
+  end
+  local filtered, indices = {}, {}
+  for _, group in ipairs(groups) do
+    table.sort(group.matches, function(a, b)
+      if a.score ~= b.score then
+        return a.score < b.score
+      end
+      return a.index < b.index
+    end)
+    for _, match in ipairs(group.matches) do
+      filtered[#filtered + 1] = match.item
+      indices[#indices + 1] = match.index
     end
   end
   return filtered, indices
@@ -183,7 +235,8 @@ end
 -- Open a fuzzy-filter picker in a floating window and block until the user
 -- decides. {items} is a list of strings or { label, detail? } tables. {opts}:
 -- title, footer, cursor (initial index), submit_keys (extra submit keys
--- besides enter), on_change(item, index), on_timeout(), and timeout_ms.
+-- besides enter), on_change(item, index), notify_initial (call on_change for
+-- the initial item), on_timeout(), and timeout_ms.
 -- Returns { type = "choice"|"delete", index } or { type = "close" }.
 function ListPicker.open(items, opts)
   opts = opts or {}
@@ -254,6 +307,9 @@ function ListPicker.open(items, opts)
   buf:set_lines(build_lines())
   if #filtered > 0 then
     move_cursor(cursor)
+    if opts.notify_initial and opts.on_change then
+      opts.on_change(filtered[cursor], original_indices[cursor])
+    end
   end
 
   while true do

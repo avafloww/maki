@@ -671,14 +671,106 @@ fn enter_executes_new_command() {
     assert!(!app.command_palette.is_active());
 }
 
+fn lifecycle_app() -> (App, maki_lua::test_support::RequestProbe) {
+    let dir = StateDir::from_path(env::temp_dir());
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    let mut app = build_app_with_full(
+        dir.clone(),
+        Arc::new(test_writer(dir)),
+        LuaCommandReader::from_commands(vec![LuaCommandInfo {
+            name: "/deploy".into(),
+            description: "Deploy".into(),
+            plugin: "deploy".into(),
+            max_args: 1,
+            has_argument_completion: true,
+        }]),
+        handle,
+        UiConfig::default(),
+    );
+    app.input_box.set_input("/deploy a".into());
+    app.command_palette.sync("/deploy a");
+    app.command_palette.sync_arguments(
+        "/deploy a",
+        9,
+        &app.lua_event_handle,
+        &app.state.mode.id_key(),
+    );
+    probe
+        .try_finish_command_arguments(vec![CommandArgumentItem {
+            label: "alpha".into(),
+            insertion: "alpha".into(),
+            description: None,
+        }])
+        .unwrap();
+    let _ = app.command_palette.poll_arguments(&app.lua_event_handle);
+    probe.try_finish_command_argument_lifecycle().unwrap();
+    (app, probe)
+}
+
 #[test]
-fn ctrl_c_closes_palette() {
-    let mut app = test_app();
-    type_slash(&mut app);
-    assert!(app.command_palette.is_active());
+fn ctrl_c_closes_palette_and_cancels_lifecycle() {
+    let (mut app, probe) = lifecycle_app();
 
     app.update(Msg::Key(kb::QUIT.to_key_event()));
+
     assert!(!app.command_palette.is_active());
+    assert_eq!(
+        probe.try_finish_command_argument_lifecycle(),
+        Some(("cancel", None, true))
+    );
+}
+
+#[test]
+fn esc_closes_palette_and_cancels_lifecycle() {
+    let (mut app, probe) = lifecycle_app();
+
+    app.update(Msg::Key(key(KeyCode::Esc)));
+
+    assert!(!app.command_palette.is_active());
+    assert_eq!(
+        probe.try_finish_command_argument_lifecycle(),
+        Some(("cancel", None, true))
+    );
+}
+
+#[test]
+fn reset_session_cancels_completion_lifecycle_once() {
+    let (mut app, probe) = lifecycle_app();
+
+    app.reset_session();
+
+    assert_eq!(
+        probe.try_finish_command_argument_lifecycle(),
+        Some(("cancel", None, true))
+    );
+    assert!(probe.try_finish_command_argument_lifecycle().is_none());
+}
+
+#[test]
+fn session_switch_cancels_completion_lifecycle_once() {
+    let (mut app, probe) = lifecycle_app();
+    let session = AppSession::new("test-model", "/tmp/test");
+
+    app.apply_loaded_session(session, &test_model());
+
+    assert_eq!(
+        probe.try_finish_command_argument_lifecycle(),
+        Some(("cancel", None, true))
+    );
+    assert!(probe.try_finish_command_argument_lifecycle().is_none());
+}
+
+#[test]
+fn programmatic_overlay_close_cancels_completion_lifecycle_once() {
+    let (mut app, probe) = lifecycle_app();
+
+    app.close_all_overlays();
+
+    assert_eq!(
+        probe.try_finish_command_argument_lifecycle(),
+        Some(("cancel", None, true))
+    );
+    assert!(probe.try_finish_command_argument_lifecycle().is_none());
 }
 
 /// The event exists so plugins can drop what belonged to the session that
