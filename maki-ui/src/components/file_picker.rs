@@ -296,6 +296,13 @@ impl FilePickerModal {
             }
         }
 
+        // An empty walk has nothing to pick. Flash and close no matter how the
+        // picker got here, even if the debounce already flipped it visible.
+        if !s.walking && s.nucleo.injector().injected_items() == 0 {
+            self.session = None;
+            return (Dirty::YES, Some(EMPTY_DIR_MSG.into()));
+        }
+
         if !s.visible {
             let has_files = s.nucleo.injector().injected_items() > 0;
             let debounce_elapsed = s.started_at.elapsed().as_millis() >= PENDING_DEBOUNCE_MS;
@@ -303,9 +310,6 @@ impl FilePickerModal {
             if has_files || (s.walking && debounce_elapsed) {
                 s.visible = true;
                 dirty = Dirty::YES;
-            } else if !s.walking {
-                self.session = None;
-                return (Dirty::YES, Some(EMPTY_DIR_MSG.into()));
             }
         }
 
