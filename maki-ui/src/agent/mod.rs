@@ -429,7 +429,7 @@ mod tests {
 
         let mut probe_seen = false;
         let mut restored_seen = 0;
-        while !probe_seen {
+        while !probe_seen || restored_seen < 1 {
             let envelope = handles
                 .agent_rx
                 .recv_timeout(LONG_TIMEOUT)
