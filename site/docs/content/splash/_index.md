@@ -56,6 +56,37 @@ local v = maki.version()
 
 The default plugin draws the top-right version text and, when an update exists, appends ` run maki update to get v<latest>`. It queries `maki.version()` inside `splash.render`, so the version UI is fully plugin-owned.
 
+## Bundled gallery
+
+Five ready-made skins ship inside the binary as requireable modules under the `splash.*` namespace. Nothing loads until you ask for it; each require one line in `init.lua`:
+
+```lua
+require("splash.kaleidoscope")
+```
+
+| Module | What it draws |
+|--------|---------------|
+| `splash.kaleidoscope` | 10-fold mirror kaleidoscope over a circle-inversion fractal |
+| `splash.voronoi` | animated voronoi cells with warm glowing borders |
+| `splash.caustics` | deep-water light caustics |
+| `splash.metaballs` | merging metaballs with a glow contour |
+| `splash.aurora` | northern-light bands drifting over a night gradient |
+
+Each module self-activates on require and also returns `M` with `M.render(w, h, t, fade)`, so a small cycler can rotate through them:
+
+```lua
+local skins = {
+  require("splash.kaleidoscope"),
+  require("splash.aurora"),
+}
+maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
+  local skin = skins[(math.floor(t / 3) % #skins) + 1]
+  return skin.render(w, h, t, fade)
+end)
+```
+
+Bundled modules resolve before files in your config's `lua/` dir, so keep personal skins on plain names (`require("myskin")`) outside the `splash.*` namespace. The gallery sources live in `plugins/splash_gallery/` in the repo and follow the same single-file pattern as the custom skins below, so they double as worked examples.
+
 ## Lifecycle events
 
 `SplashShown` fires when the home screen appears (startup, and after returning to it). `SplashHidden` fires when it goes away, once the first message or turn lands. A plugin uses these to reset per-show state, like picking a fresh tip or clearing matrix-rain columns:

@@ -129,6 +129,13 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         name: "splash",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/splash"),
     },
+    // Gallery of ready-made splash skins. Not a loadable plugin (no
+    // init.lua, not in DEFAULT_BUILTINS): it only contributes modules so
+    // any config can `require("splash.<skin>")` on demand.
+    BundledPlugin {
+        name: "splash_gallery",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/splash_gallery"),
+    },
 ];
 
 pub(crate) fn lib_dir() -> &'static Dir<'static> {
