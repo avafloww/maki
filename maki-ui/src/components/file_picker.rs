@@ -708,7 +708,9 @@ mod tests {
         done_tx.send(()).unwrap();
 
         let deadline = Instant::now() + CONVERGE_TIMEOUT;
-        while picker.tick() != (Dirty::NO, None) {
+        // A quiet tick only says "no new results"; the matcher worker may
+        // still hold its lock, in which case one more frame is owed.
+        while picker.tick() != (Dirty::NO, None) || picker.cadence() != Cadence::IDLE {
             assert!(Instant::now() < deadline, "the picker never stopped");
             std::thread::yield_now();
         }

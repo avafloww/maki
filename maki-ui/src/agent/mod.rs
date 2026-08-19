@@ -360,6 +360,7 @@ mod tests {
         let permissions = Arc::new(PermissionManager::new(
             PermissionsConfig::default(),
             PathBuf::from("/tmp"),
+            Arc::default(),
         ));
         let handles = AgentHandles::spawn(
             &model_slot,
