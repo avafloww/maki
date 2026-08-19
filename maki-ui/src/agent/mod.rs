@@ -416,12 +416,11 @@ mod tests {
             run_id_before + 2,
             "each respawn must bump run_id exactly once"
         );
-        assert_eq!(
-            app.queue.text_messages(),
-            [RESTORED_TEXT],
-            "the restored item lands in the new queue exactly once"
-        );
 
+        // The restored item is drained from the new queue by the live agent
+        // loop, which may pop it before this thread reads the shared queue, so
+        // asserting `text_messages()` here would race. The channel is the
+        // deterministic witness: `QueueItemConsumed` only leaves the new queue.
         pre_gen1_sender
             .send(AgentEvent::TextDelta {
                 text: PROBE_TEXT.into(),
@@ -429,22 +428,25 @@ mod tests {
             .expect("pre-generation-1 sender must still deliver after two respawns");
 
         let mut probe_seen = false;
-        let mut consumed_seen = false;
-        while !(probe_seen && consumed_seen) {
+        let mut restored_seen = 0;
+        while !probe_seen {
             let envelope = handles
                 .agent_rx
                 .recv_timeout(LONG_TIMEOUT)
                 .expect("probe or restored queue item never reached the tab channel");
             match envelope.event {
                 AgentEvent::TextDelta { ref text } if text == PROBE_TEXT => probe_seen = true,
-                AgentEvent::QueueItemConsumed { ref text, .. } => {
-                    assert_eq!(text, RESTORED_TEXT);
+                AgentEvent::QueueItemConsumed { ref text, .. } if text == RESTORED_TEXT => {
                     assert_eq!(envelope.run_id, app.run_id);
-                    consumed_seen = true;
+                    restored_seen += 1;
                 }
                 _ => {}
             }
         }
+        assert_eq!(
+            restored_seen, 1,
+            "the restored item is consumed exactly once, from the new queue"
+        );
     }
 
     /// If the seeded empty snapshot ever outlived `spawn`, the next checkpoint
