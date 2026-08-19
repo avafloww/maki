@@ -266,6 +266,7 @@ fn spawn_session(
         } else {
             QuestionMode::Headless
         },
+        plugin_rules: Arc::clone(&params.plugin_rules),
     })
 }
 
@@ -750,6 +751,7 @@ mod tests {
             permissions: Arc::new(PermissionManager::new(
                 maki_config::PermissionsConfig::default(),
                 PathBuf::from("/project"),
+                Arc::default(),
             )),
             task: smol::spawn(async {}),
         };

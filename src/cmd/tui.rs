@@ -258,6 +258,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
             fast,
             workflow: stack.config.always_workflow,
             model_policy: Arc::new(stack.config.provider.model_policy.clone()),
+            plugin_rules: stack.plugin_host.plugin_rules(),
         })
         .context("run sdk mode")?;
         return Ok(());
@@ -280,6 +281,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
             Arc::new(stack.config.provider.model_policy.clone()),
             cli.system_prompt,
             cli.append_system_prompt,
+            stack.plugin_host.plugin_rules(),
         )
         .context("run print mode")?;
         return Ok(());
@@ -339,6 +341,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
                 permissions: Arc::new(maki_agent::permissions::PermissionManager::new(
                     stack.config.permissions.clone(),
                     cwd.clone(),
+                    stack.plugin_host.plugin_rules(),
                 )),
                 timeouts: stack.timeouts(),
                 exit_on_done: cli.exit_on_done,

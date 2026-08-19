@@ -16,6 +16,7 @@ use clap::ValueEnum;
 use color_eyre::Result;
 use color_eyre::eyre::{Context, eyre};
 use maki_agent::headless::{HeadlessHandle, HeadlessParams};
+use maki_agent::permissions::PluginRuleStore;
 use maki_agent::tools::QUESTION_TOOL_NAME;
 use maki_agent::{AgentConfig, AgentEvent, DoneReason, Envelope, ImageSource, PermissionsConfig};
 use maki_config::ModelPolicy;
@@ -151,6 +152,7 @@ pub fn run(
     model_policy: Arc<ModelPolicy>,
     system_prompt_override: Option<String>,
     append_system_prompt: Option<String>,
+    plugin_rules: Arc<PluginRuleStore>,
 ) -> Result<()> {
     let prompt = match prompt_arg {
         Some(p) => p,
@@ -187,6 +189,7 @@ pub fn run(
         model_policy,
         system_prompt_override,
         append_system_prompt,
+        plugin_rules,
     });
 
     let HeadlessHandle {

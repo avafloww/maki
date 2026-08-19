@@ -103,6 +103,7 @@ fn build_app_with_full(
                 ..Default::default()
             },
             PathBuf::from("/tmp"),
+            Arc::default(),
         )),
         Arc::from([]),
         handle,

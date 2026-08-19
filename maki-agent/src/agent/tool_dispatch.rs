@@ -712,7 +712,11 @@ mod tests {
                 ..Default::default()
             };
             let dir = TempDir::new().unwrap();
-            let permissions = Arc::new(PermissionManager::new(deny_cfg, dir.path().to_path_buf()));
+            let permissions = Arc::new(PermissionManager::new(
+                deny_cfg,
+                dir.path().to_path_buf(),
+                Arc::default(),
+            ));
             let mut ctx = crate::tools::test_support::stub_ctx_with_permissions(
                 &AgentMode::Build,
                 permissions,
@@ -830,7 +834,11 @@ mod tests {
                 ..Default::default()
             };
             let dir = TempDir::new().unwrap();
-            let permissions = Arc::new(PermissionManager::new(deny_cfg, dir.path().to_path_buf()));
+            let permissions = Arc::new(PermissionManager::new(
+                deny_cfg,
+                dir.path().to_path_buf(),
+                Arc::default(),
+            ));
             let ctx = crate::tools::test_support::stub_ctx_with_permissions(
                 &AgentMode::Build,
                 permissions,
@@ -938,7 +946,11 @@ mod tests {
                 ..Default::default()
             };
             let dir = TempDir::new().unwrap();
-            let permissions = Arc::new(PermissionManager::new(deny_cfg, dir.path().to_path_buf()));
+            let permissions = Arc::new(PermissionManager::new(
+                deny_cfg,
+                dir.path().to_path_buf(),
+                Arc::default(),
+            ));
             let ctx = crate::tools::test_support::stub_ctx_with_permissions(
                 &AgentMode::Build,
                 permissions,

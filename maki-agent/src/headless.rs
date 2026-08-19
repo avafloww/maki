@@ -17,7 +17,7 @@ use tracing::{error, warn};
 
 use crate::agent::{self, History};
 use crate::cancel::{CancelMap, CancelToken};
-use crate::permissions::PermissionManager;
+use crate::permissions::{PermissionManager, PluginRuleStore};
 use crate::prompt::ResolvedSlots;
 use crate::template;
 use crate::tools::{DescriptionContext, FileReadTracker, ToolAudience, ToolFilter, ToolRegistry};
@@ -85,6 +85,7 @@ pub struct HeadlessParams {
     pub system_prompt_override: Option<String>,
     pub append_system_prompt: Option<String>,
     pub model_policy: Arc<ModelPolicy>,
+    pub plugin_rules: Arc<PluginRuleStore>,
 }
 
 pub struct HeadlessHandle {
@@ -223,6 +224,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                     permissions: Arc::new(PermissionManager::new(
                         params.permissions_config,
                         working_dir_path,
+                        params.plugin_rules,
                     )),
                     session_id: Some(session_ref_clone.clone()),
                     mailbox: Some(mailbox.clone()),
@@ -300,6 +302,7 @@ pub struct InteractiveParams {
     pub model_policy: Arc<ModelPolicy>,
     pub modes: Arc<crate::ModeRegistry>,
     pub question_mode: crate::tools::QuestionMode,
+    pub plugin_rules: Arc<PluginRuleStore>,
 }
 
 pub struct InteractiveHandle {
@@ -351,6 +354,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
     let permissions = Arc::new(PermissionManager::new(
         params.permissions_config,
         params.initial_wd,
+        Arc::clone(&params.plugin_rules),
     ));
     if params.yolo {
         permissions.toggle_yolo();

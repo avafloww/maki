@@ -77,5 +77,6 @@ pub fn run(
         system_prompt_override,
         append_system_prompt,
         model_policy: Arc::new(config.provider.model_policy.clone()),
+        plugin_rules: plugin_host.plugin_rules(),
     })
 }
