@@ -3,6 +3,7 @@ pub(crate) mod r#async;
 pub(crate) mod autocmd;
 pub(crate) mod base64;
 pub(crate) mod completion;
+pub(crate) mod contribution;
 pub(crate) mod env;
 pub(crate) mod r#fn;
 pub(crate) mod fs;
@@ -54,6 +55,7 @@ pub(crate) fn create_maki_global(
         ui_action_tx.clone(),
     )?;
     autocmd::add_autocmd_methods(&api, lua, Arc::clone(&plugin))?;
+    contribution::add_methods(&api, lua, Arc::clone(&plugin))?;
     slot::add_slot_methods(&api, lua, Arc::clone(&plugin))?;
     let mode_table = mode::create_mode_table(lua, ui_action_tx.clone())?;
     api.set("mode", mode_table)?;

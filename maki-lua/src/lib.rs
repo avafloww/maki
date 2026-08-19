@@ -1,4 +1,5 @@
 mod api;
+mod coalesced_latest;
 pub mod docs;
 pub mod docs_render;
 mod error;
@@ -11,9 +12,9 @@ mod splash;
 pub use api::keymap::{KeymapEntry, KeymapReader, KeymapSnapshot};
 pub use api::options::{OptionSpec, OptionType, PluginOptionSpecs};
 pub use api::util::command::{
-    Anchor, Axis, Border, BuiltinAction, Dimension, Edge, FloatConfig, FloatConfigPatch,
-    HintReader, HintSnapshot, LuaCommandInfo, LuaCommandReader, SessionReply, SessionRequest,
-    Split, TitlePos, UiAction, WinCommand, WinEvent, WinView,
+    Anchor, Axis, Border, BuiltinAction, CommandArgumentItem, Dimension, Edge, FloatConfig,
+    FloatConfigPatch, HintReader, HintSnapshot, LuaCommandInfo, LuaCommandReader, SessionReply,
+    SessionRequest, Split, TitlePos, UiAction, WinCommand, WinEvent, WinView,
 };
 pub use docs::{DocKind, FnDoc, ModuleDoc, ParamDoc, api_docs};
 pub use error::PluginError;
@@ -107,6 +108,23 @@ pub mod test_support {
             }
             None
         }
+
+        pub fn try_finish_splash_frame(
+            &self,
+            frame: Option<crate::SplashFrame>,
+        ) -> Option<(u16, u16)> {
+            use crate::runtime::Request;
+            while let Ok(req) = self.0.try_recv() {
+                if let Request::SplashFrame(work) = req {
+                    let size = (work.value().width, work.value().height);
+                    work.finish(|request| {
+                        let _ = request.reply.send(frame);
+                    });
+                    return Some(size);
+                }
+            }
+            None
+        }
     }
 
     pub fn probed_event_handle() -> (crate::EventHandle, RequestProbe) {
@@ -125,7 +143,12 @@ pub mod test_support {
         use std::sync::Arc;
         let reg: Arc<maki_agent::tools::ToolRegistry> =
             Arc::new(maki_agent::tools::ToolRegistry::new());
-        let mut host = crate::PluginHost::new(Arc::clone(&reg)).unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut host = crate::PluginHost::with_state_dir_for_tests(
+            Arc::clone(&reg),
+            state_dir.path().to_owned(),
+        )
+        .unwrap();
         let cfg = PluginsConfig {
             enabled: true,
             names: plugins.iter().map(|s| s.to_string()).collect(),
@@ -133,17 +156,22 @@ pub mod test_support {
         };
         host.load_builtins(&cfg).unwrap();
         let handle = host.event_handle();
-        (handle, PluginHostGuard { host })
+        (handle, PluginHostGuard { host, state_dir })
     }
 
     /// Keeps a booted [`PluginHost`] alive (its `Drop` joins the Lua thread).
     pub struct PluginHostGuard {
         host: PluginHost,
+        state_dir: tempfile::TempDir,
     }
 
     impl PluginHostGuard {
         pub fn host(&self) -> &PluginHost {
             &self.host
+        }
+
+        pub fn state_dir(&self) -> &std::path::Path {
+            self.state_dir.path()
         }
     }
 

@@ -240,6 +240,10 @@ impl Chat {
         self.messages_panel.splash_frame()
     }
 
+    pub(crate) fn set_splash_frame(&mut self, frame: Option<maki_lua::SplashFrame>) {
+        self.messages_panel.set_splash_frame(frame);
+    }
+
     #[doc(hidden)]
     pub fn splash_pull_suppressed(&self) -> bool {
         self.messages_panel.splash_pull_suppressed()

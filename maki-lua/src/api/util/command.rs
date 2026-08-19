@@ -11,12 +11,20 @@ use strum::{EnumString, VariantNames};
 pub(crate) const NO_UI_ERR: &str = "no interactive UI attached";
 const UI_DROPPED_ERR: &str = "ui event loop dropped the request";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandArgumentItem {
+    pub label: String,
+    pub insertion: String,
+    pub description: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct LuaCommandInfo {
     pub name: Arc<str>,
     pub description: Arc<str>,
     pub plugin: Arc<str>,
     pub max_args: usize,
+    pub has_argument_completion: bool,
 }
 
 #[derive(Clone, Default)]
@@ -127,6 +135,7 @@ pub(crate) struct CommandEntry {
     pub handler: RegistryKey,
     pub description: Arc<str>,
     pub max_args: usize,
+    pub argument_completion: Option<RegistryKey>,
 }
 
 pub(crate) type CommandHandlerMap = HashMap<Arc<str>, HashMap<Arc<str>, CommandEntry>>;
@@ -140,6 +149,7 @@ pub(crate) fn publish_command_snapshot(map: &CommandHandlerMap, writer: &LuaComm
                 description: Arc::clone(&entry.description),
                 plugin: Arc::clone(plugin),
                 max_args: entry.max_args,
+                has_argument_completion: entry.argument_completion.is_some(),
             })
         })
         .collect();
@@ -519,6 +529,7 @@ mod tests {
             handler: key,
             description: Arc::from(desc),
             max_args: 0,
+            argument_completion: None,
         }
     }
 

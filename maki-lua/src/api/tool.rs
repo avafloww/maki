@@ -765,13 +765,29 @@ fn register_permission_rule(
 ///                          with one opts table: `opts.args` is the raw
 ///                          argument string (whitespace kept, may be empty)
 ///                          and `opts.fargs` is the same split into words.
+///   completion  (table)    Optional. Argument completion specification. Use
+///                          `items = {...}` for a static list or `get_items =
+///                          function(ctx) -> {...}` for dynamic candidates.
+///                          Each candidate has `label` (match/display text),
+///                          `insertion` (replacement text), and optional
+///                          `description`. The callback context has `command`
+///                          (registered slash name), `args` (raw argument string,
+///                          never the full slash input), `arg` (argument under
+///                          the cursor), `index` (zero-based argument index),
+///                          and `mode` (active mode id).
 /// @return
 /// @example
 /// maki.api.register_command({
 ///   name = "/hello",
 ///   description = "Say hello",
-///   handler = function()
-///     maki.ui.flash("Hello from my plugin!")
+///   nargs = 1,
+///   completion = {
+///     get_items = function(ctx)
+///       return { { label = "world", insertion = "world", description = ctx.mode } }
+///     end,
+///   },
+///   handler = function(opts)
+///     maki.ui.flash("Hello " .. opts.args)
 ///   end,
 /// })
 #[lua_fn]
@@ -1382,6 +1398,18 @@ fn register_command_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> LuaRe
         .get("handler")
         .map_err(|_| mlua::Error::runtime("register_command: missing 'handler'"))?;
 
+    let completion_key = match spec.get::<Table>("completion") {
+        Ok(completion) => {
+            if let Ok(items) = completion.get::<mlua::Table>("items") {
+                let items = lua.create_registry_value(items)?;
+                Some(items)
+            } else {
+                let get_items: Function = completion.get("get_items")?;
+                Some(lua.create_registry_value(get_items)?)
+            }
+        }
+        Err(_) => None,
+    };
     let handler_key = lua.create_registry_value(handler)?;
     let name: Arc<str> = Arc::from(name.as_str());
     let description: Arc<str> = Arc::from(description.as_str());
@@ -1390,12 +1418,20 @@ fn register_command_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> LuaRe
         let mut map = lua
             .app_data_mut::<CommandHandlerMap>()
             .ok_or_else(|| mlua::Error::runtime("register_command: not initialized"))?;
-        map.entry(Arc::clone(&plugin)).or_default().insert(
+        let commands = map.entry(Arc::clone(&plugin)).or_default();
+        if let Some(previous) = commands.remove(&name) {
+            let _ = lua.remove_registry_value(previous.handler);
+            if let Some(key) = previous.argument_completion {
+                let _ = lua.remove_registry_value(key);
+            }
+        }
+        commands.insert(
             Arc::clone(&name),
             CommandEntry {
                 handler: handler_key,
                 description,
                 max_args,
+                argument_completion: completion_key,
             },
         );
     }

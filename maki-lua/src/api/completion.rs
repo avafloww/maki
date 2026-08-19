@@ -16,6 +16,7 @@ use maki_lua_macro::{lua_fn, lua_table};
 use mlua::{Function, Lua, MultiValue, Result as LuaResult, Table, Value};
 use serde::Deserialize;
 
+use crate::api::util::command::CommandArgumentItem;
 use crate::api::util::convert::lua_to_json;
 use crate::api::util::pair::Pair;
 
@@ -321,6 +322,83 @@ pub(crate) async fn collect_completion_items(lua: &Lua, ctx: &CompletionCtx) -> 
     out
 }
 
+pub(crate) async fn collect_command_argument_items(
+    lua: &Lua,
+    plugin: &str,
+    command: &str,
+    args: &str,
+    arg: &str,
+    index: usize,
+    mode: &str,
+) -> Vec<CommandArgumentItem> {
+    let value = lua
+        .app_data_ref::<crate::api::util::command::CommandHandlerMap>()
+        .and_then(|map| {
+            map.get(plugin).and_then(|commands| {
+                commands.get(command).and_then(|entry| {
+                    entry
+                        .argument_completion
+                        .as_ref()
+                        .and_then(|key| lua.registry_value::<Value>(key).ok())
+                })
+            })
+        });
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    let result = match value {
+        Value::Table(items) => Ok(items),
+        Value::Function(function) => {
+            let ctx = match lua.create_table() {
+                Ok(ctx) => ctx,
+                Err(_) => return Vec::new(),
+            };
+            if ctx.set("command", command).is_err()
+                || ctx.set("args", args).is_err()
+                || ctx.set("arg", arg).is_err()
+                || ctx.set("index", index).is_err()
+                || ctx.set("mode", mode).is_err()
+            {
+                return Vec::new();
+            }
+            function
+                .call_async::<Value>(ctx)
+                .await
+                .and_then(|v| match v {
+                    Value::Table(t) => Ok(t),
+                    _ => Err(mlua::Error::runtime(
+                        "argument completion must return a table",
+                    )),
+                })
+        }
+        _ => Err(mlua::Error::runtime(
+            "argument completion must be a table or function",
+        )),
+    };
+    let Ok(items) = result else { return Vec::new() };
+    let Ok(json) = lua_to_json(lua, &Value::Table(items)) else {
+        return Vec::new();
+    };
+    let Ok(raw) = serde_json::from_value::<Vec<serde_json::Value>>(json) else {
+        return Vec::new();
+    };
+    raw.into_iter()
+        .filter_map(|item| {
+            let label = item.get("label")?.as_str()?.to_owned();
+            let insertion = item.get("insertion")?.as_str()?.to_owned();
+            let description = item
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            Some(CommandArgumentItem {
+                label,
+                insertion,
+                description,
+            })
+        })
+        .collect()
+}
+
 /// Drop everything `plugin` registered. Called from `clear_plugin` so an
 /// unloaded plugin's sources and expanders go away with it.
 pub(crate) fn clear_plugin(lua: &Lua, plugin: &str) {
@@ -510,6 +588,62 @@ mod tests {
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"skill:rev"));
         assert!(labels.contains(&"subagent:research"));
+    }
+
+    #[test]
+    fn command_argument_completion_receives_raw_args_context() {
+        let lua = lua_with_stores();
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let observed_ctx = Arc::clone(&observed);
+        let completion = lua
+            .create_function(move |lua, ctx: Table| {
+                *observed_ctx.lock().unwrap() = Some((
+                    ctx.get::<String>("command")?,
+                    ctx.get::<String>("args")?,
+                    ctx.get::<String>("arg")?,
+                    ctx.get::<usize>("index")?,
+                    ctx.get::<String>("mode")?,
+                ));
+                lua.create_table()
+            })
+            .unwrap();
+        let key = lua.create_registry_value(completion).unwrap();
+        lua.set_app_data(crate::api::util::command::CommandHandlerMap::from([(
+            Arc::from("test"),
+            HashMap::from([(
+                Arc::from("/deploy"),
+                crate::api::util::command::CommandEntry {
+                    handler: lua
+                        .create_registry_value(lua.create_function(|_, ()| Ok(())).unwrap())
+                        .unwrap(),
+                    description: Arc::from("deploy"),
+                    max_args: 1,
+                    argument_completion: Some(key),
+                },
+            )]),
+        )]));
+
+        let items = smol::block_on(collect_command_argument_items(
+            &lua,
+            "test",
+            "/deploy",
+            " staging ",
+            "staging",
+            0,
+            "build",
+        ));
+
+        assert!(items.is_empty());
+        assert_eq!(
+            observed.lock().unwrap().as_ref(),
+            Some(&(
+                "/deploy".to_string(),
+                " staging ".to_string(),
+                "staging".to_string(),
+                0,
+                "build".to_string(),
+            ))
+        );
     }
 
     #[test]

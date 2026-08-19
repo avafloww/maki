@@ -496,6 +496,69 @@ fn splash_stops_driving_cadence_once_a_message_exists() {
     assert_eq!(panel.cadence(), Cadence::IDLE, "the splash is gone");
 }
 
+#[test]
+fn settled_splash_one_shot_stays_pending_until_completion_is_polled() {
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    let config = UiConfig {
+        splash_animation: false,
+        ..UiConfig::default()
+    };
+    let mut panel = MessagesPanel::new(config, handle);
+    render(&mut panel, 80, 20);
+    panel.advance_splash_past_fade();
+
+    let _ = panel.tick();
+    assert_eq!(panel.cadence(), Cadence::PENDING);
+    assert_eq!(
+        probe.try_finish_splash_frame(Some(splash_frame(80, 20))),
+        Some((80, 20))
+    );
+    assert_eq!(panel.tick(), Dirty::YES, "{OWED}");
+    assert_eq!(panel.cadence(), Cadence::IDLE);
+}
+
+#[test]
+fn settled_splash_resize_forces_fresh_request() {
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    let config = UiConfig {
+        splash_animation: false,
+        ..UiConfig::default()
+    };
+    let mut panel = MessagesPanel::new(config, handle);
+    render(&mut panel, 80, 20);
+    panel.advance_splash_past_fade();
+    let _ = panel.tick();
+    assert_eq!(
+        probe.try_finish_splash_frame(Some(splash_frame(80, 20))),
+        Some((80, 20))
+    );
+    assert_eq!(panel.tick(), Dirty::YES, "{OWED}");
+    assert_eq!(panel.cadence(), Cadence::IDLE);
+
+    render(&mut panel, 100, 25);
+    let _ = panel.tick();
+    assert_eq!(panel.cadence(), Cadence::PENDING);
+    assert_eq!(
+        probe.try_finish_splash_frame(Some(splash_frame(100, 25))),
+        Some((100, 25))
+    );
+    assert_eq!(panel.tick(), Dirty::YES, "{OWED}");
+    assert_eq!(
+        panel
+            .splash_frame()
+            .map(|frame| (frame.width, frame.height)),
+        Some((100, 25))
+    );
+}
+
+fn splash_frame(width: u16, height: u16) -> maki_lua::SplashFrame {
+    maki_lua::SplashFrame {
+        width,
+        height,
+        rows: Vec::new(),
+    }
+}
+
 /// `drain_highlights` moved out of `view`, so `tick` is the only thing feeding
 /// the worker now. The wait is the worker's own round trip, not a sleep: the
 /// loop ends the moment the result lands, and the deadline only turns a broken

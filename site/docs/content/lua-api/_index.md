@@ -327,6 +327,16 @@ browsing memory files or toggling settings.
     with one opts table: `opts.args` is the raw
     argument string (whitespace kept, may be empty)
     and `opts.fargs` is the same split into words.
+  - `completion` (`table`) Optional. Argument completion specification. Use
+    `items = {...}` for a static list or `get_items =
+    function(ctx) -> {...}` for dynamic candidates.
+    Each candidate has `label` (match/display text),
+    `insertion` (replacement text), and optional
+    `description`. The callback context has `command`
+    (registered slash name), `args` (raw argument string,
+    never the full slash input), `arg` (argument under
+    the cursor), `index` (zero-based argument index),
+    and `mode` (active mode id).
 
 **Example:**
 
@@ -334,8 +344,14 @@ browsing memory files or toggling settings.
 maki.api.register_command({
   name = "/hello",
   description = "Say hello",
-  handler = function()
-    maki.ui.flash("Hello from my plugin!")
+  nargs = 1,
+  completion = {
+    get_items = function(ctx)
+      return { { label = "world", insertion = "world", description = ctx.mode } }
+    end,
+  },
+  handler = function(opts)
+    maki.ui.flash("Hello " .. opts.args)
   end,
 })
 ```
@@ -603,6 +619,42 @@ maki.api.register_expander("s", function(ref)
   return "<skill:" .. ref.value .. ">", nil
 end)
 ```
+
+---
+
+### `maki.api.register()` {#maki-api-register}
+
+```lua
+maki.api.register({name}, {key}, {value})
+```
+
+Register a plugin-owned value in a named contribution registry.
+The same plugin may replace its value. A different plugin cannot claim an
+existing key. Contributions are removed automatically when their plugin is
+unloaded or reloaded.
+
+**Parameters:**
+
+- `{name}` (`string`) Registry name, e.g. `"splash.gallery"`.
+- `{key}` (`string`) Stable contribution identifier.
+- `{value}` (`any`) Value exposed to registry consumers; tables may contain functions.
+
+---
+
+### `maki.api.collect()` {#maki-api-collect}
+
+```lua
+maki.api.collect({name})
+```
+
+Collect the current values in a named contribution registry.
+Returns a fresh table keyed by each contribution's stable identifier.
+
+**Parameters:**
+
+- `{name}` (`string`) Registry name.
+
+**Returns:** table Map of contribution key to registered value.
 
 ---
 
@@ -5301,8 +5353,8 @@ function M.replace(content, old_string, new_string, replace_all)
 -- Open a fuzzy-filter picker in a floating window and block until the user
 -- decides. {items} is a list of strings or { label, detail? } tables. {opts}:
 -- title, footer, cursor (initial index), submit_keys (extra submit keys
--- besides enter). Returns { type = "choice"|"delete", index } or
--- { type = "close" }.
+-- besides enter), on_change(item, index), on_timeout(), and timeout_ms.
+-- Returns { type = "choice"|"delete", index } or { type = "close" }.
 function ListPicker.open(items, opts)
 ListPicker.split_words = split_words
 ListPicker.matches = matches

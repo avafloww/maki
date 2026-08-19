@@ -14,9 +14,13 @@ use crate::api::completion::{CompletionCtx, ItemSpec};
 use crate::api::keymap::KeymapReader;
 use crate::api::options::{PluginOptionSpecs, PluginOpts};
 use crate::api::util::command::{HintReader, LuaCommandReader, UiAction};
+use crate::coalesced_latest::CoalescedLatest;
 use crate::error::PluginError;
 use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
-use crate::runtime::{self, ClickFallback, LuaThread, Request, RestoreItem};
+use crate::runtime::{
+    self, ClickFallback, CommandArgumentRequest, LuaThread, Request, RestoreItem,
+    SplashFrameRequest,
+};
 use crate::splash::{SPLASH_PULL_TIMEOUT, SplashFrame, SplashPull};
 use maki_agent::prompt::ResolvedSlots;
 
@@ -130,9 +134,7 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         name: "splash",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/splash"),
     },
-    // Gallery of ready-made splash skins. Not a loadable plugin (no
-    // init.lua, not in DEFAULT_BUILTINS): it only contributes modules so
-    // any config can `require("splash.<skin>")` on demand.
+    // Gallery plugin and its bundled renderer modules.
     BundledPlugin {
         name: "splash_gallery",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/splash_gallery"),
@@ -186,6 +188,21 @@ impl PluginHost {
     /// interpreter with full debug info. Applied at VM creation, so
     /// every chunk gets it, init.lua files included.
     pub fn with_jit(registry: Arc<ToolRegistry>, jit: bool) -> Result<Self, PluginError> {
+        Self::with_jit_and_state_dir(registry, jit, None)
+    }
+
+    pub(crate) fn with_state_dir_for_tests(
+        registry: Arc<ToolRegistry>,
+        state_dir: PathBuf,
+    ) -> Result<Self, PluginError> {
+        Self::with_jit_and_state_dir(registry, true, Some(state_dir))
+    }
+
+    fn with_jit_and_state_dir(
+        registry: Arc<ToolRegistry>,
+        jit: bool,
+        state_dir: Option<PathBuf>,
+    ) -> Result<Self, PluginError> {
         let modes = Arc::new(maki_agent::ModeRegistry::builtin());
         let plugin_rules = Arc::new(PluginRuleStore::default());
         let lua = runtime::spawn(
@@ -194,6 +211,7 @@ impl PluginHost {
             *BUNDLED_DIRS,
             jit,
             Arc::clone(&plugin_rules),
+            state_dir,
         )?;
         Ok(Self {
             inner: lua,
@@ -468,6 +486,8 @@ impl PluginHost {
             prio_tx: self.inner.prio_tx.clone(),
             modes: Arc::clone(&self.inner.modes),
             completion: None,
+            command_arguments: self.inner.command_arguments.clone(),
+            splash_frames: self.inner.splash_frames.clone(),
         }
     }
 
@@ -505,6 +525,8 @@ pub struct EventHandle {
     /// tests that build an `App` without a running plugin host. `None` in
     /// production, where the two RPC methods below talk to the Lua thread.
     completion: Option<Arc<TestCompletionBackend>>,
+    command_arguments: CoalescedLatest<CommandArgumentRequest>,
+    splash_frames: CoalescedLatest<SplashFrameRequest>,
 }
 
 /// In-memory completion/expander store for tests with no running Lua thread.
@@ -578,10 +600,17 @@ impl TestCompletionBackend {
 impl EventHandle {
     pub(crate) fn from_tx(tx: flume::Sender<Request>) -> Self {
         Self {
-            tx,
+            tx: tx.clone(),
             prio_tx: flume::unbounded().0,
             modes: Arc::new(maki_agent::ModeRegistry::builtin()),
             completion: None,
+            command_arguments: CoalescedLatest::new({
+                let tx = tx.clone();
+                move |work| tx.send(Request::CollectCommandArgumentItems(work)).is_ok()
+            }),
+            splash_frames: CoalescedLatest::new(move |work| {
+                tx.send(Request::SplashFrame(work)).is_ok()
+            }),
         }
     }
 
@@ -603,6 +632,8 @@ impl EventHandle {
             prio_tx: flume::unbounded().0,
             modes,
             completion: None,
+            command_arguments: CoalescedLatest::new(|_| false),
+            splash_frames: CoalescedLatest::new(|_| false),
         }
     }
 
@@ -615,6 +646,8 @@ impl EventHandle {
             prio_tx: flume::unbounded().0,
             modes: Arc::new(maki_agent::ModeRegistry::builtin()),
             completion: Some(backend),
+            command_arguments: CoalescedLatest::new(|_| false),
+            splash_frames: CoalescedLatest::new(|_| false),
         }
     }
 
@@ -634,9 +667,20 @@ impl EventHandle {
     pub(crate) fn probed_for_test(shared: flume::Sender<Request>) -> Self {
         Self {
             tx: shared.clone(),
-            prio_tx: shared,
+            prio_tx: shared.clone(),
             modes: Arc::new(maki_agent::ModeRegistry::builtin()),
             completion: None,
+            command_arguments: CoalescedLatest::new({
+                let shared = shared.clone();
+                move |work| {
+                    shared
+                        .send(Request::CollectCommandArgumentItems(work))
+                        .is_ok()
+                }
+            }),
+            splash_frames: CoalescedLatest::new(move |work| {
+                shared.send(Request::SplashFrame(work)).is_ok()
+            }),
         }
     }
 
@@ -646,7 +690,27 @@ impl EventHandle {
             command,
             args,
             depth,
+            completion: None,
         });
+    }
+
+    #[doc(hidden)]
+    pub fn run_command_for_test(
+        &self,
+        plugin: Arc<str>,
+        command: Arc<str>,
+        args: String,
+        depth: u8,
+    ) -> flume::Receiver<()> {
+        let (completion, rx) = flume::bounded(1);
+        let _ = self.prio_tx.try_send(Request::RunCommand {
+            plugin,
+            command,
+            args,
+            depth,
+            completion: Some(completion),
+        });
+        rx
     }
 
     pub fn collect_prompt_slots(&self) -> ResolvedSlots {
@@ -658,6 +722,29 @@ impl EventHandle {
     /// Gather `@`-completion candidates from every registered source, for the
     /// popup opened with `ctx` (mode + available models). Returns empty when no
     /// host is connected.
+    pub fn collect_command_argument_items(
+        &self,
+        command: Arc<str>,
+        plugin: Arc<str>,
+        args: String,
+        arg: String,
+        index: usize,
+        mode: String,
+    ) -> Option<flume::Receiver<Vec<crate::CommandArgumentItem>>> {
+        let (reply, rx) = flume::bounded(1);
+        self.command_arguments
+            .submit(CommandArgumentRequest {
+                command,
+                plugin,
+                args,
+                arg,
+                index,
+                mode,
+                reply,
+            })
+            .then_some(rx)
+    }
+
     pub fn collect_completion_items(&self, ctx: &CompletionCtx) -> Vec<ItemSpec> {
         if let Some(backend) = &self.completion {
             return backend.collect(ctx);
@@ -761,30 +848,36 @@ impl EventHandle {
         });
     }
 
-    /// Pull one `splash.render` frame from the live host. Distinguishes a
-    /// renderer that answered with nothing (`Missing`) from one still computing
-    /// when the timeout hit (`Unknown`), so the UI only suppresses a genuinely
-    /// absent renderer and keeps retrying a slow-but-alive one. A disconnected
-    /// sender fails at the send, so `Unknown` returns immediately.
-    /// High-frequency per-frame, hence the priority lane.
-    pub fn splash_pull(&self, width: u16, height: u16, elapsed_secs: f32, fade: f32) -> SplashPull {
+    /// Queues one `splash.render` frame without waiting for the Lua host.
+    /// Requests share the coalesced priority lane, so only the latest queued
+    /// frame survives while another render is active.
+    pub fn request_splash_frame(
+        &self,
+        width: u16,
+        height: u16,
+        elapsed_secs: f32,
+        fade: f32,
+    ) -> Option<flume::Receiver<Option<SplashFrame>>> {
         if self.tx.is_disconnected() && self.prio_tx.is_disconnected() {
-            return SplashPull::Unknown;
+            return None;
         }
         let (reply_tx, reply_rx) = flume::bounded(1);
-        if self
-            .prio_tx
-            .try_send(Request::SplashFrame {
+        self.splash_frames
+            .submit(SplashFrameRequest {
                 width,
                 height,
                 elapsed_secs,
                 fade,
                 reply: reply_tx,
             })
-            .is_err()
-        {
+            .then_some(reply_rx)
+    }
+
+    /// Blocking compatibility wrapper around [`Self::request_splash_frame`].
+    pub fn splash_pull(&self, width: u16, height: u16, elapsed_secs: f32, fade: f32) -> SplashPull {
+        let Some(reply_rx) = self.request_splash_frame(width, height, elapsed_secs, fade) else {
             return SplashPull::Unknown;
-        }
+        };
         match reply_rx.recv_timeout(SPLASH_PULL_TIMEOUT) {
             Ok(Some(frame)) => SplashPull::Frame(frame),
             Ok(None) => SplashPull::Missing,
@@ -826,6 +919,7 @@ mod tests {
     use crate::api::util::command::{LuaCommandInfo, LuaCommandWriter};
     use maki_agent::prompt::{PromptId, ResolvedSlots, Slot};
     use maki_agent::tools::ToolRegistry;
+    use std::thread;
     use std::time::Instant;
     use test_case::test_case;
 
@@ -908,6 +1002,7 @@ mod tests {
             description: Arc::from("desc"),
             plugin: Arc::from("p"),
             max_args: 0,
+            has_argument_completion: false,
         }]);
         let snap = reader.load();
         assert_eq!(snap.commands.len(), 1);
@@ -937,9 +1032,13 @@ mod tests {
         let (tx, _rx) = flume::bounded(8);
         let handle = EventHandle {
             tx,
-            prio_tx,
+            prio_tx: prio_tx.clone(),
             modes: Arc::new(maki_agent::ModeRegistry::builtin()),
             completion: None,
+            command_arguments: CoalescedLatest::new(|_| false),
+            splash_frames: CoalescedLatest::new(move |work| {
+                prio_tx.send(Request::SplashFrame(work)).is_ok()
+            }),
         };
         handle.run_command(
             Arc::from("myplugin"),
@@ -954,14 +1053,117 @@ mod tests {
                 command,
                 args,
                 depth,
+                completion,
             } => {
                 assert_eq!(plugin.as_ref(), "myplugin");
                 assert_eq!(command.as_ref(), "/greet");
                 assert_eq!(args, "world");
                 assert_eq!(depth, 2);
+                assert!(completion.is_none());
             }
             _ => panic!("expected RunCommand"),
         }
+    }
+
+    #[test]
+    fn command_argument_requests_keep_only_latest_pending() {
+        let (tx, rx) = flume::unbounded();
+        let handle = EventHandle::probed_for_test(tx);
+        let request = |arg: &str| {
+            handle.collect_command_argument_items(
+                Arc::from("/deploy"),
+                Arc::from("deploy"),
+                format!("/deploy {arg}"),
+                arg.to_string(),
+                0,
+                "build".to_string(),
+            )
+        };
+
+        let first_reply = request("a").unwrap();
+        let stale_reply = request("ab").unwrap();
+        let latest_reply = request("abc").unwrap();
+        let active = match rx.recv().unwrap() {
+            Request::CollectCommandArgumentItems(work) => work,
+            _ => panic!("expected command argument request"),
+        };
+        active.finish(|request| {
+            let _ = request.reply.send(Vec::new());
+        });
+        let pending = match rx.recv().unwrap() {
+            Request::CollectCommandArgumentItems(work) => work,
+            _ => panic!("expected command argument request"),
+        };
+        assert_eq!(pending.value().arg, "abc");
+        pending.finish(|request| {
+            let _ = request.reply.send(Vec::new());
+        });
+
+        assert!(first_reply.recv().is_err());
+        assert!(stale_reply.recv().is_err());
+        assert_eq!(latest_reply.recv().unwrap(), Vec::new());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn splash_requests_coalesce_across_handle_clones() {
+        let (tx, rx) = flume::unbounded();
+        let handle = EventHandle::probed_for_test(tx);
+        let clone = handle.clone();
+        let request = |width| {
+            let (reply, wake) = flume::bounded(1);
+            (
+                SplashFrameRequest {
+                    width,
+                    height: 5,
+                    elapsed_secs: 1.0,
+                    fade: 0.0,
+                    reply,
+                },
+                wake,
+            )
+        };
+        let (first, first_wake) = request(10);
+        let (stale, stale_wake) = request(20);
+        let (latest, latest_wake) = request(30);
+
+        assert!(handle.splash_frames.submit(first));
+        assert!(clone.splash_frames.submit(stale));
+        assert!(handle.splash_frames.submit(latest));
+        let active = match rx.recv().unwrap() {
+            Request::SplashFrame(work) => work,
+            _ => panic!("expected splash frame"),
+        };
+        active.finish(|request| {
+            let _ = request.reply.send(None);
+        });
+        let pending = match rx.recv().unwrap() {
+            Request::SplashFrame(work) => work,
+            _ => panic!("expected splash frame"),
+        };
+        assert_eq!(pending.value().width, 30);
+        pending.finish(|request| {
+            let _ = request.reply.send(None);
+        });
+
+        assert!(first_wake.recv().is_err());
+        assert!(stale_wake.recv().is_err());
+        assert!(latest_wake.recv().unwrap().is_none());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn splash_pull_wakes_unknown_when_transport_closes() {
+        let (tx, rx) = flume::unbounded();
+        let handle = EventHandle::probed_for_test(tx);
+        let pull = thread::spawn(move || handle.splash_pull(10, 5, 1.0, 0.0));
+        let work = match rx.recv().unwrap() {
+            Request::SplashFrame(work) => work,
+            _ => panic!("expected splash frame"),
+        };
+
+        drop(work);
+        assert!(matches!(pull.join().unwrap(), SplashPull::Unknown));
     }
 
     #[test]

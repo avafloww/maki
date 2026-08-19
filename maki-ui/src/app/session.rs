@@ -160,6 +160,7 @@ impl App {
     }
 
     pub(super) fn reset_ui_chrome(&mut self) {
+        let splash_frame = self.chats.first().and_then(Chat::splash_frame).cloned();
         self.chats.clear();
         let mut main = Chat::new(
             "Main".into(),
@@ -167,6 +168,7 @@ impl App {
             self.lua_event_handle.clone(),
         );
         main.set_restore_channel(self.restore_event_tx.clone());
+        main.set_splash_frame(splash_frame);
         self.chats.push(main);
         self.active_chat = 0;
         self.chat_index.clear();

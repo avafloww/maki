@@ -24,6 +24,7 @@ use maki_agent::tools::{
 use maki_agent::{BufferSnapshot, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle};
 use mlua::{Chunk, ChunkMode, Compiler, Function, Lua, RegistryKey, Table, Value as LuaValue, ffi};
 
+use crate::coalesced_latest::CoalescedWork;
 use crate::splash::SplashFrame;
 use serde_json::Value;
 
@@ -31,6 +32,7 @@ use maki_config::RawConfig;
 
 use crate::api::autocmd::AutocmdStore;
 use crate::api::completion::{self, CompletionCtx, ItemSpec};
+use crate::api::contribution::ContributionStore;
 use crate::api::create_maki_global;
 use crate::api::r#fn::{JobOwner, JobStore, deliver_job_event};
 use crate::api::keymap::KeymapReader;
@@ -70,6 +72,10 @@ const GC_STEP_INTERVAL: usize = 4;
 /// the kill still lands within a poll of [`KILL_GRACE`]. The thread ticks even
 /// when no Lua runs, so prefer the slowest interval the grace can hide.
 const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// A frame may exceed the UI's pull wait under load, but should not occupy the
+/// Lua dispatcher for more than a couple of frame intervals.
+const SPLASH_RENDER_DEADLINE: Duration = Duration::from_millis(100);
+const SPLASH_RENDER_KILL_GRACE: Duration = Duration::from_millis(100);
 /// How long a doomed task may run without yielding before the watchdog
 /// shoots it. Cleanup after a cancel or a timeout (batch marking its
 /// children cancelled, rerendering its buf) is plain Lua running with the
@@ -168,9 +174,8 @@ pub enum Request {
         plugin: Arc<str>,
         command: Arc<str>,
         args: String,
-        /// How many `maki.api.run_command` hops led here; seeds the handler's
-        /// [`TaskCell::command_depth`] so an alias cycle terminates.
         depth: u8,
+        completion: Option<flume::Sender<()>>,
     },
     CollectPromptSlots {
         reply: flume::Sender<ResolvedSlots>,
@@ -190,31 +195,14 @@ pub enum Request {
         event: String,
         data: Value,
     },
-    /// Host-driven pull of the `splash.render` slot. Non-blocking: the host
-    /// `recv_timeout`s on `reply` (`SPLASH_PULL_TIMEOUT`) and gives up on a
-    /// dead renderer. Route on the priority lane so a queued bulk restore
-    /// never delays a frame.
-    SplashFrame {
-        width: u16,
-        height: u16,
-        elapsed_secs: f32,
-        fade: f32,
-        reply: flume::Sender<Option<SplashFrame>>,
-    },
-    /// Push fresh version/update info into the Lua-side `VersionStore`, read
-    /// back by plugins via `maki.version()`. Low-frequency (only on change).
+    SplashFrame(CoalescedWork<SplashFrameRequest>),
     SetVersion {
         current: String,
         latest: Option<String>,
     },
     ClickTool {
         tool_use_id: String,
-        /// 1-based line in the tool's live buffer; 0 means the click landed
-        /// outside the buffer (e.g. on the header line).
         row: usize,
-        /// Cold path for finished tools: when no live or warm handle
-        /// exists, restore from this item (its `clicks` already include
-        /// `row`) instead of dropping the click.
         fallback: Option<Box<ClickFallback>>,
     },
     RunKeybindCallback {
@@ -226,9 +214,6 @@ pub enum Request {
         dctx: Value,
         reply: flume::Sender<Option<String>>,
     },
-    /// Runs the tool's `start` fn so it can publish a live buf before the
-    /// permission prompt paints. Best-effort: Lua errors are logged, never
-    /// propagated.
     StartTool {
         plugin: Arc<str>,
         tool: Arc<str>,
@@ -237,19 +222,33 @@ pub enum Request {
         ctx: Box<LuaCtx>,
         reply: flume::Sender<()>,
     },
-    /// Gather `@`-completion candidates from every registered source. Sent by
-    /// the UI when the popup opens; answered synchronously on the Lua thread.
     CollectCompletionItems {
         ctx: CompletionCtx,
         reply: flume::Sender<Vec<ItemSpec>>,
     },
-    /// Rewrite a finished prompt by dispatching each `@prefix:value` token to
-    /// its registered expander. Sent by the UI at submit; an `Err` flashes and
-    /// aborts the run.
+    CollectCommandArgumentItems(CoalescedWork<CommandArgumentRequest>),
     ExpandReferences {
         text: String,
         reply: flume::Sender<Result<String, String>>,
     },
+}
+
+pub(crate) struct CommandArgumentRequest {
+    pub(crate) command: Arc<str>,
+    pub(crate) plugin: Arc<str>,
+    pub(crate) args: String,
+    pub(crate) arg: String,
+    pub(crate) index: usize,
+    pub(crate) mode: String,
+    pub(crate) reply: flume::Sender<Vec<crate::api::util::command::CommandArgumentItem>>,
+}
+
+pub(crate) struct SplashFrameRequest {
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) elapsed_secs: f32,
+    pub(crate) fade: f32,
+    pub(crate) reply: flume::Sender<Option<SplashFrame>>,
 }
 
 pub struct RestoreItem {
@@ -344,9 +343,10 @@ enum KillReason {
 pub(crate) struct TaskCell {
     pub(crate) id: u64,
     pub(crate) cancel: CancelToken,
-    /// End of the current [`KILL_GRACE`], armed by the first watchdog poke
-    /// that sees a doomed task and cleared at every yield.
+    /// End of the current kill grace, armed by the first watchdog poke that
+    /// sees a doomed task and cleared at every yield.
     kill_at: Cell<Option<Instant>>,
+    kill_grace: Duration,
     pub(crate) deadline: Cell<Option<Instant>>,
     pub(crate) deadline_secs: Cell<Option<u64>>,
     /// Notified by `ctx:set_deadline`, so [`until_abandoned`] re-arms on the
@@ -390,6 +390,7 @@ impl TaskCell {
             id: NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed),
             cancel,
             kill_at: Cell::new(None),
+            kill_grace: KILL_GRACE,
             deadline: Cell::new(deadline),
             deadline_secs: Cell::new(None),
             deadline_changed: Event::new(),
@@ -403,6 +404,11 @@ impl TaskCell {
             owns_jobs: true,
             command_depth: 0,
         }
+    }
+
+    fn with_kill_grace(mut self, kill_grace: Duration) -> Self {
+        self.kill_grace = kill_grace;
+        self
     }
 
     fn into_handle(self) -> TaskHandle {
@@ -435,7 +441,7 @@ impl TaskCell {
             // `gather` child dying inside its parent's slice) and what
             // runs next is the cleanup the grace exists for.
             stamp => {
-                self.kill_at.set(Some(now + KILL_GRACE));
+                self.kill_at.set(Some(now + self.kill_grace));
                 stamp.is_some().then_some(reason)
             }
         }
@@ -790,7 +796,8 @@ fn interrupt_reason(state: *mut ffi::lua_State) -> Option<&'static str> {
         return Some(INTERRUPT_SHUTDOWN_MSG);
     }
     let handle = lua.app_data_ref::<TaskHandle>()?;
-    Some(match lock_cell(&handle).kill_due(Instant::now())? {
+    let reason = lock_cell(&handle).kill_due(Instant::now())?;
+    Some(match reason {
         KillReason::Cancelled => INTERRUPT_CANCELLED_MSG,
         KillReason::Deadline => INTERRUPT_DEADLINE_MSG,
     })
@@ -1411,6 +1418,7 @@ impl LuaRuntime {
         hint_writer: HintWriter,
         jit: bool,
         plugin_rules: Arc<PluginRuleStore>,
+        state_dir: Option<PathBuf>,
     ) -> Result<Self, PluginError> {
         let lua = Lua::new();
         let compiler = install_compiler(&lua, jit);
@@ -1420,7 +1428,6 @@ impl LuaRuntime {
                 source: e,
             })?;
         let pending: PendingTools = Arc::new(Mutex::new(Vec::new()));
-
         let watchdog = Watchdog::spawn(&lua, Arc::clone(&shutdown));
 
         let globals = lua.globals();
@@ -1445,6 +1452,7 @@ impl LuaRuntime {
         lua.set_app_data(PromptHintCallbacks::default());
         lua.set_app_data(PluginOptionSpecs::default());
         lua.set_app_data(AutocmdStore::default());
+        lua.set_app_data(ContributionStore::default());
         lua.set_app_data(SlotStore::default());
         lua.set_app_data(crate::splash::VersionInfo::default());
         lua.set_app_data(KeymapStore::new());
@@ -1453,6 +1461,9 @@ impl LuaRuntime {
         lua.set_app_data(hint_writer);
         lua.set_app_data(Arc::clone(&registry));
         lua.set_app_data(Arc::clone(&modes));
+        if let Some(state_dir) = state_dir {
+            lua.set_app_data(crate::api::env::StateDirOverride(state_dir));
+        }
         completion::install(&lua);
 
         let plugins: PluginMap = Rc::new(RefCell::new(HashMap::new()));
@@ -1527,6 +1538,9 @@ impl LuaRuntime {
         if let Some(mut store) = self.lua.app_data_mut::<AutocmdStore>() {
             store.clear_plugin(name);
         }
+        if let Some(mut store) = self.lua.app_data_mut::<ContributionStore>() {
+            store.clear_plugin(name);
+        }
         if let Some(mut store) = self.lua.app_data_mut::<SlotStore>() {
             store.clear_plugin(name);
         }
@@ -1563,6 +1577,11 @@ impl LuaRuntime {
             for (_, entry) in cmds {
                 if let Err(e) = self.lua.remove_registry_value(entry.handler) {
                     tracing::warn!(plugin = name, error = %e, "failed to drop command handler key");
+                }
+                if let Some(key) = entry.argument_completion
+                    && let Err(e) = self.lua.remove_registry_value(key)
+                {
+                    tracing::warn!(plugin = name, error = %e, "failed to drop command completion key");
                 }
             }
             drop(cmd_map);
@@ -2557,6 +2576,8 @@ async fn run_tool_call(
 pub(crate) struct LuaThread {
     pub tx: flume::Sender<Request>,
     pub prio_tx: flume::Sender<Request>,
+    pub command_arguments: crate::coalesced_latest::CoalescedLatest<CommandArgumentRequest>,
+    pub splash_frames: crate::coalesced_latest::CoalescedLatest<SplashFrameRequest>,
     pub join: Option<JoinHandle<()>>,
     pub shutdown: Arc<AtomicBool>,
     pub command_reader: LuaCommandReader,
@@ -2567,10 +2588,11 @@ pub(crate) struct LuaThread {
 }
 
 /// Pulls one `splash.render` frame. The shared Lua keeps the last task's
-/// handle in app_data, so the slot call runs under a fresh detached scope:
-/// a stale cancelled handle (a turn reset mid-flight) would otherwise let
-/// the watchdog interrupt the render and the UI would read the raise as a
-/// missing renderer.
+/// handle in app_data, so the slot call runs under a fresh scope: a stale
+/// cancelled handle (a turn reset mid-flight) cannot kill the render, while
+/// a short deadline prevents the synchronous callback monopolizing the Lua
+/// dispatcher. Splash rendering needs no task cleanup, so it uses a much
+/// shorter kill grace than handlers.
 fn splash_frame(
     lua: &Lua,
     width: u16,
@@ -2584,7 +2606,13 @@ fn splash_frame(
         LuaValue::Number(elapsed_secs as f64),
         LuaValue::Number(fade as f64),
     ]);
-    let scope = TaskScope::detached(lua);
+    let cell = TaskCell::new(
+        CancelToken::none(),
+        Some(Instant::now() + SPLASH_RENDER_DEADLINE),
+        None,
+    )
+    .with_kill_grace(SPLASH_RENDER_KILL_GRACE);
+    let scope = TaskScope::new(lua, cell);
     let frame: Option<crate::splash::SplashFrame> =
         match crate::api::slot::invoke_slot_from_host(lua, "splash.render", args) {
             Err(e) => {
@@ -2616,9 +2644,22 @@ pub fn spawn(
     bundled_dirs: &'static [&'static Dir<'static>],
     jit: bool,
     plugin_rules: Arc<PluginRuleStore>,
+    state_dir: Option<PathBuf>,
 ) -> Result<LuaThread, PluginError> {
     let (tx, rx) = flume::unbounded::<Request>();
     let (prio_tx, prio_rx) = flume::unbounded::<Request>();
+    let command_arguments = {
+        let tx = tx.clone();
+        crate::coalesced_latest::CoalescedLatest::new(move |work| {
+            tx.send(Request::CollectCommandArgumentItems(work)).is_ok()
+        })
+    };
+    let splash_frames = {
+        let prio_tx = prio_tx.clone();
+        crate::coalesced_latest::CoalescedLatest::new(move |work| {
+            prio_tx.send(Request::SplashFrame(work)).is_ok()
+        })
+    };
     let tx_clone = tx.clone();
     let shutdown: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let shutdown_thread = Arc::clone(&shutdown);
@@ -2644,6 +2685,7 @@ pub fn spawn(
                 hint_writer,
                 jit,
                 plugin_rules,
+                state_dir,
             ) {
                 Ok(r) => {
                     let _ = init_tx.send(Ok(()));
@@ -2793,6 +2835,7 @@ pub fn spawn(
                             command,
                             args,
                             depth,
+                            completion,
                         } => {
                             let handler_fn =
                                 rt.lua.app_data_ref::<CommandHandlerMap>().and_then(|m| {
@@ -2814,6 +2857,9 @@ pub fn spawn(
                                     };
                                     if let Err(e) = run_command_scoped(&lua, depth, run).await {
                                         tracing::warn!(plugin = %plugin, command = %command, error = %e, "command handler failed");
+                                    }
+                                    if let Some(completion) = completion {
+                                        let _ = completion.send(());
                                     }
                                 })
                                 .detach();
@@ -2921,15 +2967,18 @@ pub fn spawn(
                                 rt.lua.gc_collect().ok();
                             }
                         }
-                        Request::SplashFrame {
-                            width,
-                            height,
-                            elapsed_secs,
-                            fade,
-                            reply,
-                        } => {
-                            let frame = splash_frame(&rt.lua, width, height, elapsed_secs, fade);
-                            let _ = reply.send(frame);
+                        Request::SplashFrame(work) => {
+                            let request = work.value();
+                            let frame = splash_frame(
+                                &rt.lua,
+                                request.width,
+                                request.height,
+                                request.elapsed_secs,
+                                request.fade,
+                            );
+                            work.finish(|request| {
+                                let _ = request.reply.send(frame);
+                            });
                         }
                         Request::SetVersion { current, latest } => {
                             if let Some(mut info) = rt.lua.app_data_mut::<crate::splash::VersionInfo>() {
@@ -2995,6 +3044,25 @@ pub fn spawn(
                                     .await;
                             let _ = reply.send(items);
                         }
+                        Request::CollectCommandArgumentItems(work) => {
+                            let request = work.value();
+                            let items = run_detached(
+                                &rt.lua,
+                                crate::api::completion::collect_command_argument_items(
+                                    &rt.lua,
+                                    &request.plugin,
+                                    &request.command,
+                                    &request.args,
+                                    &request.arg,
+                                    request.index,
+                                    &request.mode,
+                                ),
+                            )
+                            .await;
+                            work.finish(|request| {
+                                let _ = request.reply.send(items);
+                            });
+                        }
                         Request::ExpandReferences { text, reply } => {
                             let res =
                                 run_detached(&rt.lua, completion::expand_references(&rt.lua, &text))
@@ -3024,6 +3092,8 @@ pub fn spawn(
     Ok(LuaThread {
         tx,
         prio_tx,
+        command_arguments,
+        splash_frames,
         join: Some(handle),
         shutdown,
         command_reader,
@@ -4176,6 +4246,57 @@ mod tests {
             frame.is_some(),
             "watchdog killed the render under the stale handle"
         );
+    }
+
+    #[test]
+    fn runaway_splash_render_is_killed_and_lua_recovers() {
+        const COMPLETION_BOUND: Duration = Duration::from_secs(2);
+        const GLYPHS: &str = "recovered";
+
+        let (tx, rx) = flume::bounded(1);
+        thread::spawn(move || {
+            let (lua, _watchdog) = watchdog_lua(false);
+            lua.set_app_data(crate::api::slot::SlotStore::default());
+            let runaway = lua.load("while true do end").into_function().unwrap();
+            {
+                let mut store = lua.app_data_mut::<crate::api::slot::SlotStore>().unwrap();
+                store.slots.insert(
+                    "splash.render".to_owned(),
+                    crate::api::slot::SlotEntry {
+                        owner: Some(Arc::from("splash")),
+                        default: Some(runaway),
+                        layers: Vec::new(),
+                    },
+                );
+            }
+
+            let start = Instant::now();
+            let runaway_frame = splash_frame(&lua, 80, 24, 0.0, 1.0);
+            let elapsed = start.elapsed();
+            let operation = lua.load("return 6 * 7").eval::<i64>().unwrap();
+            let recovered = lua
+                .load(format!(
+                    "return {{ {{ {{ glyphs = '{GLYPHS}', style = '#ffffff' }} }} }}"
+                ))
+                .into_function()
+                .unwrap();
+            lua.app_data_mut::<crate::api::slot::SlotStore>()
+                .unwrap()
+                .slots
+                .get_mut("splash.render")
+                .unwrap()
+                .default = Some(recovered);
+            let recovered_frame = splash_frame(&lua, 80, 24, 0.0, 1.0);
+            drop(tx.send((runaway_frame, elapsed, operation, recovered_frame)));
+        });
+
+        let (runaway_frame, elapsed, operation, recovered_frame) = rx
+            .recv_timeout(COMPLETION_BOUND)
+            .expect("runaway splash render monopolized the Lua thread");
+        assert!(runaway_frame.is_none());
+        assert!(elapsed < COMPLETION_BOUND);
+        assert_eq!(operation, 42);
+        assert_eq!(recovered_frame.unwrap().rows[0].glyphs, GLYPHS);
     }
 
     #[test]

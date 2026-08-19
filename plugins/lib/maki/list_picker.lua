@@ -183,8 +183,8 @@ end
 -- Open a fuzzy-filter picker in a floating window and block until the user
 -- decides. {items} is a list of strings or { label, detail? } tables. {opts}:
 -- title, footer, cursor (initial index), submit_keys (extra submit keys
--- besides enter). Returns { type = "choice"|"delete", index } or
--- { type = "close" }.
+-- besides enter), on_change(item, index), on_timeout(), and timeout_ms.
+-- Returns { type = "choice"|"delete", index } or { type = "close" }.
 function ListPicker.open(items, opts)
   opts = opts or {}
   local submit_keys = { enter = true }
@@ -232,13 +232,17 @@ function ListPicker.open(items, opts)
   local height = win.height
   local confirming = nil
 
-  local function move_cursor(to)
+  local function move_cursor(to, notify, previous_index)
+    previous_index = previous_index or original_indices[cursor]
     if #filtered > 0 then
       cursor = math.max(math.min(to, #filtered), 1)
     end
     buf:set_lines(build_lines())
     if item_lines[cursor] then
       win:set_cursor(item_lines[cursor])
+      if notify and opts.on_change and original_indices[cursor] ~= previous_index then
+        opts.on_change(filtered[cursor], original_indices[cursor])
+      end
     end
     confirming = nil
   end
@@ -253,24 +257,32 @@ function ListPicker.open(items, opts)
   end
 
   while true do
-    local ev = win:recv()
+    local ev = win:recv(opts.timeout_ms)
     if not ev or ev.type == "close" then
       return { type = "close" }
     end
 
-    if ev.type == "resize" then
+    if ev.type == "timeout" then
+      if opts.on_timeout then
+        opts.on_timeout()
+      end
+      buf:set_lines(build_lines())
+      if item_lines[cursor] then
+        win:set_cursor(item_lines[cursor])
+      end
+    elseif ev.type == "resize" then
       width = ev.width
       height = ev.height
       move_cursor(cursor)
     elseif ev.type == "key" then
       if ev.key == "up" then
-        move_cursor((cursor - 2) % math.max(#filtered, 1) + 1)
+        move_cursor((cursor - 2) % math.max(#filtered, 1) + 1, true)
       elseif ev.key == "down" then
-        move_cursor(cursor % math.max(#filtered, 1) + 1)
+        move_cursor(cursor % math.max(#filtered, 1) + 1, true)
       elseif ev.key == "pageup" then
-        move_cursor(cursor - page_size())
+        move_cursor(cursor - page_size(), true)
       elseif ev.key == "pagedown" then
-        move_cursor(cursor + page_size())
+        move_cursor(cursor + page_size(), true)
       elseif ev.key == "esc" or ev.key == "ctrl+c" then
         win:close()
         return { type = "close" }
@@ -292,10 +304,11 @@ function ListPicker.open(items, opts)
       else
         local result = input:handle_key(ev.key)
         if result == TextInput.Result.CHANGED then
+          local previous_index = original_indices[cursor]
           filtered, original_indices = filter_items(items, input:value())
-          move_cursor(1)
+          move_cursor(1, true, previous_index)
         elseif result == TextInput.Result.MOVED then
-          move_cursor(cursor)
+          move_cursor(cursor, true)
         end
       end
     end

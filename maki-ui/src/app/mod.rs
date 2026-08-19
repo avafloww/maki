@@ -54,6 +54,7 @@ use crate::components::{
 use crate::image;
 use crate::repaint::{Cadence, Dirty, Watch};
 use crate::selection::{SelectionState, SelectionZone, ZoneRegistry};
+use crate::text_buffer::TextBuffer;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use maki_agent::permissions::PermissionManager;
@@ -700,6 +701,12 @@ impl App {
                         self.input_box.handle_paste_with_spaces(&path)
                     {
                         self.command_palette.sync(&val);
+                        self.command_palette.sync_arguments(
+                            &val,
+                            self.input_box.buffer.cursor_byte_offset(),
+                            &self.lua_event_handle,
+                            &self.state.mode.id_key(),
+                        );
                         self.sync_file_completion();
                     }
                     vec![]
@@ -970,6 +977,12 @@ impl App {
                 self.start_image_paste();
             } else if let InputAction::PaletteSync(val) = self.input_box.handle_key(key) {
                 self.command_palette.sync(&val);
+                self.command_palette.sync_arguments(
+                    &val,
+                    self.input_box.buffer.cursor_byte_offset(),
+                    &self.lua_event_handle,
+                    &self.state.mode.id_key(),
+                );
                 self.sync_file_completion();
             }
             return vec![];
@@ -980,16 +993,43 @@ impl App {
             .handle_key(key, &self.input_box.buffer.value())
         {
             CommandAction::Consumed => return vec![],
+            CommandAction::SelectionChanged => {
+                let input = self.input_box.buffer.value();
+                self.command_palette.sync_arguments(
+                    &input,
+                    self.input_box.buffer.cursor_byte_offset(),
+                    &self.lua_event_handle,
+                    &self.state.mode.id_key(),
+                );
+                return vec![];
+            }
             CommandAction::Execute(cmd) => {
                 self.input_box.discard();
                 self.file_completion.close();
                 return self.execute_command(cmd, 0);
             }
-            CommandAction::Complete(text) => {
+            CommandAction::AcceptArgument { text, cursor } => {
                 self.command_palette.sync(&text);
                 self.refresh_at_ref_labels(&text);
-                self.input_box.set_input(text);
-                self.input_box.buffer.move_to_end();
+                self.input_box.set_input(text.clone());
+                self.input_box
+                    .buffer
+                    .set_cursor(0, TextBuffer::byte_to_char(&text, cursor));
+                return vec![];
+            }
+            CommandAction::Complete { text, cursor } => {
+                self.command_palette.sync(&text);
+                self.refresh_at_ref_labels(&text);
+                self.input_box.set_input(text.clone());
+                self.input_box
+                    .buffer
+                    .set_cursor(0, TextBuffer::byte_to_char(&text, cursor));
+                self.command_palette.sync_arguments(
+                    &text,
+                    cursor,
+                    &self.lua_event_handle,
+                    &self.state.mode.id_key(),
+                );
                 return vec![];
             }
             CommandAction::Passthrough => {}
@@ -1018,6 +1058,12 @@ impl App {
             }
             InputAction::PaletteSync(val) => {
                 self.command_palette.sync(&val);
+                self.command_palette.sync_arguments(
+                    &val,
+                    self.input_box.buffer.cursor_byte_offset(),
+                    &self.lua_event_handle,
+                    &self.state.mode.id_key(),
+                );
                 self.sync_file_completion();
                 vec![]
             }
@@ -1150,6 +1196,12 @@ impl App {
             .replace_range_on_current_line(start, end, &replacement);
         let val = self.input_box.buffer.value();
         self.command_palette.sync(&val);
+        self.command_palette.sync_arguments(
+            &val,
+            self.input_box.buffer.cursor_byte_offset(),
+            &self.lua_event_handle,
+            &self.state.mode.id_key(),
+        );
     }
 
     /// Typing path for a focused subagent tab: characters go into the shared
@@ -1886,7 +1938,8 @@ impl App {
             | self.usage_modal.poll(&self.usage_slot)
             | self.hints.poll(self.hint_reader.load_full())
             | self.tick_file_picker()
-            | self.tick_file_completion();
+            | self.tick_file_completion()
+            | self.command_palette.poll_arguments();
         dirty |= self.tick_chats();
         while let Some(shown) = self.chats[0].take_splash_event() {
             // The autocmd is fire-and-forget; repainting is the frame pull's
@@ -2012,6 +2065,12 @@ impl App {
         }
         if let InputAction::PaletteSync(val) = self.input_box.handle_paste(text) {
             self.command_palette.sync(&val);
+            self.command_palette.sync_arguments(
+                &val,
+                self.input_box.buffer.cursor_byte_offset(),
+                &self.lua_event_handle,
+                &self.state.mode.id_key(),
+            );
             self.sync_file_completion();
         }
     }

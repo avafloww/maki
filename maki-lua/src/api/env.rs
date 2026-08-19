@@ -5,6 +5,8 @@ use mlua::Lua;
 
 use crate::plugin_permissions::PluginPermissions;
 
+pub(crate) struct StateDirOverride(pub(crate) PathBuf);
+
 fn utf8(p: PathBuf) -> Option<String> {
     p.into_os_string().into_string().ok()
 }
@@ -16,7 +18,10 @@ fn utf8(p: PathBuf) -> Option<String> {
 /// @example
 /// local dir = maki.env.state_dir()
 #[lua_fn(guard = Env)]
-fn state_dir(_lua: &Lua) -> mlua::Result<Option<String>> {
+fn state_dir(lua: &Lua) -> mlua::Result<Option<String>> {
+    if let Some(path) = lua.app_data_ref::<StateDirOverride>() {
+        return Ok(utf8(path.0.clone()));
+    }
     Ok(maki_storage::paths::state_dir().ok().and_then(utf8))
 }
 

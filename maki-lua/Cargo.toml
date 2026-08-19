@@ -75,6 +75,7 @@ tree-sitter-css = { workspace = true }
 tree-sitter-hcl = { workspace = true }
 tree-sitter-json = { workspace = true }
 tree-sitter-make = { workspace = true }
+tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true }
@@ -84,7 +85,6 @@ base64 = { workspace = true }
 criterion = { workspace = true }
 image = { workspace = true }
 maki-agent = { workspace = true }
-tempfile = { workspace = true }
 test-case = { workspace = true }
 
 [[bench]]

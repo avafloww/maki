@@ -54,6 +54,12 @@ pub struct PromptProgress {
     pub cache: u32,
 }
 
+struct PendingSplashFrame {
+    receiver: flume::Receiver<Option<maki_lua::SplashFrame>>,
+    area: Rect,
+    latest: Option<&'static str>,
+}
+
 pub struct MessagesPanel {
     messages: Vec<DisplayMessage>,
     streaming_thinking: StreamingContent,
@@ -98,6 +104,7 @@ pub struct MessagesPanel {
     /// True once discovery marked the renderer dead so we stop hammering a
     /// host with no splash.render. Reset on `SplashShown`.
     splash_pull_suppressed: bool,
+    pending_splash_frame: Option<PendingSplashFrame>,
     /// Whether the idle splash is currently shown; transitions queue a
     /// `SplashShown`/`SplashHidden` event for the app to fire.
     splash_shown: bool,
@@ -154,6 +161,7 @@ impl MessagesPanel {
             force_pull_once: false,
             version_seeded: false,
             splash_pull_suppressed: false,
+            pending_splash_frame: None,
             splash_shown: false,
             pending_splash_event: None,
             last_splash_area: Rect::default(),
@@ -739,12 +747,12 @@ impl MessagesPanel {
         dirty
     }
 
-    /// Pull the Lua `splash.render` frame when the splash should animate (or
-    /// the entry fade runs) and forward version changes into the Lua store.
+    /// Poll and request Lua `splash.render` frames without waiting for the host.
     /// A dead renderer returns `None` once and is suppressed until `SplashShown`.
     fn pull_splash_frame(&mut self) -> Dirty {
         let latest = update::latest_version();
-        if !self.version_seeded || latest != self.last_seen_latest {
+        let version_changed = !self.version_seeded || latest != self.last_seen_latest;
+        if version_changed {
             self.version_seeded = true;
             self.last_seen_latest = latest;
             self.lua_event_handle.set_version(update::CURRENT, latest);
@@ -752,42 +760,50 @@ impl MessagesPanel {
         }
 
         let area = self.last_splash_area;
-        if area.width == 0 {
-            return Dirty::NO;
-        }
-        let animating = self.idle_splash.cadence() == Cadence::SMOOTH;
-        // Regular pulls follow the cadence (animate or entry fade), gated by
-        // dead-renderer suppression; a version change forces a repull.
-        let should_pull = self.force_pull_once || (animating && !self.splash_pull_suppressed);
-        if !should_pull {
-            return Dirty::NO;
+        let mut dirty = Dirty::NO;
+        if let Some(pending) = self.pending_splash_frame.as_ref() {
+            match pending.receiver.try_recv() {
+                Ok(frame) => {
+                    let pending = self.pending_splash_frame.take().unwrap();
+                    if pending.area == area && pending.latest == latest {
+                        self.force_pull_once = false;
+                        match frame {
+                            Some(frame) => {
+                                self.idle_splash.set_frame(Some(frame));
+                                self.splash_pull_suppressed = false;
+                                dirty = Dirty::YES;
+                            }
+                            None => {
+                                self.splash_pull_suppressed = true;
+                                self.idle_splash.set_frame(None);
+                            }
+                        }
+                    }
+                }
+                Err(flume::TryRecvError::Disconnected) => {
+                    self.pending_splash_frame = None;
+                }
+                Err(flume::TryRecvError::Empty) => return dirty,
+            }
         }
 
-        let (t, fade) = self.idle_splash.frame_inputs();
-        match self
-            .lua_event_handle
-            .splash_pull(area.width, area.height, t, fade)
-        {
-            maki_lua::SplashPull::Frame(frame) => {
-                self.idle_splash.set_frame(Some(frame));
-                self.splash_pull_suppressed = false;
-                self.force_pull_once = false;
-                Dirty::YES
-            }
-            // The renderer answered that it has nothing: treat it as dead and
-            // stop hammering until `SplashShown`.
-            maki_lua::SplashPull::Missing => {
-                self.splash_pull_suppressed = true;
-                self.idle_splash.set_frame(None);
-                self.force_pull_once = false;
-                Dirty::NO
-            }
-            // Still computing (cold JIT) or dead handle: keep any last frame
-            // and retry on the next cadence instead of suppressing. A version
-            // change still owns its repull, so keep `force_pull_once` armed
-            // until a real frame actually lands.
-            maki_lua::SplashPull::Unknown => Dirty::NO,
+        if area.width == 0 {
+            return dirty;
         }
+        let animating = self.idle_splash.cadence() == Cadence::SMOOTH;
+        let should_pull = self.force_pull_once || (animating && !self.splash_pull_suppressed);
+        if should_pull {
+            let (t, fade) = self.idle_splash.frame_inputs();
+            self.pending_splash_frame = self
+                .lua_event_handle
+                .request_splash_frame(area.width, area.height, t, fade)
+                .map(|receiver| PendingSplashFrame {
+                    receiver,
+                    area,
+                    latest,
+                });
+        }
+        dirty
     }
 
     /// The app drains this each tick and fires the matching autocmd.
@@ -798,6 +814,10 @@ impl MessagesPanel {
     #[doc(hidden)]
     pub fn splash_frame(&self) -> Option<&maki_lua::SplashFrame> {
         self.idle_splash.frame()
+    }
+
+    pub(crate) fn set_splash_frame(&mut self, frame: Option<maki_lua::SplashFrame>) {
+        self.idle_splash.set_frame(frame);
     }
 
     #[doc(hidden)]
@@ -829,6 +849,10 @@ impl MessagesPanel {
             Cadence::when(self.in_progress_count() > 0, Cadence::SPINNER),
             Cadence::when(smooth, Cadence::SMOOTH),
             Cadence::when(self.show_idle_splash(), self.idle_splash.cadence()),
+            Cadence::when(
+                self.show_idle_splash() && self.pending_splash_frame.is_some(),
+                Cadence::PENDING,
+            ),
         ])
     }
 
@@ -857,7 +881,10 @@ impl MessagesPanel {
         }
 
         if self.show_idle_splash() {
-            self.last_splash_area = area;
+            if self.last_splash_area != area {
+                self.last_splash_area = area;
+                self.force_pull_once = true;
+            }
             let accent = self.accent.resolve();
             self.idle_splash.render(area, frame.buffer_mut(), accent);
             return;

@@ -55,6 +55,14 @@ impl TextBuffer {
         self.lines.len()
     }
 
+    pub fn cursor_byte_offset(&self) -> usize {
+        self.lines[..self.cursor_y]
+            .iter()
+            .map(|line| line.len() + 1)
+            .sum::<usize>()
+            + self.byte_x()
+    }
+
     fn current_line(&self) -> &str {
         &self.lines[self.cursor_y]
     }
