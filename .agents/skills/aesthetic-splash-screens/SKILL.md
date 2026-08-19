@@ -1,6 +1,6 @@
 ---
 name: aesthetic-splash-screens
-description: Design and build visually striking maki splash screens (the animated home screen behind the prompt) as self-contained Lua skins. Covers the splash.render slot contract, the shared skin template, glyph-ramp shading, WGSL/GLSL shader porting, state management, perf budgets, and smoke testing without building maki. Use whenever someone wants a new splash, wants to polish an existing splash, mentions the maki home screen animation, asks to port a shader to a splash, or is exploring terminal eye-candy for maki, even if they don't say the word "splash".
+description: Design and build visually striking maki splash screens (the animated home screen behind the prompt) as self-contained Lua skins. Covers the splash.render slot contract, the shared skin template, glyph-ramp shading, WGSL/GLSL shader porting, state management, perf budgets, and smoke testing without building maki. Use whenever someone wants a new splash, wants to polish an existing splash, mentions the maki home screen animation, asks to port a shader to a splash, wants to promote/bundle a skin into the maki distribution (the splash gallery), or is exploring terminal eye-candy for maki, even if they don't say the word "splash".
 ---
 
 # Aesthetic splash screens for maki
@@ -105,6 +105,59 @@ end)
    pacing are only judgeable live. Iterate on the one effect until it's
    unmistakable.
 
+## Shipping a skin in the distribution
+
+Once a skin earns its place, promote it from config to the bundled gallery so
+every user gets it via `require("splash.<name>")`. The gallery is
+test-covered and its tests run in `just ci`, which is also why promotion has
+a higher bar than the config playground.
+
+Checklist (using `myskin` as the example):
+
+1. Copy the file to `plugins/splash_gallery/splash/myskin.lua`. Adapt the
+   header to the gallery banner (copy an existing skin's): activation line,
+   self-activation note, `M.render` mention. The file must both self-activate
+   on require AND return `M` with `M.render` — the gallery's module contract.
+2. **No Rust change needed for the skin itself.** `splash_gallery` is already
+   a `BundledPlugin` entry in `maki-lua/src/loader.rs`; any `.lua` dropped
+   under its `splash/` subdir becomes `require("splash.<name>")` on the next
+   build. The namespace is reserved (`splash.*` resolves bundled-first), so
+   never give a config skin a `splash.` name.
+3. Add the skin everywhere the gallery is enumerated:
+   - `maki-lua/tests/splash_gallery.rs`: `SKINS`, both `test_case` attribute
+     lists, and `min_filled` if the skin is sparse.
+   - `plugins/splash_gallery/README.md` table.
+   - `site/docs/content/splash/_index.md` gallery table (+ skin count).
+4. Verify in order:
+   - `lua5.1 .agents/skills/aesthetic-splash-screens/scripts/smoke_test.lua plugins/splash_gallery/splash/myskin.lua`
+   - `cargo test -p maki-lua --test splash_gallery` (runs the real VM:
+     require through the bundled path, frame contract, animation, density).
+   `just ci` covers all of it on a full run.
+
+Build-env gotchas (homura VM): export `OPENSSL_NO_VENDOR=1` (system
+libssl-dev exists; the vendored build fails), and if `include_dir!` claims a
+file that exists does not, the 9p dentry cache is stale —
+`sync && echo 3 > /proc/sys/vm/drop_caches` and retry.
+
+## Making gallery tests non-flaky
+
+The gallery tests assert things about frames, and stateful or RNG-driven
+skins make naive thresholds flaky. Rules learned the expensive way:
+
+- **Drive warm-up time.** A stateful skin starts far from steady state
+  (matrix heads spawn up to 40 rows above the screen). Pull frames across
+  many simulated seconds before asserting anything; pure skins don't care,
+  so drive all skins uniformly.
+- **Sample several frames.** Rain/CA density oscillates as drops respawn.
+  Assert on the max of a handful of frames, not one arbitrary instant.
+- **Set thresholds from the expectation, not from what passed once.**
+  Compute the steady-state mean and its sigma (binomial over columns, or
+  just reason about it), put the floor several sigma below the mean — and
+  confirm it stays far above what a *broken* skin would produce (a skin
+  that draws only its label and version shows ~15 cells, so any floor above
+  that distinguishes working from dead). A threshold set at 1.8 sigma from
+  the mean failed CI on the second machine that ran it.
+
 ## Techniques that carry most of the weight
 
 - **Aspect correction.** Terminal cells are ~2x taller than wide. For
@@ -142,11 +195,14 @@ For scenes with regions, horizons, or perspective floors, read
 `references/recipes.md` — it has the horizon split, perspective grid, and
 striped-sun math ready to adapt, plus palette guidance for lit scenes.
 
-Genres already shipped in the live config, for contrast: orbital geometry
-(pentagram, lissajous), weather (rain, comets), cellular (fire, life),
-full-field shader ports (plasma, kaleidoscope, voronoi, caustics, metaballs,
-aurora), typography (wavebanner, printer), perspective (tunnel, warp), nature
-(flowers).
+Genres already shipped, for contrast — orbital geometry (pentagram,
+lissajous), weather (rain, comets), cellular (fire, life), full-field shader
+ports (plasma, metaballs), typography (wavebanner, printer), perspective
+(tunnel, warp), nature (flowers). Six of the best are promoted to the
+bundled gallery (`plugins/splash_gallery/`): kaleidoscope, voronoi,
+caustics, metaballs, aurora (shader ports) and matrix (falling-code rain).
+Treat the gallery sources as canonical worked examples — they are the
+current bar for what ships.
 
 Directions still open, roughly from safe to spicy:
 
