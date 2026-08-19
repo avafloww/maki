@@ -295,6 +295,4 @@ local function render_splash(w, h, t, fade)
   return rows
 end
 
-maki.api.declare_slot("splash.render", render_splash)
-
 return { render = render_splash }

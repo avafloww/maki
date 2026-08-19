@@ -73,6 +73,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "sessions",
     "skill",
     "splash",
+    "splash_gallery",
     "task",
     "thinking",
     "todo_write",

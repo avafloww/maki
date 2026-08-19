@@ -1,17 +1,19 @@
 # Splash gallery
 
 Ready-made splash screens, bundled into the binary as requireable modules.
-This is **not a loadable plugin** (no `init.lua`, not in `DEFAULT_BUILTINS`);
-it only adds files to the bundled module search path so any config can load
-a skin on demand:
+This is a loadable default plugin. It owns `/splash` and exposes the bundled
+renderers through a persistent gallery:
+
+Use `/splash` to preview and select a renderer. The modules are also available
+for custom slots and cyclers:
 
 ```lua
-require("splash.kaleidoscope")
+local kaleidoscope = require("splash.kaleidoscope")
+local rows = kaleidoscope.render(w, h, t, fade)
 ```
 
-Each module self-activates on require (it calls
-`maki.api.set_slot("splash.render", ...)`) and also returns `M` with
-`M.render(w, h, t, fade)` for custom slots or cyclers.
+Requiring a module does not activate it. The gallery keeps one stable
+`splash.render` layer and switches the renderer called by that layer.
 
 | Module | What it draws |
 |--------|---------------|

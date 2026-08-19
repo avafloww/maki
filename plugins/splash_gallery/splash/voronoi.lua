@@ -1,13 +1,13 @@
 -- Bundled splash-gallery skin, part of the maki distribution.
--- Activate from init.lua with:   require("splash.voronoi")
--- Requiring self-activates it via maki.api.set_slot("splash.render", ...);
--- the module also returns M with M.render(w, h, t, fade) for custom cyclers.
+-- Require from init.lua with:   local skin = require("splash.voronoi")
+-- The module returns M with M.render(w, h, t, fade) and does not activate itself.
 --
 -- Voronoi cells splash. Software port of the WGSL "Voronoi Cells" shader
 
 local TAU = 2.0 * math.pi
 local SCALE = 6.0
 local RAMP = " .:-=+*#%@"
+local SAMPLE_STEP = 2
 local M = {}
 
 local function theme_or(name, fallback)
@@ -51,60 +51,6 @@ local function color(hex)
   return s
 end
 
-local W, H
-
-local function new_grid()
-  local bg = color(BG_HEX)
-  local grid = {}
-  for y = 1, H do
-    local row = {}
-    for x = 1, W do
-      row[x] = { glyph = " ", style = bg }
-    end
-    grid[y] = row
-  end
-  return grid
-end
-
-local function place_text(grid, row, x, text, st)
-  if row < 1 or row > H then
-    return
-  end
-  local r = grid[row]
-  for i = 1, #text do
-    local xx = x + i - 1
-    if xx >= 1 and xx <= W then
-      r[xx] = { glyph = string.sub(text, i, i), style = st }
-    end
-  end
-end
-
-local function build_rows(grid)
-  local rows = {}
-  for y = 1, H do
-    local segs = {}
-    local buf = {}
-    local cur
-    local function flush()
-      if #buf > 0 then
-        segs[#segs + 1] = { glyphs = table.concat(buf), style = cur }
-        buf = {}
-      end
-    end
-    for x = 1, W do
-      local cell = grid[y][x]
-      if cell.style ~= cur then
-        flush()
-        cur = cell.style
-      end
-      buf[#buf + 1] = cell.glyph
-    end
-    flush()
-    rows[y] = segs
-  end
-  return rows
-end
-
 local function flat_rows(w, h, st)
   local rows = {}
   for y = 1, h do
@@ -123,18 +69,26 @@ local function smoothstep(e0, e1, x)
   return u * u * (3.0 - 2.0 * u)
 end
 
-local function shade_style(r, g, b, f)
-  local function q(v)
-    if v < 0 then
-      v = 0
-    elseif v > 1 then
-      v = 1
-    end
-    return math.floor(v * 31 + 0.5) * 255 / 31
+local function quantize(v)
+  if v < 0 then
+    v = 0
+  elseif v > 1 then
+    v = 1
   end
-  return color(
-    string.format("#%02x%02x%02x", math.floor(q(r * f) + 0.5), math.floor(q(g * f) + 0.5), math.floor(q(b * f) + 0.5))
-  )
+  return math.floor(math.floor(v * 31 + 0.5) * 255 / 31 + 0.5)
+end
+
+local function shade_style(r, g, b, f)
+  local qr = quantize(r * f)
+  local qg = quantize(g * f)
+  local qb = quantize(b * f)
+  local key = qr * 65536 + qg * 256 + qb
+  local st = style_cache[key]
+  if not st then
+    st = { fg = string.format("#%02x%02x%02x", qr, qg, qb), bg = BG_HEX, bold = false }
+    style_cache[key] = st
+  end
+  return st
 end
 
 local function ramp_glyph(lum)
@@ -154,34 +108,33 @@ local function h22(px, py)
 end
 
 -- Fragment shade for pattern coords (ux, uy); returns r, g, b in [0, 1].
-function M.shade(ux, uy, t)
+function M.shade(ux, uy, t, point_cache)
   local ipx = math.floor(ux)
   local ipy = math.floor(uy)
   local fpx = ux - ipx
   local fpy = uy - ipy
   local f1 = 8.0
   local f2 = 8.0
-  local idx, idy = 0.0, 0.0
+  local rnd = 0.0
   for gy = -1, 1 do
+    local point_row = point_cache[ipy + gy]
     for gx = -1, 1 do
-      local ox, oy = h22(ipx + gx, ipy + gy)
-      local ptx = 0.5 + 0.5 * math.sin(t + TAU * ox)
-      local pty = 0.5 + 0.5 * math.sin(t + TAU * oy)
-      local dx = gx + ptx - fpx
-      local dy = gy + pty - fpy
-      local d = math.sqrt(dx * dx + dy * dy)
+      local point = point_row[ipx + gx]
+      local dx = gx + point[1] - fpx
+      local dy = gy + point[2] - fpy
+      local d = dx * dx + dy * dy
       if d < f1 then
         f2 = f1
         f1 = d
-        idx = ipx + gx
-        idy = ipy + gy
+        rnd = point[3]
       elseif d < f2 then
         f2 = d
       end
     end
   end
+  f1 = math.sqrt(f1)
+  f2 = math.sqrt(f2)
   local edge = f2 - f1
-  local rnd = h22(idx, idy)
   local ph = rnd * TAU + t * 0.5
   local cr = 0.5 + 0.5 * math.cos(ph + 0.0)
   local cg = 0.5 + 0.5 * math.cos(ph + 2.0)
@@ -196,37 +149,76 @@ end
 
 function M.render(w, h, t, fade)
   refresh_colors()
-  W, H = w, h
   local f = fade or 1.0
   if w < 8 or h < 6 then
     return flat_rows(w, h, color(BG_HEX))
   end
-  local grid = new_grid()
-  for y = 1, h do
-    local row = grid[y]
-    local uy = ((y - 0.5) / h) * SCALE + t * 0.1
-    for x = 1, w do
-      local ux = ((x - 0.5) / (2 * h)) * SCALE + t * 0.2
-      local r, g, b = M.shade(ux, uy, t)
-      row[x] = {
-        glyph = ramp_glyph(0.2126 * r * f + 0.7152 * g * f + 0.0722 * b * f),
-        style = shade_style(r, g, b, f),
+  local label = "voronoi"
+  local label_x = math.floor((w - #label) / 2) + 1
+  local label_style = color(rgb_to_hex(FG, 0.5 * f))
+  local version = "v" .. maki.version().current
+  local version_x = w - #version + 1
+  local version_style = color(rgb_to_hex(FG, 0.4 * f))
+  local rows = {}
+  local point_cache = {}
+  local x_scale = SCALE / (2 * h)
+  local sin_t = math.sin(t)
+  local cos_t = math.cos(t)
+  for py = -1, math.ceil(SCALE + t * 0.1) + 1 do
+    local point_row = {}
+    point_cache[py] = point_row
+    for px = -1, math.ceil(w * x_scale + t * 0.2) + 1 do
+      local ox, oy = h22(px, py)
+      local sin_ox, cos_ox = math.sin(TAU * ox), math.cos(TAU * ox)
+      local sin_oy, cos_oy = math.sin(TAU * oy), math.cos(TAU * oy)
+      point_row[px] = {
+        0.5 + 0.5 * (sin_t * cos_ox + cos_t * sin_ox),
+        0.5 + 0.5 * (sin_t * cos_oy + cos_t * sin_oy),
+        ox,
       }
     end
   end
-  place_text(grid, H - 1, math.floor((W - 7) / 2) + 1, "voronoi", color(rgb_to_hex(FG, 0.5 * f)))
-  place_text(
-    grid,
-    1,
-    W - #("v" .. maki.version().current) + 1,
-    "v" .. maki.version().current,
-    color(rgb_to_hex(FG, 0.4 * f))
-  )
-  return build_rows(grid)
+  local sample_r, sample_g, sample_b
+  for y = 1, h do
+    if (y - 1) % SAMPLE_STEP == 0 then
+      sample_r, sample_g, sample_b = {}, {}, {}
+      local uy = ((y - 0.5) / h) * SCALE + t * 0.1
+      for x = 1, w, SAMPLE_STEP do
+        local r, g, b = M.shade((x - 0.5) * x_scale + t * 0.2, uy, t, point_cache)
+        sample_r[x], sample_g[x], sample_b[x] = r, g, b
+      end
+    end
+    local glyphs = {}
+    local segs = {}
+    local current_style
+    local run_start = 1
+    for x = 1, w do
+      local glyph, style
+      if y == h - 1 and x >= label_x and x < label_x + #label then
+        glyph = string.sub(label, x - label_x + 1, x - label_x + 1)
+        style = label_style
+      elseif y == 1 and x >= version_x then
+        glyph = string.sub(version, x - version_x + 1, x - version_x + 1)
+        style = version_style
+      else
+        local sample_x = x - (x - 1) % SAMPLE_STEP
+        local r, g, b = sample_r[sample_x], sample_g[sample_x], sample_b[sample_x]
+        glyph = ramp_glyph((0.2126 * r + 0.7152 * g + 0.0722 * b) * f)
+        style = shade_style(r, g, b, f)
+      end
+      glyphs[x] = glyph
+      if style ~= current_style then
+        if current_style then
+          segs[#segs + 1] = { glyphs = table.concat(glyphs, "", run_start, x - 1), style = current_style }
+        end
+        current_style = style
+        run_start = x
+      end
+    end
+    segs[#segs + 1] = { glyphs = table.concat(glyphs, "", run_start, w), style = current_style }
+    rows[y] = segs
+  end
+  return rows
 end
-
-maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
-  return M.render(w, h, t, fade)
-end)
 
 return M

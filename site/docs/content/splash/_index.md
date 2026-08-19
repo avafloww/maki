@@ -58,10 +58,13 @@ The default plugin draws the top-right version text and, when an update exists, 
 
 ## Bundled gallery
 
-Six ready-made skins ship inside the binary as requireable modules under the `splash.*` namespace. Nothing loads until you ask for it; each require one line in `init.lua`:
+The default `splash_gallery` plugin provides six ready-made skins under the
+`splash.*` namespace. Use `/splash` to preview and commit a choice, or
+`/splash <name>` for direct selection. `/splash default` resets the preference.
 
 ```lua
-require("splash.kaleidoscope")
+local kaleidoscope = require("splash.kaleidoscope")
+local rows = kaleidoscope.render(w, h, t, fade)
 ```
 
 | Module | What it draws |
@@ -73,7 +76,7 @@ require("splash.kaleidoscope")
 | `splash.aurora` | northern-light bands drifting over a night gradient |
 | `splash.matrix` | green falling-code rain, resets on `SplashShown` |
 
-Each module self-activates on require and also returns `M` with `M.render(w, h, t, fade)`, so a small cycler can rotate through them:
+Each module returns `M` with `M.render(w, h, t, fade)` but does not activate itself. The gallery owns one stable `splash.render` layer and changes which module renderer that layer calls. A custom layer can also rotate through the modules:
 
 ```lua
 local skins = {

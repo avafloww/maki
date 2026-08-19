@@ -1,11 +1,11 @@
 -- Bundled splash-gallery skin, part of the maki distribution.
--- Activate from init.lua with:   require("splash.caustics")
--- Requiring self-activates it via maki.api.set_slot("splash.render", ...);
--- the module also returns M with M.render(w, h, t, fade) for custom cyclers.
+-- Require from init.lua with:   local skin = require("splash.caustics")
+-- The module returns M with M.render(w, h, t, fade) and does not activate itself.
 --
 -- Caustics splash. Software port of the WGSL "Caustics" shader from
 
 local RAMP = " .:-=+*#%@"
+local SAMPLE_STEP = 4
 local M = {}
 
 local function theme_or(name, fallback)
@@ -49,60 +49,6 @@ local function color(hex)
   return s
 end
 
-local W, H
-
-local function new_grid()
-  local bg = color(BG_HEX)
-  local grid = {}
-  for y = 1, H do
-    local row = {}
-    for x = 1, W do
-      row[x] = { glyph = " ", style = bg }
-    end
-    grid[y] = row
-  end
-  return grid
-end
-
-local function place_text(grid, row, x, text, st)
-  if row < 1 or row > H then
-    return
-  end
-  local r = grid[row]
-  for i = 1, #text do
-    local xx = x + i - 1
-    if xx >= 1 and xx <= W then
-      r[xx] = { glyph = string.sub(text, i, i), style = st }
-    end
-  end
-end
-
-local function build_rows(grid)
-  local rows = {}
-  for y = 1, H do
-    local segs = {}
-    local buf = {}
-    local cur
-    local function flush()
-      if #buf > 0 then
-        segs[#segs + 1] = { glyphs = table.concat(buf), style = cur }
-        buf = {}
-      end
-    end
-    for x = 1, W do
-      local cell = grid[y][x]
-      if cell.style ~= cur then
-        flush()
-        cur = cell.style
-      end
-      buf[#buf + 1] = cell.glyph
-    end
-    flush()
-    rows[y] = segs
-  end
-  return rows
-end
-
 local function flat_rows(w, h, st)
   local rows = {}
   for y = 1, h do
@@ -111,18 +57,26 @@ local function flat_rows(w, h, st)
   return rows
 end
 
-local function shade_style(r, g, b, f)
-  local function q(v)
-    if v < 0 then
-      v = 0
-    elseif v > 1 then
-      v = 1
-    end
-    return math.floor(v * 31 + 0.5) * 255 / 31
+local function quantize(v)
+  if v < 0 then
+    v = 0
+  elseif v > 1 then
+    v = 1
   end
-  return color(
-    string.format("#%02x%02x%02x", math.floor(q(r * f) + 0.5), math.floor(q(g * f) + 0.5), math.floor(q(b * f) + 0.5))
-  )
+  return math.floor(math.floor(v * 31 + 0.5) * 255 / 31 + 0.5)
+end
+
+local function shade_style(r, g, b, f)
+  local qr = quantize(r * f)
+  local qg = quantize(g * f)
+  local qb = quantize(b * f)
+  local key = qr * 65536 + qg * 256 + qb
+  local st = style_cache[key]
+  if not st then
+    st = { fg = string.format("#%02x%02x%02x", qr, qg, qb), bg = BG_HEX, bold = false }
+    style_cache[key] = st
+  end
+  return st
 end
 
 local function ramp_glyph(lum)
@@ -163,13 +117,15 @@ function M.shade(nx, ny, t)
   local qx, qy = ux, uy
   local c = 0.0
   for i = 1, 4 do
-    local fi = tonumber(i)
+    local fi = i
     local wx = M.n2(qx * fi + tt * 0.3, qy * fi + tt * 0.3)
     local wy = M.n2(qx * fi - tt * 0.2, qy * fi - tt * 0.2)
     qx = qx + wx * 0.7
     qy = qy + wy * 0.7
-    local wv = math.abs(math.sin((qx + qy) * (2.0 + fi) - tt))
-    c = c + (1.0 - wv) ^ 8 / fi
+    local wv = 1.0 - math.abs(math.sin((qx + qy) * (2.0 + fi) - tt))
+    wv = wv * wv
+    wv = wv * wv
+    c = c + wv * wv / fi
   end
   local deep_r, deep_g, deep_b = 0.0, 0.08, 0.18
   local lite_r, lite_g, lite_b = 0.4, 0.95, 1.1
@@ -179,37 +135,78 @@ end
 
 function M.render(w, h, t, fade)
   refresh_colors()
-  W, H = w, h
   local f = fade or 1.0
   if w < 8 or h < 6 then
     return flat_rows(w, h, color(BG_HEX))
   end
-  local grid = new_grid()
-  for y = 1, h do
-    local row = grid[y]
+  local label = "caustics"
+  local label_x = math.floor((w - #label) / 2) + 1
+  local label_style = color(rgb_to_hex(FG, 0.5 * f))
+  local version = "v" .. maki.version().current
+  local version_x = w - #version + 1
+  local version_style = color(rgb_to_hex(FG, 0.4 * f))
+  local rows = {}
+  local x_scale = 1 / h
+  local sample_r, sample_g, sample_b = {}, {}, {}
+  local sample_columns = math.floor((w - 1) / SAMPLE_STEP) + 2
+  local sample_rows = math.floor((h - 1) / SAMPLE_STEP) + 2
+  for sample_y = 1, sample_rows do
+    sample_r[sample_y], sample_g[sample_y], sample_b[sample_y] = {}, {}, {}
+    local y = 1 + (sample_y - 1) * SAMPLE_STEP
     local ny = (2 * (y - 0.5) - h) / h
-    for x = 1, w do
-      local nx = ((x - 0.5) - w / 2) / h
-      local r, g, b = M.shade(nx, ny, t)
-      row[x] = {
-        glyph = ramp_glyph(0.2126 * r * f + 0.7152 * g * f + 0.0722 * b * f),
-        style = shade_style(r, g, b, f),
-      }
+    for sample_x = 1, sample_columns do
+      local x = 1 + (sample_x - 1) * SAMPLE_STEP
+      local r, g, b = M.shade(((x - 0.5) - w / 2) * x_scale, ny, t)
+      sample_r[sample_y][sample_x] = r
+      sample_g[sample_y][sample_x] = g
+      sample_b[sample_y][sample_x] = b
     end
   end
-  place_text(grid, H - 1, math.floor((W - 8) / 2) + 1, "caustics", color(rgb_to_hex(FG, 0.5 * f)))
-  place_text(
-    grid,
-    1,
-    W - #("v" .. maki.version().current) + 1,
-    "v" .. maki.version().current,
-    color(rgb_to_hex(FG, 0.4 * f))
-  )
-  return build_rows(grid)
+  for y = 1, h do
+    local grid_y = (y - 1) / SAMPLE_STEP
+    local sample_y = math.floor(grid_y) + 1
+    local fy = grid_y - math.floor(grid_y)
+    local glyphs = {}
+    local segs = {}
+    local current_style
+    local run_start = 1
+    for x = 1, w do
+      local glyph, style
+      if y == h - 1 and x >= label_x and x < label_x + #label then
+        glyph = string.sub(label, x - label_x + 1, x - label_x + 1)
+        style = label_style
+      elseif y == 1 and x >= version_x then
+        glyph = string.sub(version, x - version_x + 1, x - version_x + 1)
+        style = version_style
+      else
+        local grid_x = (x - 1) / SAMPLE_STEP
+        local sample_x = math.floor(grid_x) + 1
+        local fx = grid_x - math.floor(grid_x)
+        local r0 = sample_r[sample_y][sample_x] * (1 - fx) + sample_r[sample_y][sample_x + 1] * fx
+        local g0 = sample_g[sample_y][sample_x] * (1 - fx) + sample_g[sample_y][sample_x + 1] * fx
+        local b0 = sample_b[sample_y][sample_x] * (1 - fx) + sample_b[sample_y][sample_x + 1] * fx
+        local r1 = sample_r[sample_y + 1][sample_x] * (1 - fx) + sample_r[sample_y + 1][sample_x + 1] * fx
+        local g1 = sample_g[sample_y + 1][sample_x] * (1 - fx) + sample_g[sample_y + 1][sample_x + 1] * fx
+        local b1 = sample_b[sample_y + 1][sample_x] * (1 - fx) + sample_b[sample_y + 1][sample_x + 1] * fx
+        local r = r0 * (1 - fy) + r1 * fy
+        local g = g0 * (1 - fy) + g1 * fy
+        local b = b0 * (1 - fy) + b1 * fy
+        glyph = ramp_glyph((0.2126 * r + 0.7152 * g + 0.0722 * b) * f)
+        style = shade_style(r, g, b, f)
+      end
+      glyphs[x] = glyph
+      if style ~= current_style then
+        if current_style then
+          segs[#segs + 1] = { glyphs = table.concat(glyphs, "", run_start, x - 1), style = current_style }
+        end
+        current_style = style
+        run_start = x
+      end
+    end
+    segs[#segs + 1] = { glyphs = table.concat(glyphs, "", run_start, w), style = current_style }
+    rows[y] = segs
+  end
+  return rows
 end
-
-maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
-  return M.render(w, h, t, fade)
-end)
 
 return M

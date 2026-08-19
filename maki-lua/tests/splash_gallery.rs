@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use maki_lua::test_support::spawn_host_for_tests;
 use maki_lua::{EventHandle, SplashFrame, SplashStyle};
@@ -43,22 +43,51 @@ fn host(skin: &str) -> (EventHandle, maki_lua::test_support::PluginHostGuard) {
         .host()
         .load_source(
             &format!("{skin}_gallery"),
-            &format!("require(\"splash.{skin}\")"),
+            &format!(
+                r#"
+                local module = require("splash.{skin}")
+                assert(type(module.render) == "function")
+                maki.api.set_slot("splash.render", function(_, w, h, t, fade)
+                  return module.render(w, h, t, fade)
+                end)
+                "#
+            ),
         )
-        .expect("gallery skin loads through the bundled module path");
+        .expect("gallery renderer loads through the bundled module path");
     (handle, guard)
 }
 
-fn pull(handle: &EventHandle, t: f32) -> SplashFrame {
+fn pull_size(handle: &EventHandle, width: u16, height: u16, t: f32) -> SplashFrame {
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Some(f) = handle.splash_frame(W as u16, H as u16, t, 1.0) {
-            return f;
+        if let Some(frame) = handle.splash_frame(width, height, t, 1.0) {
+            return frame;
         }
+        assert!(Instant::now() < deadline, "splash renderer timed out");
         std::thread::sleep(Duration::from_millis(50));
     }
 }
 
-#[derive(Clone)]
+fn pull(handle: &EventHandle, t: f32) -> SplashFrame {
+    pull_size(handle, W as u16, H as u16, t)
+}
+
+fn pull_glyph(handle: &EventHandle, t: f32, glyph: char) -> SplashFrame {
+    for _ in 0..20 {
+        let frame = pull(handle, t);
+        if reconstruct(&frame)
+            .iter()
+            .flatten()
+            .all(|cell| cell.ch == glyph)
+        {
+            return frame;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("splash never rendered '{glyph}'")
+}
+
+#[derive(Clone, PartialEq, Eq)]
 struct Cell {
     ch: char,
     #[allow(dead_code)]
@@ -100,11 +129,20 @@ fn reconstruct(frame: &SplashFrame) -> Vec<Vec<Cell>> {
 
 fn check_frame(skin: &str, frame: &SplashFrame) {
     assert!(!frame.rows.is_empty(), "{skin}: frame must not be empty");
-    let grid = reconstruct(frame);
-    assert_eq!(grid.len(), H, "{skin}: exactly {H} rows");
-    for row in &grid {
-        assert_eq!(row.len(), W, "{skin}: each row must be {W} cells");
-    }
+    let glyphs = frame
+        .rows
+        .iter()
+        .map(|segment| segment.glyphs.as_str())
+        .collect::<String>();
+    assert_eq!(
+        glyphs.chars().count(),
+        W * H,
+        "{skin}: frame must cover the canvas"
+    );
+    assert!(
+        glyphs.contains(skin),
+        "{skin}: frame must contain its skin label"
+    );
 }
 
 fn filled(frame: &SplashFrame) -> HashSet<(usize, usize)> {
@@ -152,8 +190,12 @@ fn skin_loads_and_renders(skin: &str) {
 fn skin_animates(skin: &str) {
     let (handle, _guard) = host(skin);
     drive(&handle, 20.0);
-    let a = reconstruct(&pull(&handle, 20.3));
-    let b = reconstruct(&pull(&handle, 20.9));
+    let frame_a = pull(&handle, 20.3);
+    let frame_b = pull(&handle, 20.9);
+    check_frame(skin, &frame_a);
+    check_frame(skin, &frame_b);
+    let a = reconstruct(&frame_a);
+    let b = reconstruct(&frame_b);
     let diff = a
         .iter()
         .flatten()
@@ -167,15 +209,226 @@ fn skin_animates(skin: &str) {
 }
 
 #[test]
-fn every_gallery_skin_is_reachable() {
-    for skin in SKINS {
-        let (_handle, guard) = spawn_host_for_tests(&["splash"]);
-        guard
-            .host()
-            .load_source(
-                &format!("{skin}_reach"),
-                &format!("assert(require(\"splash.{skin}\").render)"),
-            )
-            .unwrap_or_else(|e| panic!("splash.{skin} must be requireable: {e}"));
+fn caustics_does_not_replicate_four_by_four_samples() {
+    const BLOCK_SIZE: usize = 4;
+
+    let (handle, _guard) = host("caustics");
+    let grid = reconstruct(&pull(&handle, 8.3));
+    let mut blocks = 0;
+    let mut replicated = 0;
+    for rows in grid.chunks_exact(BLOCK_SIZE) {
+        for x in (0..W).step_by(BLOCK_SIZE) {
+            blocks += 1;
+            let first = &rows[0][x];
+            if rows
+                .iter()
+                .all(|row| row[x..x + BLOCK_SIZE].iter().all(|cell| cell == first))
+            {
+                replicated += 1;
+            }
+        }
     }
+    assert!(
+        replicated * 4 < blocks,
+        "caustics replicated {replicated}/{blocks} four-by-four sample blocks"
+    );
+}
+
+#[test]
+fn voronoi_renders_at_188x53() {
+    const LARGE_W: u16 = 188;
+    const LARGE_H: u16 = 53;
+
+    let (handle, _guard) = host("voronoi");
+    let frame = pull_size(&handle, LARGE_W, LARGE_H, 1.0);
+    let glyphs = frame
+        .rows
+        .iter()
+        .map(|segment| segment.glyphs.as_str())
+        .collect::<String>();
+    assert_eq!(glyphs.chars().count(), LARGE_W as usize * LARGE_H as usize);
+    assert!(glyphs.contains("voronoi"));
+}
+
+#[test]
+#[ignore = "reports local splash render timing; run with --ignored --nocapture"]
+fn shader_port_timing_at_188x53() {
+    const BENCH_W: u16 = 188;
+    const BENCH_H: u16 = 53;
+    const WARMUP_FRAMES: usize = 10;
+    const SAMPLES: usize = 30;
+
+    for skin in ["caustics", "voronoi"] {
+        let (handle, _guard) = host(skin);
+        for frame in 0..WARMUP_FRAMES {
+            handle
+                .splash_frame(BENCH_W, BENCH_H, frame as f32 / 30.0, 1.0)
+                .expect("splash renderer must produce a frame during warmup");
+        }
+        let started = Instant::now();
+        for frame in 0..SAMPLES {
+            let splash = handle
+                .splash_frame(BENCH_W, BENCH_H, (WARMUP_FRAMES + frame) as f32 / 30.0, 1.0)
+                .expect("splash renderer must produce a frame while timing");
+            let cells = splash
+                .rows
+                .iter()
+                .map(|segment| segment.glyphs.chars().count())
+                .sum::<usize>();
+            assert_eq!(cells, BENCH_W as usize * BENCH_H as usize);
+        }
+        let milliseconds = started.elapsed().as_secs_f64() * 1_000.0 / SAMPLES as f64;
+        eprintln!("{skin} {BENCH_W}x{BENCH_H}: {milliseconds:.2} ms/frame");
+    }
+}
+
+#[test]
+fn gallery_modules_are_reachable_without_self_activation() {
+    let (handle, guard) = spawn_host_for_tests(&["splash"]);
+    let skins = SKINS
+        .iter()
+        .map(|skin| format!("\"{skin}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    guard
+        .host()
+        .load_source(
+            "gallery_module_contract",
+            &format!(
+                r##"
+                maki.api.set_slot("splash.render", function(_, w, h)
+                  local rows = {{}}
+                  for y = 1, h do rows[y] = {{ {{ glyphs = string.rep("X", w), style = "#ffffff" }} }} end
+                  return rows
+                end)
+                for _, skin in ipairs({{{skins}}}) do
+                  local module = require("splash." .. skin)
+                  assert(type(module) == "table" and type(module.render) == "function")
+                end
+                "##
+            ),
+        )
+        .expect("gallery modules are requireable");
+
+    assert!(
+        reconstruct(&pull(&handle, 1.0))
+            .iter()
+            .flatten()
+            .all(|cell| cell.ch == 'X'),
+        "requiring gallery modules must not replace the active splash layer"
+    );
+}
+
+#[test]
+fn matrix_resets_when_splash_is_shown_again() {
+    let (handle, guard) = host("matrix");
+    drive(&handle, 30.0);
+    let before = (0..5)
+        .map(|i| filled(&pull(&handle, 30.2 + i as f32 * 0.4)).len())
+        .max()
+        .unwrap();
+    handle.fire_autocmd("SplashShown", serde_json::Value::Null);
+    guard
+        .host()
+        .load_source("splash_shown_barrier", "return nil")
+        .expect("SplashShown callback completes");
+    let after = filled(&pull(&handle, 0.0)).len();
+    assert!(before > 200, "matrix must reach steady-state rain");
+    assert!(after < 50, "SplashShown must reset matrix state");
+}
+
+#[test]
+fn renderer_selection_and_runtime_rollback_are_transactional() {
+    let (handle, guard) = spawn_host_for_tests(&["splash", "splash_gallery"]);
+    guard
+        .host()
+        .load_source(
+            "gallery_transaction_fixtures",
+            r##"
+            local function filled(glyph)
+              return function(w, h)
+                local rows = {}
+                for y = 1, h do
+                  rows[y] = { { glyphs = string.rep(glyph, w), style = "#ffffff" } }
+                end
+                return rows
+              end
+            end
+
+            maki.api.register("splash.gallery", "stable", {
+              label = "Stable",
+              activate = function() return filled("S") end,
+            })
+            maki.api.register("splash.gallery", "broken", {
+              label = "Broken",
+              activate = function() return function() error("candidate failed") end end,
+            })
+            maki.api.register("splash.gallery", "fragile", {
+              label = "Fragile",
+              activate = function()
+                local render = filled("F")
+                local calls = 0
+                return function(...)
+                  calls = calls + 1
+                  if calls > 2 then error("committed renderer failed") end
+                  return render(...)
+                end
+              end,
+            })
+            "##,
+        )
+        .expect("transaction fixtures register");
+
+    handle
+        .run_command_for_test(
+            "splash_gallery".into(),
+            "/splash".into(),
+            "stable".into(),
+            0,
+        )
+        .recv_timeout(Duration::from_secs(5))
+        .expect("stable command completes");
+    let _stable = pull_glyph(&handle, 1.0, 'S');
+    guard
+        .host()
+        .load_source(
+            "stable_persistence",
+            r##"
+            local path = maki.fs.joinpath(maki.env.state_dir(), "splash_gallery", "selection.json")
+            assert(maki.json.decode(maki.fs.read(path)).name == "stable")
+            "##,
+        )
+        .expect("stable selection persists");
+
+    handle
+        .run_command_for_test(
+            "splash_gallery".into(),
+            "/splash".into(),
+            "broken".into(),
+            0,
+        )
+        .recv_timeout(Duration::from_secs(5))
+        .expect("broken command completes");
+    let _after_broken = pull_glyph(&handle, 2.0, 'S');
+    guard
+        .host()
+        .load_source(
+            "broken_persistence",
+            r##"
+            local path = maki.fs.joinpath(maki.env.state_dir(), "splash_gallery", "selection.json")
+            assert(maki.json.decode(maki.fs.read(path)).name == "stable")
+            "##,
+        )
+        .expect("invalid selection does not persist");
+    handle
+        .run_command_for_test(
+            "splash_gallery".into(),
+            "/splash".into(),
+            "fragile".into(),
+            0,
+        )
+        .recv_timeout(Duration::from_secs(5))
+        .expect("fragile command completes");
+    let _fragile = pull_glyph(&handle, 2.5, 'F');
+    let _rolled_back = pull_glyph(&handle, 4.0, 'S');
 }

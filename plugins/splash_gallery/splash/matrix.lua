@@ -1,7 +1,6 @@
 -- Bundled splash-gallery skin, part of the maki distribution.
--- Activate from init.lua with:   require("splash.matrix")
--- Requiring self-activates it via maki.api.set_slot("splash.render", ...);
--- the module also returns M with M.render(w, h, t, fade) for custom cyclers.
+-- Require from init.lua with:   local skin = require("splash.matrix")
+-- The module returns M with M.render(w, h, t, fade) and does not activate itself.
 --
 -- Matrix rain splash. Green falling code with per-column state stepped by
 -- frame dt; resets when the home screen shows again (SplashShown). The
@@ -133,9 +132,5 @@ function M.render(w, h, t, fade)
   end
   return rows
 end
-
-maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
-  return M.render(w, h, t, fade)
-end)
 
 return M

@@ -1,7 +1,6 @@
 -- Bundled splash-gallery skin, part of the maki distribution.
--- Activate from init.lua with:   require("splash.kaleidoscope")
--- Requiring self-activates it via maki.api.set_slot("splash.render", ...);
--- the module also returns M with M.render(w, h, t, fade) for custom cyclers.
+-- Require from init.lua with:   local skin = require("splash.kaleidoscope")
+-- The module returns M with M.render(w, h, t, fade) and does not activate itself.
 --
 -- Kaleidoscope splash. Software port of the WGSL "Kaleidoscope" shader from
 
@@ -225,9 +224,5 @@ function M.render(w, h, t, fade)
   )
   return build_rows(grid)
 end
-
-maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
-  return M.render(w, h, t, fade)
-end)
 
 return M
