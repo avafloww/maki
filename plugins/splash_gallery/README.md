@@ -20,6 +20,7 @@ Each module self-activates on require (it calls
 | `splash.caustics` | deep-water light caustics, four octaves of warped sines |
 | `splash.metaballs` | four merging metaballs with a glow contour |
 | `splash.aurora` | five noise-meandering northern-light bands |
+| `splash.matrix` | green falling-code rain, resets on `SplashShown` |
 
 User files win outside the `splash.*` namespace; bundled modules are tried
 before `./lua` files, so a personal `lua/splash/kaleidoscope.lua` would be

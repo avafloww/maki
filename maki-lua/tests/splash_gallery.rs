@@ -6,7 +6,33 @@ use maki_lua::{EventHandle, SplashFrame, SplashStyle};
 
 const W: usize = 80;
 const H: usize = 20;
-const SKINS: &[&str] = &["kaleidoscope", "voronoi", "caustics", "metaballs", "aurora"];
+const SKINS: &[&str] = &[
+    "kaleidoscope",
+    "voronoi",
+    "caustics",
+    "metaballs",
+    "aurora",
+    "matrix",
+];
+
+/// The full-field shader ports paint most cells; matrix is a sparse rain.
+fn min_filled(skin: &str) -> usize {
+    match skin {
+        "matrix" => 300,
+        _ => 500,
+    }
+}
+
+/// Stateful skins (matrix) start with heads above the screen and need
+/// simulated seconds before the rain is flowing. Pure skins are unaffected
+/// by extra pulls, so drive every skin the same way.
+fn drive(handle: &EventHandle, to: f32) {
+    let mut t = 0.5;
+    while t <= to {
+        pull(handle, t);
+        t += 0.5;
+    }
+}
 
 fn host(skin: &str) -> (EventHandle, maki_lua::test_support::PluginHostGuard) {
     let (handle, guard) = spawn_host_for_tests(&["splash"]);
@@ -96,14 +122,16 @@ fn filled(frame: &SplashFrame) -> HashSet<(usize, usize)> {
 #[test_case::test_case("caustics" ; "caustics_loads")]
 #[test_case::test_case("metaballs" ; "metaballs_loads")]
 #[test_case::test_case("aurora" ; "aurora_loads")]
+#[test_case::test_case("matrix" ; "matrix_loads")]
 fn skin_loads_and_renders(skin: &str) {
     let (handle, _guard) = host(skin);
-    let frame = pull(&handle, 1.0);
+    drive(&handle, 20.0);
+    let frame = pull(&handle, 20.5);
     check_frame(skin, &frame);
-    // Full-field skins paint glyph ramp across most of the screen.
+    let threshold = min_filled(skin);
     assert!(
-        filled(&frame).len() > 500,
-        "{skin}: expected a dense frame, got {} filled cells",
+        filled(&frame).len() > threshold,
+        "{skin}: expected > {threshold} filled cells, got {}",
         filled(&frame).len()
     );
 }
@@ -113,10 +141,12 @@ fn skin_loads_and_renders(skin: &str) {
 #[test_case::test_case("caustics" ; "caustics_animates")]
 #[test_case::test_case("metaballs" ; "metaballs_animates")]
 #[test_case::test_case("aurora" ; "aurora_animates")]
+#[test_case::test_case("matrix" ; "matrix_animates")]
 fn skin_animates(skin: &str) {
     let (handle, _guard) = host(skin);
-    let a = reconstruct(&pull(&handle, 0.3));
-    let b = reconstruct(&pull(&handle, 0.9));
+    drive(&handle, 20.0);
+    let a = reconstruct(&pull(&handle, 20.3));
+    let b = reconstruct(&pull(&handle, 20.9));
     let diff = a
         .iter()
         .flatten()

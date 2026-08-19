@@ -58,7 +58,7 @@ The default plugin draws the top-right version text and, when an update exists, 
 
 ## Bundled gallery
 
-Five ready-made skins ship inside the binary as requireable modules under the `splash.*` namespace. Nothing loads until you ask for it; each require one line in `init.lua`:
+Six ready-made skins ship inside the binary as requireable modules under the `splash.*` namespace. Nothing loads until you ask for it; each require one line in `init.lua`:
 
 ```lua
 require("splash.kaleidoscope")
@@ -71,6 +71,7 @@ require("splash.kaleidoscope")
 | `splash.caustics` | deep-water light caustics |
 | `splash.metaballs` | merging metaballs with a glow contour |
 | `splash.aurora` | northern-light bands drifting over a night gradient |
+| `splash.matrix` | green falling-code rain, resets on `SplashShown` |
 
 Each module self-activates on require and also returns `M` with `M.render(w, h, t, fade)`, so a small cycler can rotate through them:
 
