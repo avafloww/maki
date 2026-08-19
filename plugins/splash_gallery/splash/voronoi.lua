@@ -132,7 +132,9 @@ local function shade_style(r, g, b, f)
     end
     return math.floor(v * 31 + 0.5) * 255 / 31
   end
-  return color(string.format("#%02x%02x%02x", math.floor(q(r * f) + 0.5), math.floor(q(g * f) + 0.5), math.floor(q(b * f) + 0.5)))
+  return color(
+    string.format("#%02x%02x%02x", math.floor(q(r * f) + 0.5), math.floor(q(g * f) + 0.5), math.floor(q(b * f) + 0.5))
+  )
 end
 
 local function ramp_glyph(lum)
@@ -213,7 +215,13 @@ function M.render(w, h, t, fade)
     end
   end
   place_text(grid, H - 1, math.floor((W - 7) / 2) + 1, "voronoi", color(rgb_to_hex(FG, 0.5 * f)))
-  place_text(grid, 1, W - #("v" .. maki.version().current) + 1, "v" .. maki.version().current, color(rgb_to_hex(FG, 0.4 * f)))
+  place_text(
+    grid,
+    1,
+    W - #("v" .. maki.version().current) + 1,
+    "v" .. maki.version().current,
+    color(rgb_to_hex(FG, 0.4 * f))
+  )
   return build_rows(grid)
 end
 
