@@ -9,7 +9,6 @@
 
 local GLYPHS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 local TRAIL = 6
-local LABEL = "matrix"
 local M = {}
 
 local state = { cols = {}, last_t = nil }
@@ -92,16 +91,9 @@ function M.render(w, h, t, fade)
     end
   end
 
-  -- furniture: label bottom-center, version top-right
-  local lx = math.floor((w - #LABEL) / 2) + 1
-  if h >= 2 and lx >= 1 then
-    for i = 1, #LABEL do
-      grid[h - 1][lx + i - 1] = { ch = string.sub(LABEL, i, i), fg = shade("#c8ffd0", fade * 0.55) }
-    end
-  end
   local ver = "v" .. maki.version().current
   if h >= 1 and w - #ver >= 1 then
-    local vx = w - #ver
+    local vx = w - #ver + 1
     for i = 1, #ver do
       grid[1][vx + i - 1] = { ch = string.sub(ver, i, i), fg = shade("#00ff41", fade) }
     end

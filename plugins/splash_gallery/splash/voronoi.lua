@@ -153,9 +153,6 @@ function M.render(w, h, t, fade)
   if w < 8 or h < 6 then
     return flat_rows(w, h, color(BG_HEX))
   end
-  local label = "voronoi"
-  local label_x = math.floor((w - #label) / 2) + 1
-  local label_style = color(rgb_to_hex(FG, 0.5 * f))
   local version = "v" .. maki.version().current
   local version_x = w - #version + 1
   local version_style = color(rgb_to_hex(FG, 0.4 * f))
@@ -194,10 +191,7 @@ function M.render(w, h, t, fade)
     local run_start = 1
     for x = 1, w do
       local glyph, style
-      if y == h - 1 and x >= label_x and x < label_x + #label then
-        glyph = string.sub(label, x - label_x + 1, x - label_x + 1)
-        style = label_style
-      elseif y == 1 and x >= version_x then
+      if y == 1 and x >= version_x then
         glyph = string.sub(version, x - version_x + 1, x - version_x + 1)
         style = version_style
       else

@@ -199,7 +199,6 @@ function M.render(w, h, t, fade)
       }
     end
   end
-  place_text(grid, H - 1, math.floor((W - 9) / 2) + 1, "metaballs", color(rgb_to_hex(FG, 0.5 * f)))
   place_text(
     grid,
     1,

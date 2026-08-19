@@ -213,7 +213,6 @@ function M.render(w, h, t, fade)
       }
     end
   end
-  place_text(grid, H - 1, math.floor((W - 6) / 2) + 1, "aurora", color(rgb_to_hex(FG, 0.5 * f)))
   place_text(
     grid,
     1,
