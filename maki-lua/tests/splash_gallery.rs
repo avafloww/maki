@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use maki_lua::test_support::spawn_host_for_tests;
+use maki_lua::test_support::{spawn_host_for_tests, spawn_host_for_tests_with_state};
 use maki_lua::{EventHandle, SplashFrame, SplashStyle};
 
 const W: usize = 80;
@@ -431,4 +431,247 @@ fn renderer_selection_and_runtime_rollback_are_transactional() {
         .expect("fragile command completes");
     let _fragile = pull_glyph(&handle, 2.5, 'F');
     let _rolled_back = pull_glyph(&handle, 4.0, 'S');
+    guard
+        .host()
+        .load_source("rollback_barrier", "return nil")
+        .expect("queued rollback persists");
+    guard
+        .host()
+        .load_source(
+            "rollback_persistence",
+            r##"
+            local path = maki.fs.joinpath(maki.env.state_dir(), "splash_gallery", "selection.json")
+            assert(maki.json.decode(maki.fs.read(path)).name == "stable")
+            "##,
+        )
+        .expect("runtime rollback repairs persisted selection");
+}
+
+#[test]
+fn completion_lifecycle_previews_commits_and_cancels() {
+    let (handle, guard) = spawn_host_for_tests(&["splash", "splash_gallery"]);
+    guard
+        .host()
+        .load_source(
+            "completion_gallery_fixture",
+            r##"
+            local function renderer(glyph)
+              return function(w, h)
+                local rows = {}
+                for y = 1, h do rows[y] = { { glyphs = string.rep(glyph, w), style = "#ffffff" } } end
+                return rows
+              end
+            end
+            maki.api.register("splash.gallery", "preview", {
+              label = "Preview",
+              activate = function() return renderer("P") end,
+            })
+            "##,
+        )
+        .unwrap();
+    let context = maki_lua::CommandArgumentContext {
+        command: "/splash".into(),
+        plugin: "splash_gallery".into(),
+        args: "pre".into(),
+        arg: "pre".into(),
+        index: 0,
+        mode: "build".into(),
+        session: 1,
+        generation: 1,
+    };
+    let items = handle
+        .collect_command_argument_items(context.clone(), maki_agent::CancelToken::none())
+        .unwrap()
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    let item = items
+        .into_iter()
+        .find(|item| item.insertion == "preview")
+        .unwrap();
+
+    handle.command_argument_lifecycle(
+        context.clone(),
+        maki_lua::CommandArgumentLifecycle::Highlight,
+        Some(item.clone()),
+        maki_agent::CancelToken::none(),
+    );
+    let _preview = pull_glyph(&handle, 1.0, 'P');
+    handle.command_argument_lifecycle(
+        context.clone(),
+        maki_lua::CommandArgumentLifecycle::Cancel,
+        None,
+        maki_agent::CancelToken::none(),
+    );
+    guard
+        .host()
+        .load_source("completion_cancel_barrier", "return nil")
+        .unwrap();
+    let cancelled = pull(&handle, 1.1);
+    assert!(
+        reconstruct(&cancelled)
+            .iter()
+            .flatten()
+            .any(|cell| cell.ch != 'P')
+    );
+
+    handle.command_argument_lifecycle(
+        context.clone(),
+        maki_lua::CommandArgumentLifecycle::Highlight,
+        Some(item.clone()),
+        maki_agent::CancelToken::none(),
+    );
+    handle.command_argument_lifecycle(
+        context,
+        maki_lua::CommandArgumentLifecycle::Accept,
+        Some(item),
+        maki_agent::CancelToken::none(),
+    );
+    guard
+        .host()
+        .load_source("completion_accept_barrier", "return nil")
+        .unwrap();
+    let _accepted = pull_glyph(&handle, 1.2, 'P');
+}
+
+#[test]
+fn persisted_runtime_rollback_survives_restart() {
+    let state_dir = tempfile::tempdir().unwrap();
+    {
+        let host = spawn_host_for_tests_with_state(
+            &["splash", "splash_gallery"],
+            state_dir.path().to_owned(),
+        );
+        host.load_source(
+            "restart_fixture",
+            r##"
+            local calls = 0
+            maki.api.register("splash.gallery", "fragile", {
+              label = "Fragile",
+              activate = function()
+                return function(w, h)
+                  calls = calls + 1
+                  if calls > 2 then error("failed") end
+                  local rows = {}
+                  for y = 1, h do rows[y] = { { glyphs = string.rep("F", w), style = "#ffffff" } } end
+                  return rows
+                end
+              end,
+            })
+            "##,
+        )
+        .unwrap();
+        let handle = host.event_handle();
+        handle
+            .run_command_for_test(
+                "splash_gallery".into(),
+                "/splash".into(),
+                "fragile".into(),
+                0,
+            )
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let _ = pull_glyph(&handle, 1.0, 'F');
+        let _ = pull(&handle, 2.0);
+        let _ = pull(&handle, 3.0);
+        host.load_source("restart_rollback_barrier", "return nil")
+            .unwrap();
+    }
+
+    let host =
+        spawn_host_for_tests_with_state(&["splash", "splash_gallery"], state_dir.path().to_owned());
+    host.load_source(
+        "restart_assertion",
+        r##"
+        local path = maki.fs.joinpath(maki.env.state_dir(), "splash_gallery", "selection.json")
+        assert(maki.fs.read(path) == nil)
+        "##,
+    )
+    .expect("restart observes repaired default preference");
+}
+
+#[test]
+fn persisted_missing_or_invalid_selection_uses_default_and_repairs_state() {
+    for content in [r#"{"name":"missing"}"#, "not json"] {
+        let state_dir = tempfile::tempdir().unwrap();
+        let gallery_dir = state_dir.path().join("splash_gallery");
+        std::fs::create_dir(&gallery_dir).unwrap();
+        let selection_path = gallery_dir.join("selection.json");
+        std::fs::write(&selection_path, content).unwrap();
+
+        let host = spawn_host_for_tests_with_state(
+            &["splash", "splash_gallery"],
+            state_dir.path().to_owned(),
+        );
+        let handle = host.event_handle();
+        let frame = pull(&handle, 1.0);
+        let glyphs = frame
+            .rows
+            .iter()
+            .map(|segment| segment.glyphs.as_str())
+            .collect::<String>();
+        assert!(glyphs.contains("luna-maki"));
+        host.load_source("startup_repair_barrier", "return nil")
+            .unwrap();
+        assert!(
+            !selection_path.exists(),
+            "startup fallback must durably clear {content:?}"
+        );
+    }
+}
+
+#[test]
+fn active_contributor_reload_re_resolves_renderer() {
+    let (handle, guard) = spawn_host_for_tests(&["splash", "splash_gallery"]);
+    let source = |glyph| {
+        format!(
+            r##"
+            maki.api.register("splash.gallery", "third_party", {{
+              label = "Third party",
+              activate = function()
+                return function(w, h)
+                  local rows = {{}}
+                  for y = 1, h do rows[y] = {{ {{ glyphs = string.rep("{glyph}", w), style = "#ffffff" }} }} end
+                  return rows
+                end
+              end,
+            }})
+            "##
+        )
+    };
+    guard
+        .host()
+        .load_source("contributor", &source('A'))
+        .unwrap();
+    handle
+        .run_command_for_test(
+            "splash_gallery".into(),
+            "/splash".into(),
+            "third_party".into(),
+            0,
+        )
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    let _active = pull_glyph(&handle, 1.0, 'A');
+
+    guard
+        .host()
+        .load_source("contributor", &source('B'))
+        .unwrap();
+    let _reloaded = pull_glyph(&handle, 1.2, 'B');
+}
+
+#[test]
+fn default_is_owned_only_by_standalone_splash() {
+    let (handle, guard) = spawn_host_for_tests(&["splash", "splash_gallery"]);
+    guard
+        .host()
+        .load_source(
+            "default_ownership",
+            r##"
+            local ok = pcall(require, "splash.default")
+            assert(not ok, "gallery must not bundle a duplicate default module")
+            "##,
+        )
+        .unwrap();
+    assert!(pull(&handle, 1.0).rows.len() > 1);
 }

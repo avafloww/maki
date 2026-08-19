@@ -76,7 +76,7 @@ local rows = kaleidoscope.render(w, h, t, fade)
 | `splash.aurora` | northern-light bands drifting over a night gradient |
 | `splash.matrix` | green falling-code rain, resets on `SplashShown` |
 
-Each module returns `M` with `M.render(w, h, t, fade)` but does not activate itself. The gallery owns one stable `splash.render` layer and changes which module renderer that layer calls. A custom layer can also rotate through the modules:
+Each module returns `M` with `M.render(w, h, t, fade)` but does not activate itself. The default renderer remains owned by the standalone `splash` plugin. The gallery delegates `/splash default` to the previous `splash.render` slot instead of bundling a copy. The gallery owns one stable `splash.render` layer and changes which module renderer that layer calls. A custom layer can also rotate through the modules:
 
 ```lua
 local skins = {
@@ -89,7 +89,23 @@ maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
 end)
 ```
 
-Bundled modules resolve before files in your config's `lua/` dir, so keep personal skins on plain names (`require("myskin")`) outside the `splash.*` namespace. The gallery sources live in `plugins/splash_gallery/` in the repo and follow the same single-file pattern as the custom skins below, so they double as worked examples.
+Bundled modules resolve before files in the config `lua/` dir, so personal skins must use plain names such as `require("myskin")` outside the `splash.*` namespace. The gallery sources live in `plugins/splash_gallery/` in the repository and follow the same single-file pattern as the custom skins below.
+
+Third-party plugins can add gallery entries with `maki.api.register`. The `activate` callback returns a renderer. Contributions are removed automatically when their plugin unloads. The gallery re-resolves active and previewed contributions after unload or reload, so it does not retain a function from the old plugin instance.
+
+```lua
+local myskin = require("myskin")
+
+maki.api.register("splash.gallery", "myskin", {
+  label = "My skin",
+  description = "A short description",
+  activate = function()
+    return myskin.render
+  end,
+})
+```
+
+The gallery validates a selection before it persists the selection. If an active renderer fails later, the gallery switches to the previous renderer and repairs the persisted selection asynchronously. Invalid or unavailable persisted entries fall back to the standalone default.
 
 ## Lifecycle events
 
@@ -184,15 +200,6 @@ maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
   return matrix_frame(w, h, t, fade)
 end)
 ```
-
-## More splash screens
-
-`examples/splash/` ships six self-contained whole-screen overrides you can
-drop into `~/.config/maki/lua/` and `require` to explore different home
-screens: a spinning pentagram, rising flowers, an ASCII printer, a perspective
-tunnel, shooting comets, and a wave banner. They work exactly like the example
-above. See [`examples/splash/README.md`](../../../../examples/splash/README.md)
-for how to copy and switch between them.
 
 Two notes on writing overrides:
 
