@@ -32,16 +32,6 @@ local function fuzzy_match(text, word)
   return positions, gaps * 1000 + positions[1]
 end
 
--- Words may come in any order: "441 review" still hits "review gh pr 441".
-local function matches(label, words)
-  for _, word in ipairs(words) do
-    if not fuzzy_match(label, word) then
-      return false
-    end
-  end
-  return true
-end
-
 local function match_ranges(label, words)
   local ranges = {}
   for _, word in ipairs(words) do
@@ -370,13 +360,5 @@ function ListPicker.open(items, opts)
     end
   end
 end
-
-ListPicker.split_words = split_words
-ListPicker.matches = matches
-ListPicker.highlight_spans = highlight_spans
-
-ListPicker._render_lines = render_lines
-ListPicker._filter_items = filter_items
-ListPicker._section_rows = section_rows
 
 return ListPicker

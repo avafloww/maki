@@ -5431,9 +5431,6 @@ function M.replace(content, old_string, new_string, replace_all)
 -- the initial item), on_timeout(), and timeout_ms.
 -- Returns { type = "choice"|"delete", index } or { type = "close" }.
 function ListPicker.open(items, opts)
-ListPicker.split_words = split_words
-ListPicker.matches = matches
-ListPicker.highlight_spans = highlight_spans
 ```
 
 ### `require("maki.output_limits")`
@@ -5539,6 +5536,21 @@ local function shorten_path(path)
 end
 
 return shorten_path
+```
+
+### `require("maki.spans")`
+
+```lua
+-- Spans: styled slices of a label for fuzzy-match highlighting.
+--
+-- `match_spans` takes 1-based CODEPOINT indices (as returned by
+-- `maki.match.fuzzy`) and slices the label by bytes, so multi-byte titles
+-- (CJK, emoji) get whole-codepoint spans. Adjacent indices merge into one
+-- span.
+
+-- indices: 1-based codepoint offsets, ascending. No indices yields a single
+-- {text, base_style} span.
+function Spans.match_spans(text, indices, base_style, match_style)
 ```
 
 ### `require("maki.test_helpers")`
