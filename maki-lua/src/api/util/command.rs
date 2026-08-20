@@ -472,6 +472,15 @@ pub enum UiAction {
         event_tx: flume::Sender<WinEvent>,
         cmd_rx: flume::Receiver<WinCommand>,
     },
+    /// A plugin's list-picker dialog. `id` keys the callback store in Lua
+    /// app-data: mlua `Function`s cannot cross this channel, so the host
+    /// reports dialog events by id instead.
+    OpenListPicker {
+        id: u64,
+        items: Vec<crate::api::util::picker::PickerItemSpec>,
+        config: crate::api::util::picker::PickerConfig,
+        reply_tx: flume::Sender<crate::api::util::picker::PickerResult>,
+    },
     Flash(String),
     OpenEditor {
         path: PathBuf,

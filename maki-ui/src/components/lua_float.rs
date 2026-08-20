@@ -523,7 +523,7 @@ impl FloatManager {
     }
 }
 
-fn hint_footer<K: AsRef<str>, V: AsRef<str>>(pairs: &[(K, V)]) -> Line<'static> {
+pub(crate) fn hint_footer<K: AsRef<str>, V: AsRef<str>>(pairs: &[(K, V)]) -> Line<'static> {
     let t = crate::theme::current();
     let mut spans = Vec::with_capacity(pairs.len() * 3);
     for (key, desc) in pairs {

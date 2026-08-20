@@ -4741,6 +4741,43 @@ end
 
 ---
 
+### `maki.ui.open_list_picker()` {#maki-ui-open_list_picker}
+
+```lua
+maki.ui.open_list_picker({items}, {opts?})
+```
+
+Opens a fuzzy-filtering list picker dialog and blocks until the user
+decides. Items are ranked by match score with matched characters
+highlighted, exactly like the built-in pickers. Filter edits keep the
+current row instead of jumping to the best match.
+
+**Parameters:**
+
+- `{items}` (`table`) List of items: plain strings, or `{ label, detail?, section?, section_detail? }` tables.
+- `{opts?}` (`table?`) Options:
+  - `title` (`string`) dialog title.
+  - `footer` (`table`) key-hint pairs for the footer border. Each entry is `{key, label}`.
+  - `cursor` (`integer`) initial 1-based item index. Default 1.
+  - `submit_keys` (`table`) extra key names that confirm the selection, in the "ctrl+o" notation; enter always confirms.
+  - `notify_initial` (`boolean`) fire `on_change` for the initial item. Default false.
+  - `timeout_ms` (`integer`) idle window; when it elapses `on_timeout` fires, and keeps firing while the dialog stays idle. Zero or omitted disables the window.
+  - `on_change` (`function`) `on_change(item, index)` with the original item and its 1-based index, fired when the selection moves.
+  - `on_timeout` (`function`) `on_timeout()` when the idle window elapses.
+
+**Returns:** (`table`) `{ type = "choice", index = n }` with the 1-based index of the chosen item, `{ type = "delete", index = n }` when the user presses Ctrl+D twice on an item (the first press flashes "Press Ctrl+D again to delete"), or `{ type = "close" }` when dismissed with Esc or Ctrl+C, or when no UI is attached.
+
+**Example:**
+
+```lua
+local result = maki.ui.open_list_picker({ "alpha", "beta" }, { title = "Pick" })
+if result.type == "choice" then
+  maki.ui.flash("Picked " .. result.index)
+end
+```
+
+---
+
 ### `maki.ui.open_win()` {#maki-ui-open_win}
 
 ```lua

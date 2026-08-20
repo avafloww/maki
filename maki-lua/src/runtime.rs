@@ -49,6 +49,7 @@ use crate::api::util::command::{CommandHandlerMap, HintWriter, publish_command_s
 use crate::api::util::command::{LuaCommandReader, LuaCommandWriter, UiAction};
 use crate::api::util::convert::json_to_lua;
 use crate::api::util::ctx::LuaCtx;
+use crate::api::util::picker::{PickerCallbacks, PickerEvent};
 use crate::api::util::setup::ConfigStore;
 use crate::docs_render;
 use crate::error::PluginError;
@@ -209,6 +210,12 @@ pub enum Request {
     },
     RunKeybindCallback {
         id: u64,
+    },
+    /// Host list-picker dialog event, reported by id because the mlua
+    /// callbacks stay in Lua app-data and never cross the UI channel.
+    PickerEvent {
+        id: u64,
+        ev: PickerEvent,
     },
     Describe {
         plugin: Arc<str>,
@@ -1518,6 +1525,7 @@ impl LuaRuntime {
             lua.set_app_data(crate::api::env::StateDirOverride(state_dir));
         }
         lua.set_app_data(crate::api::fs::FsBackendHandle(fs));
+        lua.set_app_data(PickerCallbacks::new());
         completion::install(&lua);
 
         let plugins: PluginMap = Rc::new(RefCell::new(HashMap::new()));
@@ -3109,6 +3117,36 @@ pub fn spawn(
                                     }
                                 }).detach();
                             }
+                        }
+                        Request::PickerEvent { id, ev } => {
+                            let Some(store) = rt.lua.app_data_ref::<PickerCallbacks>() else {
+                                continue;
+                            };
+                            let Some((func, payload)) = (match ev {
+                                PickerEvent::Done => {
+                                    store.remove(id);
+                                    None
+                                }
+                                PickerEvent::Change { index } => store
+                                    .change_payload(id, index)
+                                    .map(|(func, item, index)| (func, Some((item, index)))),
+                                PickerEvent::Timeout => store
+                                    .timeout_callback(id)
+                                    .map(|func| (func, None)),
+                            }) else {
+                                continue;
+                            };
+                            let lua = rt.lua.clone();
+                            ex.spawn(async move {
+                                let call = match payload {
+                                    Some((item, index)) => func.call_async::<()>((item, index)),
+                                    None => func.call_async::<()>(()),
+                                };
+                                if let Err(e) = run_detached(&lua, call).await {
+                                    tracing::warn!(picker_id = id, error = %e, "picker callback failed");
+                                }
+                            })
+                            .detach();
                         }
                         Request::CollectCompletionItems { ctx, reply } => {
                             let items =

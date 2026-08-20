@@ -65,7 +65,7 @@ impl ThemePicker {
                 self.original_theme_name = None;
                 ThemePickerAction::Closed
             }
-            PickerAction::Toggle(..) => ThemePickerAction::Consumed,
+            PickerAction::Toggle(..) | PickerAction::Delete(..) => ThemePickerAction::Consumed,
         }
     }
 

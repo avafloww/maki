@@ -653,6 +653,16 @@ impl<'t> EventLoop<'t> {
                 let code = self.open_editor(self.focused, &path);
                 let _ = reply_tx.send(code);
             }
+            UiAction::OpenListPicker {
+                id,
+                items,
+                config,
+                reply_tx,
+            } => {
+                self.focused_app()
+                    .lua_picker
+                    .open(id, items, config, reply_tx);
+            }
             UiAction::OpenWin {
                 buf,
                 config,

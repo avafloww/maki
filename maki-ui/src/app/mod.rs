@@ -38,6 +38,7 @@ use crate::components::keybindings::key;
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
 use crate::components::login_picker::{LoginPicker, LoginPickerAction};
 use crate::components::lua_float::FloatManager;
+use crate::components::lua_picker::{LuaPicker, LuaPickerAction};
 use crate::components::mcp_picker::{McpPicker, McpPickerAction};
 use crate::components::model_picker::{ModelPicker, ModelPickerAction};
 use crate::components::permission_prompt::PermissionPrompt;
@@ -199,6 +200,7 @@ pub struct App {
     pub(super) command_palette: CommandPalette,
     pub(super) task_picker: ListPicker<TaskEntry>,
     pub(super) task_picker_original: Option<usize>,
+    pub(super) lua_picker: LuaPicker,
     pub(super) theme_picker: ThemePicker,
     pub(super) model_picker: ModelPicker,
     pub(super) login_picker: LoginPicker,
@@ -298,6 +300,7 @@ impl App {
             ),
             task_picker: ListPicker::new(),
             task_picker_original: None,
+            lua_picker: LuaPicker::new(lua_event_handle.clone()),
             theme_picker: ThemePicker::new(),
             model_picker: ModelPicker::new(Arc::clone(&available_models)),
             login_picker: LoginPicker::new(),
@@ -658,6 +661,19 @@ impl App {
             return Some(vec![]);
         }
 
+        if self.lua_picker.is_open() {
+            return Some(match self.lua_picker.handle_key(key) {
+                LuaPickerAction::Confirming(msg) => {
+                    self.flash(msg);
+                    vec![]
+                }
+                LuaPickerAction::Consumed
+                | LuaPickerAction::Choice(..)
+                | LuaPickerAction::Delete(..)
+                | LuaPickerAction::Close => vec![],
+            });
+        }
+
         if self.float_mgr.handle_key(key) {
             return Some(vec![]);
         }
@@ -740,7 +756,9 @@ impl App {
                 return Some(vec![]);
             }
             return Some(match self.task_picker.handle_key(key) {
-                PickerAction::Consumed | PickerAction::Toggle(..) => vec![],
+                PickerAction::Consumed | PickerAction::Toggle(..) | PickerAction::Delete(..) => {
+                    vec![]
+                }
                 PickerAction::Select(entry) => {
                     self.task_picker_original = None;
                     self.active_chat = entry.chat_index;
@@ -1852,7 +1870,7 @@ impl App {
         vec![]
     }
 
-    fn overlays(&self) -> [&dyn Overlay; 13] {
+    fn overlays(&self) -> [&dyn Overlay; 14] {
         [
             &self.help_modal,
             &self.usage_modal,
@@ -1861,6 +1879,7 @@ impl App {
             &self.search_modal,
             &self.file_picker,
             &self.task_picker,
+            &self.lua_picker,
             &self.rewind_picker,
             &self.theme_picker,
             &self.model_picker,
@@ -1870,7 +1889,7 @@ impl App {
         ]
     }
 
-    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 13] {
+    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 14] {
         [
             &mut self.help_modal,
             &mut self.usage_modal,
@@ -1879,6 +1898,7 @@ impl App {
             &mut self.search_modal,
             &mut self.file_picker,
             &mut self.task_picker,
+            &mut self.lua_picker,
             &mut self.rewind_picker,
             &mut self.theme_picker,
             &mut self.model_picker,
@@ -1924,6 +1944,7 @@ impl App {
     pub fn tick(&mut self) -> Dirty {
         // `|` never short-circuits: every poller must run on every tick.
         let mut dirty = self.float_mgr.tick()
+            | self.lua_picker.tick()
             | self.tick_edge_scroll()
             | self.tick_error_expiry()
             | self.poll_image_paste()
@@ -2030,6 +2051,9 @@ impl App {
             return;
         }
         if self.permission_prompt.handle_paste(text) {
+            return;
+        }
+        if self.lua_picker.handle_paste(text) {
             return;
         }
         if self.float_mgr.handle_paste(text) {

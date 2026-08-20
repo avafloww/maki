@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use maki_lua_macro::{lua_fn, lua_table};
 use mlua::{Lua, RegistryKey, Result as LuaResult, Table};
 
@@ -244,6 +244,37 @@ fn parse_key_name(name: &str) -> Result<KeyCode, String> {
     }
 }
 
+/// Parses a key name in the `key_event_to_string` notation the UI uses to
+/// display keys ("ctrl+o", "alt+enter", "shift+tab", "esc", "pageup", a
+/// single char) into the event a key handler should match. Each modifier
+/// segment may appear at most once.
+pub(crate) fn parse_event_key(input: &str) -> Result<KeyEvent, String> {
+    let s = input.trim().to_lowercase();
+    if s.is_empty() {
+        return Err(format!("invalid key name: {input}"));
+    }
+    let mut modifiers = KeyModifiers::NONE;
+    let mut rest = s.as_str();
+    loop {
+        let (r, bit) = if let Some(r) = rest.strip_prefix("ctrl+") {
+            (r, KeyModifiers::CONTROL)
+        } else if let Some(r) = rest.strip_prefix("alt+") {
+            (r, KeyModifiers::ALT)
+        } else if let Some(r) = rest.strip_prefix("shift+") {
+            (r, KeyModifiers::SHIFT)
+        } else {
+            break;
+        };
+        if modifiers.contains(bit) {
+            return Err(format!("invalid key name: {input}"));
+        }
+        modifiers |= bit;
+        rest = r;
+    }
+    let code = parse_key_name(rest).map_err(|e| format!("{e} (key: {input})"))?;
+    Ok(KeyEvent::new(code, modifiers))
+}
+
 fn publish_keymap_snapshot(lua: &Lua) {
     if let Some(store) = lua.app_data_ref::<KeymapStore>() {
         let entries = store.snapshot_entries();
@@ -385,6 +416,30 @@ mod tests {
         assert!(parse_key_notation("<F0>").is_err());
         assert!(parse_key_notation("<F13>").is_err());
         assert!(parse_key_notation("abc").is_err());
+    }
+
+    #[test_case("ctrl+o", KeyCode::Char('o'), KeyModifiers::CONTROL ; "ctrl_o")]
+    #[test_case("ctrl+O", KeyCode::Char('o'), KeyModifiers::CONTROL ; "case_insensitive")]
+    #[test_case("alt+enter", KeyCode::Enter, KeyModifiers::ALT ; "alt_enter")]
+    #[test_case("shift+tab", KeyCode::Tab, KeyModifiers::SHIFT ; "shift_tab")]
+    #[test_case("esc", KeyCode::Esc, KeyModifiers::NONE ; "esc")]
+    #[test_case("pageup", KeyCode::PageUp, KeyModifiers::NONE ; "pageup")]
+    #[test_case("a", KeyCode::Char('a'), KeyModifiers::NONE ; "plain_a")]
+    #[test_case("space", KeyCode::Char(' '), KeyModifiers::NONE ; "space")]
+    #[test_case("f11", KeyCode::F(11), KeyModifiers::NONE ; "f11")]
+    fn parse_event_key_cases(input: &str, code: KeyCode, mods: KeyModifiers) {
+        let key = parse_event_key(input).unwrap();
+        assert_eq!(key.code, code);
+        assert_eq!(key.modifiers, mods);
+    }
+
+    #[test_case("" ; "empty")]
+    #[test_case("  " ; "blank")]
+    #[test_case("ctrl+" ; "dangling_modifier")]
+    #[test_case("bogus" ; "unknown_key")]
+    #[test_case("ctrl+ctrl+o" ; "repeated_modifier")]
+    fn parse_event_key_errors(input: &str) {
+        assert!(parse_event_key(input).is_err(), "{input:?} must not parse");
     }
 
     #[test]

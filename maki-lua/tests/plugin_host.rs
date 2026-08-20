@@ -4198,6 +4198,176 @@ fn job_callbacks_fire_while_command_handler_parked() {
     assert!(matches!(action, maki_lua::UiAction::Flash(msg) if msg == "job:hi"));
 }
 
+/// `maki.ui.open_list_picker` blocks the command handler until the host
+/// dialog replies; `on_change`/`on_timeout` fire from picker events sent by
+/// id, and the reply carries the 1-based original index.
+#[test]
+fn host_list_picker_roundtrip() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use maki_lua::{PickerEvent, PickerResult, UiAction};
+
+    const PICKER_TIMEOUT_MS: i64 = 5000;
+    let host = PluginHost::new(fresh_registry()).unwrap();
+    host.load_source(
+        "p",
+        r#"
+        maki.api.register_command({
+            name = "/pick",
+            description = "host list picker roundtrip",
+            handler = function()
+                local result = maki.ui.open_list_picker(
+                    { "alpha", { label = "beta", detail = "b-d", section = "s" } },
+                    {
+                        title = "Pick",
+                        cursor = 2,
+                        submit_keys = { "ctrl+o" },
+                        timeout_ms = 5000,
+                        footer = { { "Enter", "open" }, { "Ctrl+O", "edit" } },
+                        on_change = function(item, index)
+                            maki.ui.flash("change:" .. tostring(item.label or item) .. ":" .. index)
+                        end,
+                        on_timeout = function() maki.ui.flash("timeout") end,
+                    }
+                )
+                maki.ui.flash("result:" .. result.type .. ":" .. tostring(result.index))
+            end,
+        })
+        "#,
+    )
+    .unwrap();
+    let rx = host.ui_action_rx();
+    let handle = host.event_handle();
+    let completion =
+        handle.run_command_for_test(Arc::from("p"), Arc::from("/pick"), String::new(), 0);
+
+    let UiAction::OpenListPicker {
+        id,
+        items,
+        config,
+        reply_tx,
+    } = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("OpenListPicker action never arrived")
+    else {
+        panic!("expected an OpenListPicker action");
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].label, "alpha");
+    assert_eq!(items[1].label, "beta");
+    assert_eq!(items[1].detail.as_deref(), Some("b-d"));
+    assert_eq!(items[1].section.as_deref(), Some("s"));
+    assert_eq!(config.title.as_deref(), Some("Pick"));
+    assert_eq!(
+        config.cursor,
+        Some(1),
+        "1-based Lua cursor decodes to 0-based"
+    );
+    assert_eq!(
+        config.submit_keys,
+        vec![KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)]
+    );
+    assert_eq!(
+        config.timeout,
+        Some(Duration::from_millis(PICKER_TIMEOUT_MS as u64))
+    );
+    assert_eq!(
+        config.footer,
+        Some(vec![
+            ("Enter".to_string(), "open".to_string()),
+            ("Ctrl+O".to_string(), "edit".to_string())
+        ])
+    );
+
+    handle.picker_event(id, PickerEvent::Change { index: 0 });
+    let UiAction::Flash(msg) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("expected a Flash action from on_change");
+    };
+    assert_eq!(
+        msg, "change:alpha:1",
+        "on_change must get the original item and 1-based index"
+    );
+
+    handle.picker_event(id, PickerEvent::Timeout);
+    let UiAction::Flash(msg) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("expected a Flash action from on_timeout");
+    };
+    assert_eq!(msg, "timeout");
+
+    reply_tx
+        .send(PickerResult::Choice(1))
+        .expect("reply channel closed while the handler was still parked");
+    completion
+        .recv_timeout(Duration::from_secs(5))
+        .expect("picker reply must complete the command");
+    let UiAction::Flash(msg) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("expected a Flash action for the picker result");
+    };
+    assert_eq!(
+        msg, "result:choice:2",
+        "choice must map to the 1-based original index"
+    );
+
+    handle.picker_event(id, PickerEvent::Done);
+}
+
+/// A dead UI process (reply sender dropped, `Done` never sent) unblocks the
+/// parked call with `close` and drains the callback entry: a late
+/// `Change` must not fire `on_change`.
+#[test]
+fn host_list_picker_ui_drop_drains_callbacks() {
+    use maki_lua::{PickerEvent, UiAction};
+
+    const QUIET: Duration = Duration::from_millis(200);
+    let host = PluginHost::new(fresh_registry()).unwrap();
+    host.load_source(
+        "p",
+        r#"
+        maki.api.register_command({
+            name = "/pick",
+            description = "host list picker drop path",
+            handler = function()
+                local result = maki.ui.open_list_picker({ "alpha" }, {
+                    on_change = function(item, index)
+                        maki.ui.flash("change:" .. index)
+                    end,
+                })
+                maki.ui.flash("result:" .. result.type)
+            end,
+        })
+        "#,
+    )
+    .unwrap();
+    let rx = host.ui_action_rx();
+    let handle = host.event_handle();
+    let completion =
+        handle.run_command_for_test(Arc::from("p"), Arc::from("/pick"), String::new(), 0);
+
+    let UiAction::OpenListPicker { id, reply_tx, .. } = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("OpenListPicker action never arrived")
+    else {
+        panic!("expected an OpenListPicker action");
+    };
+
+    drop(reply_tx);
+    completion
+        .recv_timeout(Duration::from_secs(5))
+        .expect("dropped reply must unblock the handler");
+    let UiAction::Flash(msg) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("expected a Flash action for the picker result");
+    };
+    assert_eq!(
+        msg, "result:close",
+        "a dropped UI must report a clean dismiss"
+    );
+
+    handle.picker_event(id, PickerEvent::Change { index: 0 });
+    assert!(
+        rx.recv_timeout(QUIET).is_err(),
+        "drained entry must not fire on_change"
+    );
+}
+
 /// read tool requires offset and limit; missing fields should fail schema validation.
 mod read_tool_required_params {
     use super::*;

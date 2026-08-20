@@ -255,6 +255,10 @@ impl App {
             overlay_rect = self.task_picker.view(frame, full);
         }
 
+        if self.lua_picker.is_open() {
+            overlay_rect = self.lua_picker.view(frame, full);
+        }
+
         if self.file_picker.is_open() {
             overlay_rect = self.file_picker.view(frame, full);
         }

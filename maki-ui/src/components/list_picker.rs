@@ -39,6 +39,9 @@ pub trait PickerItem {
     fn section(&self) -> Option<&str> {
         None
     }
+    fn section_detail(&self) -> Option<&str> {
+        None
+    }
     fn is_spinning(&self) -> bool {
         false
     }
@@ -57,15 +60,24 @@ pub enum PickerAction<T> {
     Consumed,
     Select(T),
     Toggle(usize, bool),
+    Delete(usize),
     Close,
+}
+
+enum Footer {
+    Builder(fn() -> Line<'static>),
+    Static(Line<'static>),
 }
 
 pub struct ListPicker<T> {
     state: Option<State<T>>,
     title: String,
     max_visible: Option<u16>,
-    footer: Option<fn() -> Line<'static>>,
+    footer: Option<Footer>,
     error_text: Option<String>,
+    submit_keys: Vec<KeyEvent>,
+    delete_key: Option<KeyEvent>,
+    confirming_delete: Option<usize>,
 }
 
 struct State<T> {
@@ -314,6 +326,9 @@ impl<T: PickerItem> ListPicker<T> {
             max_visible: None,
             footer: None,
             error_text: None,
+            submit_keys: Vec::new(),
+            delete_key: None,
+            confirming_delete: None,
         }
     }
 
@@ -323,8 +338,32 @@ impl<T: PickerItem> ListPicker<T> {
     }
 
     pub fn with_footer_builder(mut self, builder: fn() -> Line<'static>) -> Self {
-        self.footer = Some(builder);
+        self.footer = Some(Footer::Builder(builder));
         self
+    }
+
+    pub fn with_footer_line(mut self, line: Line<'static>) -> Self {
+        self.footer = Some(Footer::Static(line));
+        self
+    }
+
+    pub fn with_submit_keys(mut self, keys: Vec<KeyEvent>) -> Self {
+        self.submit_keys = keys;
+        self
+    }
+
+    pub fn with_delete_key(mut self, key: KeyEvent) -> Self {
+        self.delete_key = Some(key);
+        self
+    }
+
+    /// True while a delete key press awaits its confirming second press.
+    pub fn delete_confirming(&self) -> bool {
+        self.confirming_delete.is_some()
+    }
+
+    pub fn delete_key(&self) -> Option<&KeyEvent> {
+        self.delete_key.as_ref()
     }
 
     pub fn open_toggleable(&mut self, items: Vec<T>, enabled: Vec<bool>, title: impl Into<String>) {
@@ -424,6 +463,22 @@ impl<T: PickerItem> ListPicker<T> {
             self.state = None;
             return PickerAction::Close;
         }
+        if self
+            .delete_key
+            .as_ref()
+            .is_some_and(|k| key_matches(key, k))
+        {
+            if let Some(sel) = s.selected_item_index() {
+                if self.confirming_delete == Some(sel) {
+                    self.confirming_delete = None;
+                    return PickerAction::Delete(sel);
+                }
+                self.confirming_delete = Some(sel);
+            }
+            return PickerAction::Consumed;
+        }
+        // Any other key clears a pending delete confirm.
+        self.confirming_delete = None;
         if key::DELETE_WORD.matches(key) {
             s.search.remove_word_before_cursor();
             s.update_search_and_clamp();
@@ -436,6 +491,16 @@ impl<T: PickerItem> ListPicker<T> {
         if key::SCROLL_HALF_DOWN.matches(key) {
             s.page_down();
             return PickerAction::Consumed;
+        }
+        if self.submit_keys.iter().any(|k| key_matches(key, k)) {
+            let idx = s.selected_item_index();
+            return match idx {
+                Some(idx) => {
+                    let mut state = self.state.take().unwrap();
+                    PickerAction::Select(state.items.swap_remove(idx))
+                }
+                None => PickerAction::Consumed,
+            };
         }
         if is_ctrl(&key) {
             return PickerAction::Consumed;
@@ -525,6 +590,9 @@ impl<T: PickerItem> ListPicker<T> {
         let Some(s) = self.state.as_mut() else {
             return false;
         };
+        // Paste is user input like any other key: a pending delete confirm
+        // must not survive it.
+        self.confirming_delete = None;
         s.search.insert_text(text);
         s.update_search_and_clamp();
         true
@@ -548,7 +616,10 @@ impl<T: PickerItem> ListPicker<T> {
     }
 
     pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
-        let footer = self.footer;
+        let footer = self.footer.as_ref().map(|f| match f {
+            Footer::Builder(build) => build(),
+            Footer::Static(line) => line.clone(),
+        });
         match self.state.as_mut() {
             None => Rect::default(),
             Some(s) => render_ready(
@@ -578,13 +649,17 @@ impl<T: PickerItem> Overlay for ListPicker<T> {
     }
 }
 
+fn key_matches(key: KeyEvent, other: &KeyEvent) -> bool {
+    key.code == other.code && key.modifiers == other.modifiers
+}
+
 fn render_ready<T: PickerItem>(
     frame: &mut Frame,
     area: Rect,
     s: &mut State<T>,
     title: &str,
     max_visible: Option<u16>,
-    footer: Option<fn() -> Line<'static>>,
+    footer: Option<Line<'static>>,
     error_text: Option<&str>,
 ) -> Rect {
     let footer_rows = if footer.is_some() { 1u16 } else { 0 };
@@ -656,8 +731,8 @@ fn render_ready<T: PickerItem>(
     );
     render_search(frame, search_area, &s.search);
 
-    if let Some(build) = footer {
-        frame.render_widget(Paragraph::new(build()), areas[area_idx]);
+    if let Some(line) = footer {
+        frame.render_widget(Paragraph::new(line), areas[area_idx]);
     }
 
     let total_visual = visual_rows_in_range(&s.filtered, &s.items, 0, s.filtered.len());
@@ -822,10 +897,17 @@ fn render_list<T: PickerItem>(
                 lines.push(Line::raw(""));
             }
             if lines.len() < viewport_height {
-                lines.push(Line::from(Span::styled(
+                let mut header = vec![Span::styled(
                     format!("  {sec}"),
                     theme::current().keybind_section,
-                )));
+                )];
+                if let Some(detail) = item.section_detail() {
+                    header.push(Span::styled(
+                        format!(" {detail}"),
+                        theme::current().item_desc,
+                    ));
+                }
+                lines.push(Line::from(header));
             }
             last_section = Some(sec);
         }
@@ -945,7 +1027,7 @@ mod tests {
     use super::*;
     use crate::components::key;
     use crate::components::keybindings::key as kb;
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use test_case::test_case;
@@ -1528,5 +1610,218 @@ mod tests {
         let sfx = "Anthropic".width();
         assert_eq!(end_col(&long, sfx), end_col("  hi", sfx));
         assert!(end_col(&long, sfx) <= width as usize);
+    }
+
+    fn ctrl_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    fn buffer_lines(terminal: &Terminal<TestBackend>, area: Rect) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| {
+                        buffer
+                            .cell(Position::new(x, y))
+                            .map(|c| c.symbol())
+                            .unwrap_or(" ")
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn custom_submit_keys_select_like_enter() {
+        let mut p = ListPicker::new().with_submit_keys(vec![ctrl_key(KeyCode::Char('s'))]);
+        p.open(entries(&["A", "B", "C"]), " Test ");
+        p.handle_key(key(KeyCode::Down));
+
+        let action = p.handle_key(ctrl_key(KeyCode::Char('s')));
+        assert!(matches!(action, PickerAction::Select(ref e) if e.label == "B"));
+        assert!(!p.is_open());
+    }
+
+    #[test]
+    fn submit_key_on_empty_results_consumed() {
+        let mut p = ListPicker::new().with_submit_keys(vec![ctrl_key(KeyCode::Char('s'))]);
+        p.open(entries(&["A"]), " Test ");
+        p.handle_key(key(KeyCode::Char('z')));
+
+        let action = p.handle_key(ctrl_key(KeyCode::Char('s')));
+        assert!(matches!(action, PickerAction::Consumed));
+        assert!(p.is_open());
+    }
+
+    fn with_delete_key() -> ListPicker<Entry> {
+        ListPicker::new().with_delete_key(ctrl_key(KeyCode::Char('d')))
+    }
+
+    #[test]
+    fn delete_key_arms_then_deletes_selected() {
+        let mut p = with_delete_key();
+        p.open(entries(&["A", "B", "C"]), " Test ");
+        p.handle_key(key(KeyCode::Down));
+
+        assert!(matches!(
+            p.handle_key(ctrl_key(KeyCode::Char('d'))),
+            PickerAction::Consumed
+        ));
+        assert!(p.delete_confirming());
+
+        assert!(matches!(
+            p.handle_key(ctrl_key(KeyCode::Char('d'))),
+            PickerAction::Delete(1)
+        ));
+        assert!(!p.delete_confirming());
+        assert!(p.is_open(), "the host decides what a delete closes");
+    }
+
+    #[test]
+    fn other_key_clears_pending_delete() {
+        let mut p = with_delete_key();
+        p.open(entries(&["A", "B"]), " Test ");
+
+        p.handle_key(ctrl_key(KeyCode::Char('d')));
+        assert!(p.delete_confirming());
+
+        p.handle_key(key(KeyCode::Down));
+        assert!(!p.delete_confirming());
+
+        // A fresh arm needs two presses and now targets the new selection.
+        p.handle_key(ctrl_key(KeyCode::Char('d')));
+        assert!(p.delete_confirming());
+        assert!(matches!(
+            p.handle_key(ctrl_key(KeyCode::Char('d'))),
+            PickerAction::Delete(1)
+        ));
+    }
+
+    #[test]
+    fn delete_key_without_selection_is_consumed() {
+        let mut p = with_delete_key();
+        p.open(entries(&["A"]), " Test ");
+        p.handle_key(key(KeyCode::Char('z')));
+
+        assert!(matches!(
+            p.handle_key(ctrl_key(KeyCode::Char('d'))),
+            PickerAction::Consumed
+        ));
+        assert!(!p.delete_confirming());
+    }
+
+    #[test]
+    fn delete_key_precedes_ctrl_d_page_down() {
+        let items: Vec<Entry> = (0..50).map(|i| Entry::new(&format!("Item {i}"))).collect();
+        let mut p = with_delete_key();
+        p.open(items, " Test ");
+
+        assert!(matches!(
+            p.handle_key(ctrl_key(KeyCode::Char('d'))),
+            PickerAction::Consumed
+        ));
+        assert!(p.delete_confirming());
+        assert_eq!(
+            ready_state(&p).selected,
+            0,
+            "no page-down while delete is armed"
+        );
+    }
+
+    #[test]
+    fn paste_clears_pending_delete() {
+        let mut p = with_delete_key();
+        p.open(entries(&["A", "B"]), " Test ");
+
+        p.handle_key(ctrl_key(KeyCode::Char('d')));
+        assert!(p.delete_confirming());
+
+        p.handle_paste("A");
+        assert!(!p.delete_confirming());
+    }
+
+    #[test]
+    fn enter_under_active_filter_selects_original_index() {
+        let mut p = ListPicker::new();
+        p.open(entries(&["Alpha", "Beta", "Alpine"]), " Test ");
+        p.handle_key(key(KeyCode::Char('a')));
+        p.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(ready_state(&p).filtered, vec![0, 2]);
+
+        p.handle_key(key(KeyCode::Down));
+        let action = p.handle_key(key(KeyCode::Enter));
+        // "Alpine" is filtered row 1 but original index 2.
+        assert!(matches!(action, PickerAction::Select(ref e) if e.label == "Alpine"));
+        assert!(!p.is_open());
+    }
+
+    #[test]
+    fn static_footer_line_renders_below_list_and_search() {
+        let mut p = ListPicker::new().with_footer_line(Line::from("ctrl+d delete"));
+        p.open(entries(&["alpha", "beta"]), " Test ");
+
+        let area = Rect::new(0, 0, 80, 40);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                p.view(frame, area);
+            })
+            .unwrap();
+        let lines = buffer_lines(&terminal, area);
+
+        let item_y = lines
+            .iter()
+            .position(|l| l.contains("alpha"))
+            .expect("items must be drawn");
+        let footer_y = lines
+            .iter()
+            .position(|l| l.contains("ctrl+d delete"))
+            .expect("footer must be drawn");
+        assert!(
+            footer_y > item_y + 1,
+            "footer sits below the list and search rows"
+        );
+    }
+
+    struct DetailSectionEntry {
+        label: String,
+        section: &'static str,
+        detail: &'static str,
+    }
+
+    impl PickerItem for DetailSectionEntry {
+        fn label(&self) -> &str {
+            &self.label
+        }
+        fn section(&self) -> Option<&str> {
+            Some(self.section)
+        }
+        fn section_detail(&self) -> Option<&str> {
+            Some(self.detail)
+        }
+    }
+
+    #[test]
+    fn section_detail_renders_next_to_header() {
+        let mut p = ListPicker::new();
+        p.open(
+            vec![DetailSectionEntry {
+                label: "first".into(),
+                section: "Anthropic",
+                detail: "2 models",
+            }],
+            " Test ",
+        );
+
+        let area = Rect::new(0, 0, 80, 40);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                p.view(frame, area);
+            })
+            .unwrap();
+        let lines = buffer_lines(&terminal, area);
+        assert!(lines.iter().any(|l| l.contains("Anthropic 2 models")));
     }
 }

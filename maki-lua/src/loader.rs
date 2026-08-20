@@ -15,6 +15,7 @@ use crate::api::fs::{FsBackend, RealFs};
 use crate::api::keymap::KeymapReader;
 use crate::api::options::{PluginOptionSpecs, PluginOpts};
 use crate::api::util::command::{HintReader, LuaCommandReader, UiAction};
+use crate::api::util::picker::PickerEvent;
 use crate::coalesced_latest::CoalescedLatest;
 use crate::error::PluginError;
 use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
@@ -945,6 +946,13 @@ impl EventHandle {
         self.prio_tx
             .try_send(Request::RunKeybindCallback { id })
             .is_ok()
+    }
+
+    /// Reports a host list-picker dialog event (selection change, idle
+    /// timeout, done) to the Lua thread so the callbacks stored with the
+    /// dialog fire; `Done` drains the store entry.
+    pub fn picker_event(&self, id: u64, ev: PickerEvent) {
+        let _ = self.prio_tx.try_send(Request::PickerEvent { id, ev });
     }
 }
 

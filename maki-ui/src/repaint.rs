@@ -170,6 +170,17 @@ impl Cadence {
         moves: false,
     };
 
+    /// A wake deadline owed to no pixel motion: the loop must come back in
+    /// `frame` to check a condition (an idle timeout), but the clock alone
+    /// draws nothing new, so no frame is owed unless the check comes back
+    /// [`Dirty`].
+    pub fn after(frame: Duration) -> Self {
+        Self {
+            frame: Some(frame),
+            moves: false,
+        }
+    }
+
     /// `cadence` while `applies`, else [`Cadence::IDLE`].
     pub fn when(applies: bool, cadence: Self) -> Self {
         if applies { cadence } else { Self::IDLE }
@@ -205,6 +216,7 @@ mod tests {
     use super::expect::{OWED, QUIET};
     use super::{Cadence, Dirty, Watch};
     use std::sync::Arc;
+    use std::time::Duration;
 
     const EXPECT_SETTLED: &str = "nothing to combine must leave the loop asleep";
     const EXPECT_SOONEST: &str = "the soonest source must win over the whole list";
@@ -243,6 +255,19 @@ mod tests {
         let mixed = Cadence::any([Cadence::SPINNER, Cadence::PENDING]);
         assert_eq!(mixed.frame(), Cadence::PENDING.frame(), "{EXPECT_SOONEST}");
         assert!(mixed.moves(), "{EXPECT_MOTION_KEPT}");
+    }
+
+    /// A wake deadline that owes no motion: it folds into the min-frame like
+    /// any other cadence and never claims the pixels move.
+    #[test]
+    fn after_sets_a_deadline_without_motion() {
+        let wake = Cadence::after(Duration::from_millis(1));
+        assert_eq!(wake.frame(), Some(Duration::from_millis(1)));
+        assert!(!wake.moves());
+
+        let folded = Cadence::any([Cadence::IDLE, wake, Cadence::PENDING]);
+        assert_eq!(folded.frame(), wake.frame(), "the earliest wake must win");
+        assert!(!folded.moves(), "a deadline must not imply motion");
     }
 
     /// A generation counter answers this too, as long as every publisher

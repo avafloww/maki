@@ -13,6 +13,7 @@ use crate::api::util::command::{
     TitlePos, UiAction, WinCommand, WinEvent, ui_send,
 };
 use crate::api::util::pair::{Pair, try_pair};
+use crate::api::util::picker::{PickerCallbackEntry, PickerCallbacks, PickerResult};
 use crate::docs::{FnDoc, ParamDoc};
 pub(crate) mod blit;
 pub(crate) mod buf;
@@ -308,6 +309,99 @@ async fn open_editor(
     Ok(reply_rx.recv_async().await.unwrap_or(-1))
 }
 
+/// Opens a fuzzy-filtering list picker dialog and blocks until the user
+/// decides. Items are ranked by match score with matched characters
+/// highlighted, exactly like the built-in pickers. Filter edits keep the
+/// current row instead of jumping to the best match.
+///
+/// @param items table List of items: plain strings, or `{ label, detail?, section?, section_detail? }` tables.
+/// @param opts table? Options:
+///   - title (string): dialog title.
+///   - footer (table): key-hint pairs for the footer border. Each entry is `{key, label}`.
+///   - cursor (integer): initial 1-based item index. Default 1.
+///   - submit_keys (table): extra key names that confirm the selection, in the "ctrl+o" notation; enter always confirms.
+///   - notify_initial (boolean): fire `on_change` for the initial item. Default false.
+///   - timeout_ms (integer): idle window; when it elapses `on_timeout` fires, and keeps firing while the dialog stays idle. Zero or omitted disables the window.
+///   - on_change (function): `on_change(item, index)` with the original item and its 1-based index, fired when the selection moves.
+///   - on_timeout (function): `on_timeout()` when the idle window elapses.
+/// @return (table) `{ type = "choice", index = n }` with the 1-based index of the chosen item, `{ type = "delete", index = n }` when the user presses Ctrl+D twice on an item (the first press flashes "Press Ctrl+D again to delete"), or `{ type = "close" }` when dismissed with Esc or Ctrl+C, or when no UI is attached.
+/// @example
+/// local result = maki.ui.open_list_picker({ "alpha", "beta" }, { title = "Pick" })
+/// if result.type == "choice" then
+///   maki.ui.flash("Picked " .. result.index)
+/// end
+#[lua_fn]
+async fn open_list_picker(
+    lua: Lua,
+    #[ctx] tx: flume::Sender<UiAction>,
+    items: mlua::Value,
+    opts: Option<Table>,
+) -> LuaResult<Table> {
+    let (items_table, specs) = crate::api::util::picker::decode_picker_items(&items)?;
+    let config = crate::api::util::picker::decode_picker_opts(opts.as_ref())?;
+    let (on_change, on_timeout) = crate::api::util::picker::decode_picker_callbacks(opts.as_ref());
+    let id = crate::api::util::picker::alloc_picker_id();
+    // The `AppDataRef` guard is `!Send`, so scope it: the call parks on the
+    // reply below and only the id must survive into that future.
+    {
+        let store = lua
+            .app_data_ref::<PickerCallbacks>()
+            .ok_or_else(|| mlua::Error::runtime("picker callback store unavailable"))?;
+        store.insert(
+            id,
+            PickerCallbackEntry {
+                items: items_table,
+                on_change,
+                on_timeout,
+            },
+        );
+    }
+    let (reply_tx, reply_rx) = flume::bounded::<PickerResult>(1);
+    if tx
+        .try_send(UiAction::OpenListPicker {
+            id,
+            items: specs,
+            config,
+            reply_tx,
+        })
+        .is_err()
+    {
+        if let Some(store) = lua.app_data_ref::<PickerCallbacks>() {
+            store.remove(id);
+        }
+        let t = lua.create_table()?;
+        t.set("type", "close")?;
+        return Ok(t);
+    }
+    let result = match reply_rx.recv_async().await {
+        Ok(result) => result,
+        // The sender was dropped (the UI process is gone) and its `Done`
+        // event never arrives, so drain the callback entry here; the
+        // caller's close path still runs on the synthesized dismiss.
+        Err(_) => {
+            if let Some(store) = lua.app_data_ref::<PickerCallbacks>() {
+                store.remove(id);
+            }
+            PickerResult::Close
+        }
+    };
+    let t = lua.create_table()?;
+    match result {
+        PickerResult::Choice(idx) => {
+            t.set("type", "choice")?;
+            t.set("index", idx + 1)?;
+        }
+        PickerResult::Delete(idx) => {
+            t.set("type", "delete")?;
+            t.set("index", idx + 1)?;
+        }
+        PickerResult::Close => {
+            t.set("type", "close")?;
+        }
+    }
+    Ok(t)
+}
+
 /// Opens a floating or split window that displays the contents of {buf}.
 /// Returns a Win handle you can use to receive events, update layout,
 /// and close the window when you are done.
@@ -454,7 +548,8 @@ lua_table! {
     extend "maki.ui" => pub(crate) fn add_ui_fns(), DOCS [
         buf, theme_color, highlight, markdown, humantime, terminal_size,
         display_width, truncate_text,
-        manual flash, manual action, manual open_editor, manual open_win, manual set_status_hint,
+        manual flash, manual action, manual open_editor, manual open_list_picker, manual open_win,
+        manual set_status_hint,
     ]
 }
 
@@ -470,6 +565,7 @@ pub(crate) fn create_ui_table(
         flash__register(&t, lua, tx.clone())?;
         action__register(&t, lua, tx.clone())?;
         open_editor__register(&t, lua, tx.clone())?;
+        open_list_picker__register(&t, lua, tx.clone())?;
         open_win__register(&t, lua, tx)?;
     }
 

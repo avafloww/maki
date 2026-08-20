@@ -16,6 +16,7 @@ pub use api::util::command::{
     FloatConfigPatch, HintReader, HintSnapshot, LuaCommandInfo, LuaCommandReader, SessionReply,
     SessionRequest, Split, TitlePos, UiAction, WinCommand, WinEvent, WinView,
 };
+pub use api::util::picker::{PickerConfig, PickerEvent, PickerItemSpec, PickerResult};
 pub use docs::{DocKind, FnDoc, ModuleDoc, ParamDoc, api_docs};
 pub use error::PluginError;
 pub use loader::{EventHandle, PluginHost, TestCompletionBackend};
@@ -106,6 +107,17 @@ pub mod test_support {
             while let Ok(req) = self.0.try_recv() {
                 if let Request::FireAutocmd { event, data } = req {
                     return Some((event, data));
+                }
+            }
+            None
+        }
+
+        /// Next picker dialog event as `(id, event)`, skipping other requests.
+        pub fn try_recv_picker_event(&self) -> Option<(u64, crate::PickerEvent)> {
+            use crate::runtime::Request;
+            while let Ok(req) = self.0.try_recv() {
+                if let Request::PickerEvent { id, ev } = req {
+                    return Some((id, ev));
                 }
             }
             None
