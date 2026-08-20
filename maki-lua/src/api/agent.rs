@@ -1020,8 +1020,8 @@ async fn prompt(
     let input_tx = this.input_tx.clone();
     let done_rx = this.done_rx.clone();
     drop(this);
-    if let Err(e) = input_tx.send(message) {
-        return Ok((None, Some(e.to_string())));
+    if input_tx.send(message).is_err() {
+        return Ok((None, Some(SESSION_CLOSED_ERR.to_owned())));
     }
     match done_rx.recv_async().await {
         Err(_) => Ok((None, Some(SESSION_CLOSED_ERR.to_owned()))),
