@@ -4,8 +4,8 @@ use std::fs::FileType;
 use std::io::{Error as IoError, ErrorKind};
 use std::path::{Path, PathBuf};
 
-use maki_agent::tools::grep::GrepParams;
 use maki_agent::GrepFileEntry;
+use maki_agent::tools::grep::GrepParams;
 
 use super::{
     DIR_MISSING_PREFIX, DIR_NOT_A_DIR_PREFIX, FsBackend, FsError, FsMeta, TYPE_DIRECTORY,
@@ -108,10 +108,9 @@ impl FsBackend for RealFs {
         let root = maki_agent::tools::resolve_search_path(path).map_err(FsError::Message)?;
         let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
 
-        let walker =
-            maki_agent::tools::walk_builder_opts(&root, &pattern_refs, gitignore)
-                .map_err(FsError::Message)?
-                .build();
+        let walker = maki_agent::tools::walk_builder_opts(&root, &pattern_refs, gitignore)
+            .map_err(FsError::Message)?
+            .build();
 
         let iter = walker
             .flatten()
@@ -143,10 +142,7 @@ impl FsBackend for RealFs {
         Ok(paths)
     }
 
-    fn grep(
-        &self,
-        params: GrepParams,
-    ) -> Result<(PathBuf, Vec<GrepFileEntry>), FsError> {
+    fn grep(&self, params: GrepParams) -> Result<(PathBuf, Vec<GrepFileEntry>), FsError> {
         maki_agent::tools::grep::grep_search(params).map_err(FsError::Message)
     }
 }

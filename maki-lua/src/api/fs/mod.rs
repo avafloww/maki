@@ -88,8 +88,7 @@ fn backend(lua: &Lua) -> std::sync::Arc<dyn FsBackend> {
 }
 
 fn default_real_backend() -> std::sync::Arc<dyn FsBackend> {
-    static DEFAULT: std::sync::OnceLock<std::sync::Arc<dyn FsBackend>> =
-        std::sync::OnceLock::new();
+    static DEFAULT: std::sync::OnceLock<std::sync::Arc<dyn FsBackend>> = std::sync::OnceLock::new();
     DEFAULT.get_or_init(|| std::sync::Arc::new(RealFs)).clone()
 }
 

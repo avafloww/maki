@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use maki_agent::AgentMode;
-use maki_agent::tools::test_support::stub_ctx;
 use maki_agent::tools::ToolRegistry;
+use maki_agent::tools::test_support::stub_ctx;
 
 const NOTE_PATH: &str = "note.md";
 const NOTE_BODY: &str = "hello-maki";
@@ -36,7 +36,10 @@ fn exec(reg: &Arc<ToolRegistry>, tool: &str, input: serde_json::Value) -> String
 #[test]
 fn memory_write_read_roundtrip_stays_in_memory() {
     let state = std::path::Path::new(maki_lua::test_support::TEST_STATE_DIR);
-    assert!(!state.exists(), "precondition: TEST_STATE_DIR must not exist on disk");
+    assert!(
+        !state.exists(),
+        "precondition: TEST_STATE_DIR must not exist on disk"
+    );
 
     let (_handle, guard) = maki_lua::test_support::spawn_host_for_tests(&["memory"]);
     let reg = guard.host().registry();
@@ -74,16 +77,25 @@ fn memory_write_read_roundtrip_stays_in_memory() {
         path.file_name().is_some_and(|n| n == NOTE_PATH),
         "unexpected note path: {path:?}"
     );
-    assert!(content.starts_with("---\n"), "frontmatter missing: {content}");
+    assert!(
+        content.starts_with("---\n"),
+        "frontmatter missing: {content}"
+    );
     assert!(content.contains(NOTE_BODY), "body missing: {content}");
 
-    assert!(!state.exists(), "the round-trip must not touch the real disk");
+    assert!(
+        !state.exists(),
+        "the round-trip must not touch the real disk"
+    );
 }
 
 #[test]
 fn splash_host_boots_disk_free() {
     let state = std::path::Path::new(maki_lua::test_support::TEST_STATE_DIR);
-    assert!(!state.exists(), "precondition: TEST_STATE_DIR must not exist on disk");
+    assert!(
+        !state.exists(),
+        "precondition: TEST_STATE_DIR must not exist on disk"
+    );
 
     let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
     let start = Instant::now();
@@ -99,5 +111,8 @@ fn splash_host_boots_disk_free() {
     };
     assert!(!frame.is_empty(), "rows must be non-empty");
 
-    assert!(!state.exists(), "the frame pull must not touch the real disk");
+    assert!(
+        !state.exists(),
+        "the frame pull must not touch the real disk"
+    );
 }

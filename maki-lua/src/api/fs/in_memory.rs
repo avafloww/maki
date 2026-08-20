@@ -11,8 +11,7 @@ use maki_agent::{GrepFileEntry, GrepLine, GrepMatchGroup};
 use regex::Regex;
 
 use super::{
-    DIR_MISSING_PREFIX, DIR_NOT_A_DIR_PREFIX, FsBackend, FsError, FsMeta, TYPE_DIRECTORY,
-    TYPE_FILE,
+    DIR_MISSING_PREFIX, DIR_NOT_A_DIR_PREFIX, FsBackend, FsError, FsMeta, TYPE_DIRECTORY, TYPE_FILE,
 };
 
 /// Hermetic test backend: a deliberately dumb `BTreeMap` model. No symlinks,
@@ -216,7 +215,9 @@ impl FsBackend for InMemoryFs {
             {
                 return Err(IoError::other("rm: directory not empty"));
             }
-            inner.entries.retain(|p, _| p != path && !p.starts_with(path));
+            inner
+                .entries
+                .retain(|p, _| p != path && !p.starts_with(path));
         } else {
             inner.entries.remove(path);
         }
@@ -239,7 +240,7 @@ impl FsBackend for InMemoryFs {
                 return Err(FsError::Message(format!(
                     "{DIR_MISSING_PREFIX}{}",
                     path.display()
-                )))
+                )));
             }
         };
         if !meta.is_dir {
@@ -251,7 +252,11 @@ impl FsBackend for InMemoryFs {
         let inner = self.inner.read().unwrap();
         let mut out = Vec::new();
         for (p, entry) in &inner.entries {
-            let Some(rel) = p.strip_prefix(path).ok().filter(|r| !r.as_os_str().is_empty()) else {
+            let Some(rel) = p
+                .strip_prefix(path)
+                .ok()
+                .filter(|r| !r.as_os_str().is_empty())
+            else {
                 continue;
             };
             if rel.components().count() as u32 > max_depth {
@@ -289,7 +294,11 @@ impl FsBackend for InMemoryFs {
             let Entry::File(_, seq) = entry else {
                 continue;
             };
-            let Some(rel) = p.strip_prefix(&root).ok().filter(|r| !r.as_os_str().is_empty()) else {
+            let Some(rel) = p
+                .strip_prefix(&root)
+                .ok()
+                .filter(|r| !r.as_os_str().is_empty())
+            else {
                 continue;
             };
             if compiled.iter().any(|g| g.is_match(rel)) {
@@ -305,10 +314,7 @@ impl FsBackend for InMemoryFs {
         Ok(hits.into_iter().map(|(_, p)| p).collect())
     }
 
-    fn grep(
-        &self,
-        params: GrepParams,
-    ) -> Result<(PathBuf, Vec<GrepFileEntry>), FsError> {
+    fn grep(&self, params: GrepParams) -> Result<(PathBuf, Vec<GrepFileEntry>), FsError> {
         let root = resolve_root(params.path.as_deref())?;
         let re = Regex::new(&params.pattern)
             .map_err(|e| FsError::Message(format!("invalid regex pattern: {e}")))?;
@@ -367,7 +373,11 @@ impl FsBackend for InMemoryFs {
                     }
                 }
                 group_lines.push(GrepLine::matched(idx + 1, *line));
-                for (i, &text) in lines.iter().enumerate().skip(idx + 1).take(params.context_after)
+                for (i, &text) in lines
+                    .iter()
+                    .enumerate()
+                    .skip(idx + 1)
+                    .take(params.context_after)
                 {
                     if text.len() <= params.max_line_bytes {
                         group_lines.push(GrepLine::context(i + 1, text));
@@ -414,7 +424,10 @@ mod tests {
         fs.write(Path::new("/t/note.md"), b"hello-maki").unwrap();
 
         assert_eq!(fs.read(Path::new("/t/note.md")).unwrap(), "hello-maki");
-        assert_eq!(fs.read_bytes(Path::new("/t/note.md")).unwrap(), b"hello-maki");
+        assert_eq!(
+            fs.read_bytes(Path::new("/t/note.md")).unwrap(),
+            b"hello-maki"
+        );
 
         let meta = fs.stat(Path::new("/t/note.md")).unwrap();
         assert!(meta.is_file);
@@ -447,14 +460,19 @@ mod tests {
             fs.read(Path::new("/t/bin.dat")).unwrap_err().kind(),
             ErrorKind::InvalidData
         );
-        assert_eq!(fs.read_bytes(Path::new("/t/bin.dat")).unwrap(), vec![0xff, 0xfe]);
+        assert_eq!(
+            fs.read_bytes(Path::new("/t/bin.dat")).unwrap(),
+            vec![0xff, 0xfe]
+        );
 
         assert_eq!(
             fs.write(Path::new(ROOT), b"x").unwrap_err().kind(),
             ErrorKind::IsADirectory
         );
         assert_eq!(
-            fs.write(Path::new("/t/noparent/x.txt"), b"x").unwrap_err().kind(),
+            fs.write(Path::new("/t/noparent/x.txt"), b"x")
+                .unwrap_err()
+                .kind(),
             ErrorKind::NotFound
         );
         assert_eq!(
@@ -493,14 +511,18 @@ mod tests {
         fs.write(Path::new("/t/tree/nested/b.txt"), b"b").unwrap();
 
         assert_eq!(
-            fs.rm(Path::new("/t/tree"), false, false).unwrap_err().kind(),
+            fs.rm(Path::new("/t/tree"), false, false)
+                .unwrap_err()
+                .kind(),
             ErrorKind::Other
         );
         assert!(fs.stat(Path::new("/t/tree")).is_ok());
 
         assert!(fs.rm(Path::new("/t/ghost"), false, true).is_ok());
         assert_eq!(
-            fs.rm(Path::new("/t/ghost"), false, false).unwrap_err().kind(),
+            fs.rm(Path::new("/t/ghost"), false, false)
+                .unwrap_err()
+                .kind(),
             ErrorKind::NotFound
         );
 
@@ -563,20 +585,28 @@ mod tests {
 
         // gitignore semantics (real backend delegates to the `ignore` crate):
         // a pattern without a slash matches at any depth under the scope.
-        let shallow = fs.glob(&["*.rs".into()], Some("/t"), None, true, false).unwrap();
+        let shallow = fs
+            .glob(&["*.rs".into()], Some("/t"), None, true, false)
+            .unwrap();
         let mut shallow: Vec<&str> = shallow.iter().map(String::as_str).collect();
         shallow.sort();
         assert_eq!(shallow, vec!["/t/sub/inner.rs", "/t/top.rs"]);
 
-        let scoped = fs.glob(&["*.rs".into()], Some("/t/sub"), None, true, false).unwrap();
+        let scoped = fs
+            .glob(&["*.rs".into()], Some("/t/sub"), None, true, false)
+            .unwrap();
         assert_eq!(scoped, vec!["/t/sub/inner.rs"]);
 
-        let deep = fs.glob(&["**/*.rs".into()], Some("/t"), None, true, false).unwrap();
+        let deep = fs
+            .glob(&["**/*.rs".into()], Some("/t"), None, true, false)
+            .unwrap();
         let mut deep: Vec<&str> = deep.iter().map(String::as_str).collect();
         deep.sort();
         assert_eq!(deep, vec!["/t/sub/inner.rs", "/t/top.rs"]);
 
-        let limited = fs.glob(&["**/*.rs".into()], Some("/t"), Some(1), true, false).unwrap();
+        let limited = fs
+            .glob(&["**/*.rs".into()], Some("/t"), Some(1), true, false)
+            .unwrap();
         assert_eq!(limited.len(), 1);
 
         // mtime sort is insertion order, newest first.
@@ -585,7 +615,9 @@ mod tests {
         f.write(Path::new("/t/one.rs"), b"").unwrap();
         f.write(Path::new("/t/two.rs"), b"").unwrap();
         f.write(Path::new("/t/three.rs"), b"").unwrap();
-        let by_mtime = f.glob(&["*.rs".into()], Some("/t"), None, true, true).unwrap();
+        let by_mtime = f
+            .glob(&["*.rs".into()], Some("/t"), None, true, true)
+            .unwrap();
         assert_eq!(by_mtime, vec!["/t/three.rs", "/t/two.rs", "/t/one.rs"]);
 
         assert!(
@@ -603,7 +635,8 @@ mod tests {
         for i in 1..=5 {
             content.push_str(&format!("line_{i}\n"));
         }
-        fs.write(Path::new("/t/data.rs"), content.as_bytes()).unwrap();
+        fs.write(Path::new("/t/data.rs"), content.as_bytes())
+            .unwrap();
         fs.write(Path::new("/t/other.txt"), b"line_99\n").unwrap();
 
         let mut params = GrepParams::new("line_3".to_string());
