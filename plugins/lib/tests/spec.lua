@@ -61,6 +61,85 @@ case("truncate_trailing_newlines_counted", function()
   assert(result:find("%[truncated"), "trailing newlines should count as lines")
 end)
 
+-- maki.match.fuzzy tests (mirror of the maki-lua unit tests)
+
+case("match_fuzzy_empty_query_matches_all", function()
+  local m = maki.match.fuzzy("", "hello world")
+  assert(m, "empty query must match")
+  eq(m.score, 0)
+  eq(#m.indices, 0)
+  local w = maki.match.fuzzy("   ", "hello world")
+  assert(w, "whitespace query must match")
+  eq(w.score, 0)
+  eq(#w.indices, 0)
+end)
+
+case("match_fuzzy_no_match_returns_nil", function()
+  eq(maki.match.fuzzy("xyz", "hello world"), nil)
+  eq(maki.match.fuzzy("hello xyz", "hello world"), nil)
+end)
+
+case("match_fuzzy_returns_1based_codepoint_indices", function()
+  local m = maki.match.fuzzy("ap", "apple")
+  assert(m, "expected match")
+  eq(#m.indices, 2)
+  eq(m.indices[1], 1)
+  eq(m.indices[2], 2)
+end)
+
+case("match_fuzzy_multi_term_order_independent", function()
+  assert(maki.match.fuzzy("441 review", "review gh pr 441"), "order must not matter")
+end)
+
+case("match_fuzzy_smart_case", function()
+  eq(maki.match.fuzzy("APPLE", "apple pie"), nil)
+  assert(maki.match.fuzzy("apple", "Apple pie"), "lowercase query is case-insensitive")
+end)
+
+case("match_fuzzy_cjk_codepoint_indices", function()
+  local m = maki.match.fuzzy("好世", "你好世界")
+  assert(m, "expected CJK match")
+  eq(#m.indices, 2)
+  eq(m.indices[1], 2)
+  eq(m.indices[2], 3)
+end)
+
+case("match_fuzzy_indices_are_codepoints_not_graphemes", function()
+  local m = maki.match.fuzzy("a", "👍🏽abc")
+  assert(m, "expected match")
+  eq(#m.indices, 1)
+  eq(m.indices[1], 3, "codepoint position, not grapheme position")
+end)
+
+case("match_fuzzy_contiguous_beats_scattered", function()
+  local tight = maki.match.fuzzy("app", "apple")
+  local loose = maki.match.fuzzy("app", "axpyp")
+  assert(tight and loose, "both must match")
+  assert(tight.score > loose.score, "contiguous should score higher")
+end)
+
+case("match_fuzzy_repeated_terms_dedup_indices", function()
+  local m = maki.match.fuzzy("a a", "banana")
+  assert(m, "expected match")
+  eq(#m.indices, 1)
+  eq(m.indices[1], 2)
+end)
+
+case("match_fuzzy_non_string_args_error", function()
+  local ok, err = pcall(maki.match.fuzzy, 123, "hello")
+  assert(not ok, "number query should error")
+  assert(
+    tostring(err):find("match.fuzzy: query: expected string, got integer", 1, true),
+    "error names the query arg: " .. tostring(err)
+  )
+  local ok2, err2 = pcall(maki.match.fuzzy, "hello", {})
+  assert(not ok2, "table text should error")
+  assert(
+    tostring(err2):find("match.fuzzy: text: expected string, got table", 1, true),
+    "error names the text arg: " .. tostring(err2)
+  )
+end)
+
 -- ToolView tests
 
 case("tool_view_tail_keeps_last_n", function()

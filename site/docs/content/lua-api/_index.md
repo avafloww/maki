@@ -72,6 +72,7 @@ a string belongs.
 | [`maki.json.SchemaValidator`](#maki-json-SchemaValidator) | A compiled JSON Schema validator. |
 | [`maki.keymap`](#maki-keymap) | Key mappings, modeled after `vim.keymap`. |
 | [`maki.log`](#maki-log) | Structured logging for plugins. |
+| [`maki.match`](#maki-match) | Fuzzy matching via nucleo, the same matcher maki's built-in pickers use. |
 | [`maki.api.mode`](#maki-api-mode) | `maki.api.mode`: define, override, list, and switch agent modes. |
 | [`maki.net`](#maki-net) | HTTP client for fetching web content. |
 | [`maki.session`](#maki-session) | Host session primitives. |
@@ -2789,6 +2790,49 @@ Emit an ERROR-level log message. Use for failures that need attention.
 
 ```lua
 maki.log.error("failed to connect to API")
+```
+
+
+## maki.match {#maki-match}
+
+Fuzzy matching via nucleo, the same matcher maki's built-in pickers use.
+
+Use it for type-ahead search over a plugin's own item list.
+
+```lua
+local m = maki.match.fuzzy("gh pr", "gh pr 441 review")
+if m then
+  print(m.score) -- matched codepoint offsets in m.indices
+end
+```
+
+---
+
+### `maki.match.fuzzy()` {#maki-match-fuzzy}
+
+```lua
+maki.match.fuzzy({query}, {text})
+```
+
+Fuzzy match {query} against {text} with nucleo, the same matcher maki's
+built-in pickers use. Every whitespace-separated word in {query} must
+match somewhere in {text}; word order does not matter. An empty or
+whitespace-only query matches everything.
+
+**Parameters:**
+
+- `{query}` (`string`) Search words, whitespace separated.
+- `{text}` (`string`) Text to search in.
+
+**Returns:** (`table|nil`) nil when no word matches. On a match: {score = number, indices = {…}} where indices are the 1-based codepoint offsets of the matched characters, ascending.
+
+**Example:**
+
+```lua
+local m = maki.match.fuzzy("gh pr", "gh pr 441 review")
+if m then
+  print(m.score) -- matched codepoint offsets in m.indices
+end
 ```
 
 

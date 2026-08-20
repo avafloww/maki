@@ -2638,6 +2638,7 @@ dependencies = [
  "maki-providers",
  "maki-storage",
  "mlua",
+ "nucleo-matcher",
  "pin-project-lite",
  "regex",
  "rustix",
