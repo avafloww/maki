@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+test-support = ["dep:globset"]
+
 [dependencies]
 arc-swap = { workspace = true }
 async-lock = { workspace = true }
@@ -30,7 +33,7 @@ smol = { workspace = true }
 strum = { workspace = true }
 event-listener = { workspace = true }
 flume = { workspace = true }
-globset = { workspace = true }
+globset = { workspace = true, optional = true }
 futures = { workspace = true }
 futures-lite = { workspace = true }
 pin-project-lite = { workspace = true }
@@ -81,6 +84,7 @@ tree-sitter-make = { workspace = true }
 rustix = { workspace = true }
 
 [dev-dependencies]
+maki-lua = { path = ".", features = ["test-support"] }
 base64 = { workspace = true }
 criterion = { workspace = true }
 image = { workspace = true }

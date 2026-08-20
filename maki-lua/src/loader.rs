@@ -194,6 +194,7 @@ impl PluginHost {
         Self::with_jit_and_state_dir(registry, jit, Arc::new(RealFs), None)
     }
 
+    #[cfg(feature = "test-support")]
     pub(crate) fn with_fs_for_tests(
         registry: Arc<ToolRegistry>,
         fs: Arc<dyn FsBackend>,
@@ -685,6 +686,7 @@ impl EventHandle {
     /// channel so a `RequestProbe` sees every request, including the
     /// `prio_tx`-routed commands and keybind callbacks that `from_tx`
     /// would route to a disconnected channel.
+    #[cfg(feature = "test-support")]
     pub(crate) fn probed_for_test(shared: flume::Sender<Request>) -> Self {
         Self {
             tx: shared.clone(),

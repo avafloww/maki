@@ -28,6 +28,7 @@ pub use splash::{
 
 pub use api::completion::{AtToken, CompletionCtx, ItemSpec, at_is_token_start, parse_at_tokens};
 
+#[cfg(feature = "test-support")]
 pub mod test_support {
     use crate::api::keymap::{KeymapEntry, KeymapWriter};
     use crate::api::util::command::{

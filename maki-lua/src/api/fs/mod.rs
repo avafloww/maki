@@ -2,11 +2,13 @@
 //!
 //! All I/O dispatches through the [`FsBackend`] trait: [`RealFs`] is the
 //! production backend (real disk, symlinks, gitignore, permissions);
-//! [`InMemoryFs`] is the hermetic test backend, a deliberately dumb
-//! `BTreeMap` model — no symlinks, no gitignore, no permissions, and file
-//! mtime is an insertion counter. Behavior tests must not rely on
-//! real-filesystem vagaries; those belong in the real-backend suite below.
+//! `InMemoryFs` (behind the `test-support` feature) is the hermetic test
+//! backend, a deliberately dumb `BTreeMap` model — no symlinks, no
+//! gitignore, no permissions, and file mtime is an insertion counter.
+//! Behavior tests must not rely on real-filesystem vagaries; those belong
+//! in the real-backend suite below.
 
+#[cfg(feature = "test-support")]
 mod in_memory;
 mod real;
 
@@ -20,6 +22,7 @@ use mlua::{Buffer, Lua, Result as LuaResult, Table, Value};
 use crate::api::util::pair::{Pair, err_pair, pair, try_pair};
 use crate::plugin_permissions::PluginPermissions;
 
+#[cfg(feature = "test-support")]
 pub use in_memory::InMemoryFs;
 pub use real::RealFs;
 
