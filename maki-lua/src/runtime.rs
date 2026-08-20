@@ -30,9 +30,8 @@ use serde_json::Value;
 
 use maki_config::RawConfig;
 
-use crate::api::autocmd::AutocmdStore;
+use crate::api::autocmd::{self, AutocmdStore};
 use crate::api::completion::{self, CompletionCtx, ItemSpec};
-use crate::api::contribution::ContributionStore;
 use crate::api::create_maki_global;
 use crate::api::r#fn::{JobOwner, JobStore, deliver_job_event};
 use crate::api::fs::FsBackend;
@@ -40,6 +39,7 @@ use crate::api::keymap::KeymapReader;
 use crate::api::keymap::{KeymapStore, KeymapWriter};
 use crate::api::options::{PluginOptionSpecs, PluginOpts, collect_plugin_options};
 use crate::api::slot::SlotStore;
+use crate::api::store::{self, Store};
 use crate::api::tool::{
     LuaTool, PendingRules, PendingTool, PendingTools, PermissionScopeSpec, ToolCallReply,
 };
@@ -1512,7 +1512,7 @@ impl LuaRuntime {
         lua.set_app_data(PromptHintCallbacks::default());
         lua.set_app_data(PluginOptionSpecs::default());
         lua.set_app_data(AutocmdStore::default());
-        lua.set_app_data(ContributionStore::default());
+        lua.set_app_data(Store::default());
         lua.set_app_data(SlotStore::default());
         lua.set_app_data(crate::splash::VersionInfo::default());
         lua.set_app_data(KeymapStore::new());
@@ -1600,8 +1600,28 @@ impl LuaRuntime {
         if let Some(mut store) = self.lua.app_data_mut::<AutocmdStore>() {
             store.clear_plugin(name);
         }
-        if let Some(mut store) = self.lua.app_data_mut::<ContributionStore>() {
-            store.clear_plugin(name);
+        let changed = if let Some(mut store) = self.lua.app_data_mut::<Store>() {
+            store.clear_plugin(name)
+        } else {
+            Vec::new()
+        };
+        for registry in changed {
+            let data = self
+                .lua
+                .create_table()
+                .and_then(|t| t.set("registry", registry.as_str()).map(|_| t));
+            match data {
+                Ok(data) => {
+                    autocmd::dispatch(&self.lua, store::STORE_CHANGED, None, LuaValue::Table(data))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        registry = %registry,
+                        error = %e,
+                        "failed to build StoreChanged data"
+                    )
+                }
+            }
         }
         if let Some(mut store) = self.lua.app_data_mut::<SlotStore>() {
             store.clear_plugin(name);

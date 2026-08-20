@@ -4,7 +4,7 @@ local STATE_DIR = "splashes"
 local STATE_FILE = "selection.json"
 
 local renderers = {}
-local renderers_revision = -1
+local dirty = true
 local candidate
 local committed = { name = FALLBACK_NAME }
 local previous_committed
@@ -13,31 +13,35 @@ local last_render
 local rollback_queued = false
 
 local function refresh_renderers()
-  local revision = maki.api.contribution_revision(REGISTRY)
-  if revision ~= renderers_revision then
-    renderers = maki.api.collect(REGISTRY)
-    renderers_revision = revision
+  if not dirty then
+    return
+  end
+  dirty = false
+  renderers = maki.store.collect(REGISTRY)
+  -- Discard cached renderers so a reloaded or unloaded plugin does not keep
+  -- a function from an old instance alive through the picker.
+  committed.renderer = nil
+  committed.validated = nil
+  if candidate then
+    candidate.renderer = nil
+    candidate.validated = nil
+  end
+  if previous_committed then
+    previous_committed.renderer = nil
+    previous_committed.validated = nil
   end
 end
 
 local function resolve(selection)
   refresh_renderers()
-  if selection.revision == renderers_revision and type(selection.renderer) == "function" then
+  if type(selection.renderer) == "function" then
     return true
   end
   local entry = renderers[selection.name]
-  if type(entry) ~= "table" or type(entry.activate) ~= "function" then
+  if type(entry) ~= "table" or type(entry.renderer) ~= "function" then
     return nil, "unknown splash: " .. selection.name
   end
-  local ok, renderer, err = pcall(entry.activate)
-  if not ok then
-    return nil, renderer
-  end
-  if type(renderer) ~= "function" then
-    return nil, err or "activation did not return a renderer"
-  end
-  selection.renderer = renderer
-  selection.revision = renderers_revision
+  selection.renderer = entry.renderer
   selection.validated = nil
   return true
 end
@@ -46,7 +50,7 @@ local function items()
   refresh_renderers()
   local out = {}
   for name, entry in pairs(renderers) do
-    if type(entry) == "table" and type(entry.activate) == "function" then
+    if type(entry) == "table" and type(entry.renderer) == "function" then
       out[#out + 1] = {
         label = entry.label or name,
         detail = entry.description or "",
@@ -235,6 +239,14 @@ local function render(prev, w, h, t, fade)
 end
 
 maki.api.set_slot("splash.render", render)
+
+maki.api.create_autocmd("StoreChanged", {
+  callback = function(ev)
+    if ev.data and ev.data.registry == REGISTRY then
+      dirty = true
+    end
+  end,
+})
 
 -- Load time only reads the preference into `committed`; the first frame
 -- resolves it. An unknown name fails then and rolls back to the fallback,

@@ -101,17 +101,15 @@ end)
 
 Bundled modules resolve before files in the config `lua/` dir, so personal splashes must use plain names such as `require("mysplash")` outside the `splash.*` namespace. The bundled splashes live in `plugins/splashes_default/splash/` in the repository and follow the same single-file pattern as the custom splashes below.
 
-Third-party plugins can add entries to the same registry with `maki.api.register`. The `activate` callback returns a renderer. Contributions are removed automatically when their plugin unloads. The picker re-resolves active and previewed contributions after unload or reload, so it does not retain a function from the old plugin instance.
+Third-party plugins can add entries to the same registry with `maki.store.register`. An entry is a table with a `label`, a `description`, and a `renderer` function. Entries are removed automatically when their plugin unloads, and the `StoreChanged` event tells the picker to re-resolve, so it does not retain a function from an old plugin instance.
 
 ```lua
 local mysplash = require("mysplash")
 
-maki.api.register("splash", "mysplash", {
+maki.store.register("splash", "mysplash", {
   label = "My splash",
   description = "A short description",
-  activate = function()
-    return mysplash.render
-  end,
+  renderer = mysplash.render,
 })
 ```
 

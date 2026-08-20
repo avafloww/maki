@@ -3,7 +3,6 @@ pub(crate) mod r#async;
 pub(crate) mod autocmd;
 pub(crate) mod base64;
 pub(crate) mod completion;
-pub(crate) mod contribution;
 pub(crate) mod env;
 pub(crate) mod r#fn;
 pub(crate) mod fs;
@@ -19,6 +18,7 @@ pub(crate) mod options;
 pub(crate) mod session;
 pub(crate) mod slot;
 pub(crate) mod split;
+pub(crate) mod store;
 pub(crate) mod text;
 pub(crate) mod tool;
 pub(crate) mod treesitter;
@@ -56,7 +56,6 @@ pub(crate) fn create_maki_global(
         ui_action_tx.clone(),
     )?;
     autocmd::add_autocmd_methods(&api, lua, Arc::clone(&plugin))?;
-    contribution::add_methods(&api, lua, Arc::clone(&plugin))?;
     slot::add_slot_methods(&api, lua, Arc::clone(&plugin))?;
     let mode_table = mode::create_mode_table(lua, ui_action_tx.clone())?;
     api.set("mode", mode_table)?;
@@ -73,6 +72,10 @@ pub(crate) fn create_maki_global(
     maki.set("net", net::create_net_table(lua, permissions)?)?;
     maki.set("text", text::create_text_table(lua)?)?;
     maki.set("match", r#match::create_match_table(lua)?)?;
+    maki.set(
+        "store",
+        store::create_store_table(lua, Arc::clone(&plugin))?,
+    )?;
     maki.set(
         "session",
         session::create_session_table(lua, ui_action_tx.clone())?,

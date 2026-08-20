@@ -56,6 +56,7 @@ a string belongs.
 | --- | --- |
 | [`maki`](#maki) | The global entry point. |
 | [`maki.api`](#maki-api) | Plugin registration. |
+| [`maki.store`](#maki-store) | Shared key-value store for plugin contributions. |
 | [`maki.agent`](#maki-agent) | Subagent primitives for plugins that need to talk to an LLM. |
 | [`maki.agent.Session`](#maki-agent-Session) | A subagent session with its own conversation history. |
 | [`maki.async`](#maki-async) | Tools for running things concurrently in Lua plugins. |
@@ -635,60 +636,6 @@ end)
 
 ---
 
-### `maki.api.register()` {#maki-api-register}
-
-```lua
-maki.api.register({name}, {key}, {value})
-```
-
-Register a plugin-owned value in a named contribution registry.
-The same plugin may replace its value. A different plugin cannot claim an
-existing key. Contributions are removed automatically when their plugin is
-unloaded or reloaded.
-
-**Parameters:**
-
-- `{name}` (`string`) Registry name, e.g. `"splash"`.
-- `{key}` (`string`) Stable contribution identifier.
-- `{value}` (`any`) Value exposed to registry consumers; tables may contain functions.
-
----
-
-### `maki.api.collect()` {#maki-api-collect}
-
-```lua
-maki.api.collect({name})
-```
-
-Collect the current values in a named contribution registry.
-Returns a fresh table keyed by each contribution's stable identifier.
-
-**Parameters:**
-
-- `{name}` (`string`) Registry name.
-
-**Returns:** table Map of contribution key to registered value.
-
----
-
-### `maki.api.contribution_revision()` {#maki-api-contribution_revision}
-
-```lua
-maki.api.contribution_revision({name})
-```
-
-Return a monotonically increasing revision for a contribution registry.
-Consumers that cache contributed functions can compare this value before
-use and collect again after a contributor is loaded, reloaded, or unloaded.
-
-**Parameters:**
-
-- `{name}` (`string`) Registry name.
-
-**Returns:** integer Registry revision.
-
----
-
 ### `maki.api.create_autocmd()` {#maki-api-create_autocmd}
 
 ```lua
@@ -700,14 +647,17 @@ Listen for one or more events. Returns an id you can pass to
 
 Built-in events fired by the host: `"TurnStart"`, `"TurnEnd"`,
 `"TurnError"`, `"ToolStart"`, `"ToolDone"`, `"SessionReset"`,
-`"SessionFocusChanged"`, `"SplashShown"`, and `"SplashHidden"`. Plugins can
+`"SessionFocusChanged"`, `"SplashShown"`, `"SplashHidden"`, and
+`"StoreChanged"`. Plugins can
 also fire their own events with `exec_autocmds`.
 
-Each host event carries `data.session_id`. For `"SessionReset"` that
+Except `"StoreChanged"`, each host event carries `data.session_id`. For
+`"SessionReset"` that
 is the session being left behind; the other events name the session now
 running or focused. Tool events also carry `data.tool_id` and `data.tool`.
 `"SessionFocusChanged"` also carries `data.previous_session_id` except on
-initial startup.
+initial startup. `"StoreChanged"` carries `data.registry` and, for
+registrations, `data.key`.
 
 **Parameters:**
 
@@ -857,6 +807,62 @@ for name, info in pairs(maki.api.get_slots()) do
   print(name, info.owner, info.declared)
 end
 ```
+
+
+## maki.store {#maki-store}
+
+Shared key-value store for plugin contributions. A plugin registers
+values under a (registry, key) pair: the same plugin may replace its
+own value, a different plugin cannot claim an existing key, and
+entries are removed automatically when their owning plugin unloads or
+reloads.
+
+Every change fires the `StoreChanged` autocmd event: `data =
+{ registry, key }` on register, `data = { registry }` when an owner
+unloads (one event per touched registry, no ordering guarantee).
+Gather the initial state at load time and keep it fresh from events;
+do not poll.
+
+---
+
+### `maki.store.register()` {#maki-store-register}
+
+```lua
+maki.store.register({registry}, {key}, {value})
+```
+
+Register a value in a store registry under a stable key. The same plugin
+may replace its own value; a different plugin cannot claim an existing
+key. Entries are removed automatically when their plugin unloads or
+reloads.
+
+The change fires the `StoreChanged` autocmd event with
+`data = { registry, key }`, so consumers collect the initial state at
+load time and then stay fresh from events instead of polling.
+
+**Parameters:**
+
+- `{registry}` (`string`) Registry name, e.g. `"splash"`.
+- `{key}` (`string`) Stable entry identifier.
+- `{value}` (`any`) Value exposed to registry consumers; tables may contain functions.
+
+---
+
+### `maki.store.collect()` {#maki-store-collect}
+
+```lua
+maki.store.collect({registry})
+```
+
+Collect the current entries of a store registry. Returns a fresh table
+keyed by each entry's stable identifier; an unknown registry yields an
+empty table.
+
+**Parameters:**
+
+- `{registry}` (`string`) Registry name.
+
+**Returns:** table Map of entry key to registered value.
 
 
 ## maki.agent {#maki-agent}

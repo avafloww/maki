@@ -3,23 +3,19 @@ local SPLASHES = { "aurora", "caustics", "kaleidoscope", "matrix", "metaballs", 
 
 local default = require("splash.default")
 maki.api.declare_slot("splash.render", default.render)
-maki.api.register(REGISTRY, "default", {
+maki.store.register(REGISTRY, "default", {
   label = "default",
   description = default.description,
-  activate = function()
-    return default.render
-  end,
+  renderer = default.render,
 })
 
 for _, name in ipairs(SPLASHES) do
   local ok, module = pcall(require, "splash." .. name)
   if ok and type(module) == "table" and type(module.render) == "function" then
-    maki.api.register(REGISTRY, name, {
+    maki.store.register(REGISTRY, name, {
       label = name,
       description = module.description,
-      activate = function()
-        return module.render
-      end,
+      renderer = module.render,
     })
   end
 end

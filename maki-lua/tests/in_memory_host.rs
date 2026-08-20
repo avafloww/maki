@@ -147,12 +147,10 @@ function M.render(w, h, t, fade)
   return rows
 end
 
-maki.api.register("splash", "vortex", {
+maki.store.register("splash", "vortex", {
   label = "vortex",
   description = "test splash",
-  activate = function()
-    return M.render
-  end,
+  renderer = M.render,
 })
 "##;
 
@@ -351,4 +349,154 @@ fn splash_picker_command_switches_to_default() {
         !content.contains(SELECTION_MATRIX),
         "the switch must not roll the file back to matrix: {content}"
     );
+}
+
+const SECOND_SOURCE: &str = r##"
+local M = {}
+function M.render(w, h, t, fade)
+  local rows = {}
+  for i = 1, h do
+    rows[i] = { { glyphs = string.rep("o", w), style = "#00ff41" } }
+  end
+  return rows
+end
+
+maki.store.register("splash", "other", {
+  label = "other",
+  description = "test splash",
+  renderer = M.render,
+})
+"##;
+
+const RELOAD_SOURCE: &str = r##"
+local M = {}
+function M.render(w, h, t, fade)
+  local rows = {}
+  for i = 1, h do
+    rows[i] = { { glyphs = string.rep("n", w), style = "#00ff41" } }
+  end
+  return rows
+end
+
+maki.store.register("splash", "vortex", {
+  label = "vortex",
+  description = "test splash",
+  renderer = M.render,
+})
+"##;
+
+#[test]
+fn splash_picker_rollback_serves_reloaded_contribution() {
+    let fs = Arc::new(InMemoryFs::new());
+    fs.seed(&selection_path(), SELECTION_STALE.as_bytes().to_vec());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
+        &["splashes", "splashes_default"],
+        Arc::clone(&fs),
+        Some(CONTRIBUTION_SOURCE),
+    );
+
+    // Load the second plugin before the first frame so the commit runs
+    // undirty: the previous selection must keep its cached renderer until
+    // the registry changes again.
+    guard.host().load_source("second", SECOND_SOURCE).unwrap();
+    let frame = pull_frame(&handle, Some("sss"));
+    assert!(
+        !frame.rows.is_empty(),
+        "the committed vortex splash serves before the switch"
+    );
+    handle.run_command(
+        Arc::from("splashes"),
+        Arc::from("/splash"),
+        "other".into(),
+        0,
+    );
+    let content = wait_for_selection(&guard, "other");
+    assert!(content.contains("name"), "persisted file: {content}");
+
+    // Reload vortex with a fresh closure ("n") and drop the committed
+    // splash: the rollback must re-resolve the previous selection, not serve
+    // the first load's cached renderer.
+    guard.host().unload("user_init").unwrap();
+    guard
+        .host()
+        .load_source("user_init", RELOAD_SOURCE)
+        .unwrap();
+    guard.host().unload("second").unwrap();
+
+    let frame = pull_frame(&handle, Some("nnn"));
+    assert!(!frame.rows.is_empty(), "the reloaded vortex splash serves");
+    let content = wait_for_selection(&guard, SELECTION_STALE);
+    assert!(content.contains("name"), "repaired file: {content}");
+}
+
+const LATE_SOURCE: &str = r##"
+local M = {}
+function M.render(w, h, t, fade)
+  local rows = {}
+  for i = 1, h do
+    rows[i] = { { glyphs = string.rep("l", w), style = "#00ff41" } }
+  end
+  return rows
+end
+
+maki.store.register("splash", "late", {
+  label = "late",
+  description = "test splash",
+  renderer = M.render,
+})
+"##;
+
+#[test]
+fn splash_picker_sees_contribution_loaded_after_picker() {
+    let fs = Arc::new(InMemoryFs::new());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
+        &["splashes", "splashes_default"],
+        fs,
+        None,
+    );
+
+    // Loaded after the picker booted: the picker learns about it from the
+    // StoreChanged event, not from polling.
+    guard.host().load_source("late", LATE_SOURCE).unwrap();
+
+    handle.run_command(
+        Arc::from("splashes"),
+        Arc::from("/splash"),
+        "late".into(),
+        0,
+    );
+    let content = wait_for_selection(&guard, "late");
+    assert!(content.contains("name"), "persisted file: {content}");
+    let frame = pull_frame(&handle, Some("lll"));
+    assert!(
+        !frame.rows.is_empty(),
+        "the late contribution serves frames"
+    );
+}
+
+#[test]
+fn splash_picker_re_resolves_after_contribution_unloads() {
+    let fs = Arc::new(InMemoryFs::new());
+    fs.seed(&selection_path(), SELECTION_STALE.as_bytes().to_vec());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
+        &["splashes", "splashes_default"],
+        Arc::clone(&fs),
+        Some(CONTRIBUTION_SOURCE),
+    );
+
+    // The seeded selection is the user contribution; the first frame serves it.
+    let frame = pull_frame(&handle, Some("sss"));
+    assert!(
+        !frame_text(&frame).contains("luna-maki"),
+        "the committed contribution draws"
+    );
+
+    guard.host().unload("user_init").unwrap();
+
+    // The picker must drop the stale renderer, find the name unknown, roll
+    // back to the fallback, and repair the persisted selection.
+    let frame = pull_frame(&handle, Some("luna-maki"));
+    assert!(!frame.rows.is_empty(), "fallback frame after unload");
+    let content = wait_for_selection(&guard, SELECTION_DEFAULT);
+    assert!(content.contains("name"), "repaired file: {content}");
 }
