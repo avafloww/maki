@@ -1,7 +1,7 @@
-# Porting fragment shaders to splash skins
+# Porting fragment shaders to splashes
 
 Field guide for turning WGSL / GLSL / shadertoy fragment shaders into maki
-splash skins. The five ports in the live config (kaleidoscope, voronoi,
+splashes. The five ports in the live config (kaleidoscope, voronoi,
 caustics, metaballs, aurora, all from `shader-gallery.html`) follow exactly
 this playbook.
 

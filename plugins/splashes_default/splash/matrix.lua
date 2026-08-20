@@ -1,6 +1,6 @@
--- Bundled splash-gallery skin, part of the maki distribution.
--- Require from init.lua with:   local skin = require("splash.matrix")
--- The module returns M with M.render(w, h, t, fade) and does not activate itself.
+-- Bundled splash, part of the maki distribution.
+-- Require from init.lua with:   local splash = require("splash.matrix")
+-- The module returns M with M.description and M.render(w, h, t, fade) and does not activate itself.
 --
 -- Matrix rain splash. Green falling code with per-column state stepped by
 -- frame dt; resets when the home screen shows again (SplashShown). The
@@ -10,6 +10,7 @@
 local GLYPHS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 local TRAIL = 6
 local M = {}
+M.description = "Green falling-code rain with persistent animated trails."
 
 local state = { cols = {}, last_t = nil }
 

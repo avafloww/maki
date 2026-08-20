@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use maki_agent::AgentMode;
 use maki_agent::tools::ToolRegistry;
 use maki_agent::tools::test_support::stub_ctx;
+use maki_lua::test_support::InMemoryFs;
 
 const NOTE_PATH: &str = "note.md";
 const NOTE_BODY: &str = "hello-maki";
@@ -97,7 +98,7 @@ fn splash_host_boots_disk_free() {
         "precondition: TEST_STATE_DIR must not exist on disk"
     );
 
-    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     let start = Instant::now();
     let frame = loop {
         if let Some(frame) = handle.splash_frame(80, 20, 10.0, 1.0) {
@@ -114,5 +115,240 @@ fn splash_host_boots_disk_free() {
     assert!(
         !state.exists(),
         "the frame pull must not touch the real disk"
+    );
+}
+
+// ---- splashes picker lifecycle (in-memory state) ----
+
+const SELECTION_REL: &str = "splashes/selection.json";
+const SELECTION_STALE: &str = r#"{"name":"vortex"}"#;
+const SELECTION_MATRIX_JSON: &str = r#"{"name":"matrix"}"#;
+const SELECTION_INVALID: &[u8] = &[0xff, 0xfe, 0x00];
+const SELECTION_DEFAULT: &str = "default";
+const SELECTION_MATRIX: &str = "matrix";
+
+const WRAPPER_SOURCE: &str = r##"
+maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
+  local rows = {}
+  for i = 1, h do
+    rows[i] = { { glyphs = string.rep("w", w), style = "#00ff41" } }
+  end
+  return rows
+end)
+"##;
+
+const CONTRIBUTION_SOURCE: &str = r##"
+local M = {}
+function M.render(w, h, t, fade)
+  local rows = {}
+  for i = 1, h do
+    rows[i] = { { glyphs = string.rep("s", w), style = "#00ff41" } }
+  end
+  return rows
+end
+
+maki.api.register("splash", "vortex", {
+  label = "vortex",
+  description = "test splash",
+  activate = function()
+    return M.render
+  end,
+})
+"##;
+
+fn selection_path() -> std::path::PathBuf {
+    std::path::Path::new(maki_lua::test_support::TEST_STATE_DIR).join(SELECTION_REL)
+}
+
+fn selection_content(guard: &maki_lua::test_support::PluginHostGuard) -> Option<String> {
+    let path = selection_path();
+    guard
+        .backend()
+        .files()
+        .into_iter()
+        .find(|(p, _)| p.as_path() == path.as_path())
+        .map(|(_, bytes)| String::from_utf8(bytes).unwrap())
+}
+
+fn wait_for_selection(guard: &maki_lua::test_support::PluginHostGuard, needle: &str) -> String {
+    let deadline = Instant::now() + SPLASH_DEADLINE;
+    loop {
+        if let Some(content) = selection_content(guard)
+            && content.contains(needle)
+        {
+            return content;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "selection file never contained '{needle}'"
+        );
+        std::thread::sleep(SPLASH_BACKOFF);
+    }
+}
+
+fn pull_frame(handle: &maki_lua::EventHandle, needle: Option<&str>) -> maki_lua::SplashFrame {
+    let deadline = Instant::now() + SPLASH_DEADLINE;
+    loop {
+        if let Some(frame) = handle.splash_frame(80, 20, 10.0, 1.0) {
+            let all: String = frame.rows.iter().map(|r| r.glyphs.as_str()).collect();
+            if needle.is_none_or(|n| all.contains(n)) {
+                return frame;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "splash frame never matched {needle:?}"
+        );
+        std::thread::sleep(SPLASH_BACKOFF);
+    }
+}
+
+fn frame_text(frame: &maki_lua::SplashFrame) -> String {
+    frame.rows.iter().map(|r| r.glyphs.as_str()).collect()
+}
+
+#[test]
+fn splash_picker_repairs_unknown_selection() {
+    let state = std::path::Path::new(maki_lua::test_support::TEST_STATE_DIR);
+    assert!(
+        !state.exists(),
+        "precondition: TEST_STATE_DIR must not exist on disk"
+    );
+
+    let fs = Arc::new(InMemoryFs::new());
+    fs.seed(&selection_path(), SELECTION_STALE.as_bytes().to_vec());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
+        &["splashes", "splashes_default"],
+        Arc::clone(&fs),
+        None,
+    );
+
+    // The first frame rolls the stale selection back to the fallback and
+    // serves it, then the repair task rewrites the file.
+    let frame = pull_frame(&handle, Some("luna-maki"));
+    assert!(!frame.rows.is_empty(), "fallback frame has rows");
+    let content = wait_for_selection(&guard, SELECTION_DEFAULT);
+    assert!(content.contains("name"), "repaired file: {content}");
+    assert!(!state.exists(), "the repair must not touch the real disk");
+}
+
+#[test]
+fn splash_picker_repairs_malformed_selection() {
+    let fs = Arc::new(InMemoryFs::new());
+    // Non-UTF8: the load-time read throws and must be treated as invalid.
+    fs.seed(&selection_path(), SELECTION_INVALID.to_vec());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
+        &["splashes", "splashes_default"],
+        Arc::clone(&fs),
+        None,
+    );
+
+    let frame = pull_frame(&handle, Some("luna-maki"));
+    assert!(!frame.rows.is_empty());
+    let content = wait_for_selection(&guard, SELECTION_DEFAULT);
+    assert!(content.contains("name"), "repaired file: {content}");
+}
+
+#[test]
+fn splash_picker_default_runs_chain_below() {
+    // The user layer loads before the builtins, so its slot layer sits below
+    // the picker's: the picker must delegate the committed default to the
+    // chain, or the frame would show the starfield instead.
+    let fs = Arc::new(InMemoryFs::new());
+    let (handle, _guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
+        &["splashes", "splashes_default"],
+        fs,
+        Some(WRAPPER_SOURCE),
+    );
+
+    let frame = pull_frame(&handle, Some("www"));
+    assert!(
+        !frame_text(&frame).contains("luna-maki"),
+        "picker must not bypass the chain below it"
+    );
+}
+
+#[test]
+fn splash_picker_renders_user_contribution() {
+    let fs = Arc::new(InMemoryFs::new());
+    fs.seed(&selection_path(), SELECTION_STALE.as_bytes().to_vec());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
+        &["splashes", "splashes_default"],
+        Arc::clone(&fs),
+        Some(CONTRIBUTION_SOURCE),
+    );
+
+    let frame = pull_frame(&handle, Some("sss"));
+    assert!(
+        !frame_text(&frame).contains("luna-maki"),
+        "the contributed splash draws the screen"
+    );
+    assert!(
+        selection_content(&guard).unwrap().contains("vortex"),
+        "a valid contribution must not roll back"
+    );
+}
+
+#[test]
+fn splash_picker_command_persists_selection() {
+    let fs = Arc::new(InMemoryFs::new());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
+        &["splashes", "splashes_default"],
+        Arc::clone(&fs),
+        None,
+    );
+
+    handle.run_command(
+        Arc::from("splashes"),
+        Arc::from("/splash"),
+        "matrix".into(),
+        0,
+    );
+    let content = wait_for_selection(&guard, SELECTION_MATRIX);
+    assert!(content.contains("name"), "persisted file: {content}");
+
+    let frame = pull_frame(&handle, None);
+    assert!(!frame.rows.is_empty(), "committed splash serves frames");
+    assert!(
+        selection_content(&guard)
+            .unwrap()
+            .contains(SELECTION_MATRIX),
+        "selection must survive the first frame"
+    );
+}
+
+#[test]
+fn splash_picker_command_switches_to_default() {
+    let fs = Arc::new(InMemoryFs::new());
+    fs.seed(&selection_path(), SELECTION_MATRIX_JSON.as_bytes().to_vec());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
+        &["splashes", "splashes_default"],
+        Arc::clone(&fs),
+        None,
+    );
+
+    // Negative marker: the rain alphabet (A-Z, 0-9) and the corner version
+    // text cannot spell the starfield logo.
+    let frame = pull_frame(&handle, None);
+    assert!(
+        !frame_text(&frame).contains("luna-maki"),
+        "the committed matrix splash serves frames before the switch"
+    );
+
+    handle.run_command(
+        Arc::from("splashes"),
+        Arc::from("/splash"),
+        "default".into(),
+        0,
+    );
+
+    // The fallback path must serve the starfield through the chain below the
+    // picker; a failing delegation rolls the selection back to matrix.
+    let frame = pull_frame(&handle, Some("luna-maki"));
+    assert!(!frame.rows.is_empty(), "the default splash serves frames");
+    let content = wait_for_selection(&guard, SELECTION_DEFAULT);
+    assert!(
+        !content.contains(SELECTION_MATRIX),
+        "the switch must not roll the file back to matrix: {content}"
     );
 }

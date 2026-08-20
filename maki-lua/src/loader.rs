@@ -133,14 +133,15 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         name: "list",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/list"),
     },
+    // Bundled splashes: the default starfield plus the named picker entries.
     BundledPlugin {
-        name: "splash",
-        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/splash"),
+        name: "splashes_default",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/splashes_default"),
     },
-    // Gallery plugin and its bundled renderer modules.
+    // Splash picker: presents the `splash` registry as a switchable set.
     BundledPlugin {
-        name: "splash_gallery",
-        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/splash_gallery"),
+        name: "splashes",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/splashes"),
     },
 ];
 

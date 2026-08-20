@@ -1,11 +1,12 @@
--- Bundled splash-gallery skin, part of the maki distribution.
--- Require from init.lua with:   local skin = require("splash.metaballs")
--- The module returns M with M.render(w, h, t, fade) and does not activate itself.
+-- Bundled splash, part of the maki distribution.
+-- Require from init.lua with:   local splash = require("splash.aurora")
+-- The module returns M with M.description and M.render(w, h, t, fade) and does not activate itself.
 --
--- Metaballs splash. Software port of the WGSL "Metaballs" shader from
+-- Aurora splash. Software port of the WGSL "Aurora" shader from
 
 local RAMP = " .:-=+*#%@"
 local M = {}
+M.description = "Drifting northern lights over a dark gradient."
 
 local function theme_or(name, fallback)
   local c = maki.ui.theme_color(name)
@@ -110,16 +111,6 @@ local function flat_rows(w, h, st)
   return rows
 end
 
-local function smoothstep(e0, e1, x)
-  local u = (x - e0) / (e1 - e0)
-  if u < 0 then
-    u = 0
-  elseif u > 1 then
-    u = 1
-  end
-  return u * u * (3.0 - 2.0 * u)
-end
-
 local function shade_style(r, g, b, f)
   local function q(v)
     if v < 0 then
@@ -144,39 +135,64 @@ local function ramp_glyph(lum)
   return string.sub(RAMP, gi, gi)
 end
 
-local function fract(x)
-  return x - math.floor(x)
+local function h21(px, py)
+  local s = math.sin(px * 127.1 + py * 311.7) * 43758.5453
+  return s - math.floor(s)
 end
 
-local function ball(ux, uy, bx, by, k)
-  local dx = ux - bx
-  local dy = uy - by
-  return k / math.sqrt(dx * dx + dy * dy + 1e-4)
+-- Smooth value noise.
+function M.n2(px, py)
+  local ix = math.floor(px)
+  local iy = math.floor(py)
+  local fx = px - ix
+  local fy = py - iy
+  local ux = fx * fx * (3.0 - 2.0 * fx)
+  local uy = fy * fy * (3.0 - 2.0 * fy)
+  local a = h21(ix, iy)
+  local b = h21(ix + 1, iy)
+  local c = h21(ix, iy + 1)
+  local d = h21(ix + 1, iy + 1)
+  return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy
 end
 
--- Fragment shade for isotropic coords (nx, ny); returns r, g, b in [0, 1].
-function M.shade(nx, ny, t)
-  local v = 0.0
-  v = v + ball(nx, ny, math.sin(t * 0.7) * 0.7, math.cos(t * 0.9) * 0.7, 0.35)
-  v = v + ball(nx, ny, math.cos(t * 1.1) * 0.8, math.sin(t * 0.6) * 0.8, 0.30)
-  v = v + ball(nx, ny, math.sin(t * 0.5 + 2.0) * 0.5, math.cos(t * 0.8 + 1.0) * 0.5, 0.25)
-  v = v + ball(nx, ny, math.sin(t * 0.33 + 4.0) * 0.9, math.cos(t * 0.41 + 2.0) * 0.6, 0.22)
-  local edge = smoothstep(1.15, 1.25, v)
-  local core = smoothstep(1.25, 2.4, v)
-  local r = 0.03 + (0.1 - 0.03) * edge
-  local g = 0.02 + (0.4 - 0.02) * edge
-  local b = 0.06 + (0.9 - 0.06) * edge
-  r = r + (0.6 - r) * core
-  g = g + (0.9 - g) * core
-  b = b + (1.0 - b) * core
-  local glow = math.exp(-math.abs(v - 1.2) * 3.0) * 0.8
-  r = r + 0.3 * glow
-  g = g + 0.7 * glow
-  b = b + 1.0 * glow
-  local gx = math.abs(fract(nx * 8.0) - 0.5)
-  local gy = math.abs(fract(ny * 8.0) - 0.5)
-  local gridline = 0.02 * smoothstep(0.48, 0.5, gx > gy and gx or gy)
-  return r + gridline, g + gridline, b + gridline
+-- Per-column band parameters (center, spread, color, shimmer).
+function M.column_bands(ux, t)
+  local tt = t * 0.5
+  local yc = {}
+  local spread = {}
+  local cr = {}
+  local cg = {}
+  local cb = {}
+  local shimmer = {}
+  for i = 0, 4 do
+    local fi = tonumber(i)
+    local sx = ux * 3.0 + fi * 1.7
+    local wave = M.n2(sx * 1.2 + tt * 0.7, fi * 3.1) * 0.5 + M.n2(sx * 0.4 - tt * 0.3, fi * 7.7) * 0.5
+    yc[i + 1] = 0.2 + wave * 0.45 + fi * 0.07
+    spread[i + 1] = 10.0 + fi * 6.0
+    local hue = 0.45 + 0.25 * math.sin(fi * 1.3 + tt * 0.2)
+    cr[i + 1] = hue ^ 2 * 0.9
+    cg[i + 1] = 0.9
+    cb[i + 1] = (1.0 - hue) ^ 1.5
+    shimmer[i + 1] = 0.25 + 0.25 * M.n2(sx * 5.0, tt)
+  end
+  return { yc = yc, spread = spread, cr = cr, cg = cg, cb = cb, shimmer = shimmer }
+end
+
+-- Fragment shade for normalized screen coords (ux, uy in [0, 1], y down).
+function M.shade(ux, uy, t, cols)
+  if not cols then
+    cols = M.column_bands(ux, t)
+  end
+  local r, g, b = 0.0, 0.0, 0.0
+  for i = 1, 5 do
+    local band = math.exp(-math.abs(uy - cols.yc[i]) * cols.spread[i]) * cols.shimmer[i]
+    r = r + cols.cr[i] * band
+    g = g + cols.cg[i] * band
+    b = b + cols.cb[i] * band
+  end
+  local sky = 1.0 - uy
+  return r + 0.03 * sky, g + 0.03 * sky, b + 0.07 * sky
 end
 
 function M.render(w, h, t, fade)
@@ -187,13 +203,12 @@ function M.render(w, h, t, fade)
     return flat_rows(w, h, color(BG_HEX))
   end
   local grid = new_grid()
-  for y = 1, h do
-    local row = grid[y]
-    local ny = (2 * (y - 0.5) - h) / h
-    for x = 1, w do
-      local nx = ((x - 0.5) - w / 2) / h
-      local r, g, b = M.shade(nx, ny, t)
-      row[x] = {
+  for x = 1, w do
+    local ux = (x - 0.5) / w
+    local cols = M.column_bands(ux, t)
+    for y = 1, h do
+      local r, g, b = M.shade(ux, (y - 0.5) / h, t, cols)
+      grid[y][x] = {
         glyph = ramp_glyph(0.2126 * r * f + 0.7152 * g * f + 0.0722 * b * f),
         style = shade_style(r, g, b, f),
       }

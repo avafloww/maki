@@ -1,13 +1,12 @@
--- Bundled splash-gallery skin, part of the maki distribution.
--- Require from init.lua with:   local skin = require("splash.kaleidoscope")
--- The module returns M with M.render(w, h, t, fade) and does not activate itself.
+-- Bundled splash, part of the maki distribution.
+-- Require from init.lua with:   local splash = require("splash.metaballs")
+-- The module returns M with M.description and M.render(w, h, t, fade) and does not activate itself.
 --
--- Kaleidoscope splash. Software port of the WGSL "Kaleidoscope" shader from
+-- Metaballs splash. Software port of the WGSL "Metaballs" shader from
 
-local TAU = 2.0 * math.pi
-local SEGMENTS = 10.0
 local RAMP = " .:-=+*#%@"
 local M = {}
+M.description = "Glowing metaballs that merge and flow together."
 
 local function theme_or(name, fallback)
   local c = maki.ui.theme_color(name)
@@ -112,21 +111,6 @@ local function flat_rows(w, h, st)
   return rows
 end
 
-local function atan2(y, x)
-  if x > 0 then
-    return math.atan(y / x)
-  elseif x < 0 and y >= 0 then
-    return math.atan(y / x) + math.pi
-  elseif x < 0 then
-    return math.atan(y / x) - math.pi
-  elseif y > 0 then
-    return math.pi / 2
-  elseif y < 0 then
-    return -math.pi / 2
-  end
-  return 0
-end
-
 local function smoothstep(e0, e1, x)
   local u = (x - e0) / (e1 - e0)
   if u < 0 then
@@ -137,7 +121,6 @@ local function smoothstep(e0, e1, x)
   return u * u * (3.0 - 2.0 * u)
 end
 
--- 5-bit-per-channel quantized style, keeps the style cache bounded.
 local function shade_style(r, g, b, f)
   local function q(v)
     if v < 0 then
@@ -162,36 +145,39 @@ local function ramp_glyph(lum)
   return string.sub(RAMP, gi, gi)
 end
 
--- Fragment shade: returns r, g, b in [0, 1] for isotropic coords (nx, ny).
+local function fract(x)
+  return x - math.floor(x)
+end
+
+local function ball(ux, uy, bx, by, k)
+  local dx = ux - bx
+  local dy = uy - by
+  return k / math.sqrt(dx * dx + dy * dy + 1e-4)
+end
+
+-- Fragment shade for isotropic coords (nx, ny); returns r, g, b in [0, 1].
 function M.shade(nx, ny, t)
-  local tt = t * 0.25
-  local a = atan2(ny, nx)
-  local r = math.sqrt(nx * nx + ny * ny)
-  local seg = TAU / SEGMENTS
-  local sa = math.abs((a % (2.0 * seg)) - seg) + tt * 0.4
-  local ox = math.cos(sa) * r - (0.3 + 0.2 * math.sin(t * 0.3))
-  local oy = math.sin(sa) * r
-  local qx, qy = ox * 3.0, oy * 3.0
-  local ar, ag, ab = 0.0, 0.0, 0.0
-  for i = 0, 4 do
-    local d = qx * qx + qy * qy
-    if d < 0.15 then
-      d = 0.15
-    end
-    qx = math.abs(qx) / d
-    qy = math.abs(qy) / d
-    qx = qx * 1.9 - (0.9 + 0.3 * math.sin(tt + i))
-    qy = qy * 1.9 - 0.7
-    local s = qx * 0.4 + qy * 0.8 + t + i
-    ar = (ar + 0.5 + 0.5 * math.cos(s + 0.0)) * 0.85
-    ag = (ag + 0.5 + 0.5 * math.cos(s + 2.1)) * 0.85
-    ab = (ab + 0.5 + 0.5 * math.cos(s + 4.3)) * 0.85
-  end
-  ar = ar / 5.0
-  ag = ag / 5.0
-  ab = ab / 5.0
-  local edge = smoothstep(1.6, 0.2, r * 0.5)
-  return ar ^ 1.6 * edge, ag ^ 1.6 * edge, ab ^ 1.6 * edge
+  local v = 0.0
+  v = v + ball(nx, ny, math.sin(t * 0.7) * 0.7, math.cos(t * 0.9) * 0.7, 0.35)
+  v = v + ball(nx, ny, math.cos(t * 1.1) * 0.8, math.sin(t * 0.6) * 0.8, 0.30)
+  v = v + ball(nx, ny, math.sin(t * 0.5 + 2.0) * 0.5, math.cos(t * 0.8 + 1.0) * 0.5, 0.25)
+  v = v + ball(nx, ny, math.sin(t * 0.33 + 4.0) * 0.9, math.cos(t * 0.41 + 2.0) * 0.6, 0.22)
+  local edge = smoothstep(1.15, 1.25, v)
+  local core = smoothstep(1.25, 2.4, v)
+  local r = 0.03 + (0.1 - 0.03) * edge
+  local g = 0.02 + (0.4 - 0.02) * edge
+  local b = 0.06 + (0.9 - 0.06) * edge
+  r = r + (0.6 - r) * core
+  g = g + (0.9 - g) * core
+  b = b + (1.0 - b) * core
+  local glow = math.exp(-math.abs(v - 1.2) * 3.0) * 0.8
+  r = r + 0.3 * glow
+  g = g + 0.7 * glow
+  b = b + 1.0 * glow
+  local gx = math.abs(fract(nx * 8.0) - 0.5)
+  local gy = math.abs(fract(ny * 8.0) - 0.5)
+  local gridline = 0.02 * smoothstep(0.48, 0.5, gx > gy and gx or gy)
+  return r + gridline, g + gridline, b + gridline
 end
 
 function M.render(w, h, t, fade)

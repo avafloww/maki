@@ -31,10 +31,12 @@ use super::{
 ///   match patterns with plain globset: slash-less patterns agree with
 ///   gitignore (match at any depth), but slash-containing patterns are not
 ///   anchored to the search root and negation patterns are unsupported.
+#[derive(Default)]
 pub struct InMemoryFs {
     inner: RwLock<Inner>,
 }
 
+#[derive(Default)]
 struct Inner {
     entries: BTreeMap<PathBuf, Entry>,
     seq: u64,
@@ -67,6 +69,16 @@ impl InMemoryFs {
                 Entry::Dir => None,
             })
             .collect()
+    }
+
+    /// Synchronous test convenience: create the parent dirs and write the
+    /// file in one call.
+    pub fn seed(&self, path: &Path, content: Vec<u8>) {
+        let mut dir = path.to_path_buf();
+        if dir.pop() && !is_fs_root(&dir) {
+            smol::block_on(self.mkdir(dir, true)).unwrap();
+        }
+        smol::block_on(self.write(path.to_path_buf(), content)).unwrap();
     }
 
     fn bump_seq(inner: &mut Inner) -> u64 {

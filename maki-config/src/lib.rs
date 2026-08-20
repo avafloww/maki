@@ -72,8 +72,8 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "read",
     "sessions",
     "skill",
-    "splash",
-    "splash_gallery",
+    "splashes",
+    "splashes_default",
     "task",
     "thinking",
     "todo_write",
@@ -2971,8 +2971,12 @@ mod tests {
     #[test]
     fn default_builtins_include_splash() {
         assert!(
-            DEFAULT_BUILTINS.contains(&"splash"),
-            "the home-screen splash plugin must be enabled by default"
+            DEFAULT_BUILTINS.contains(&"splashes"),
+            "the splash picker must be enabled by default"
+        );
+        assert!(
+            DEFAULT_BUILTINS.contains(&"splashes_default"),
+            "the home-screen splash renderer must be enabled by default"
         );
     }
 

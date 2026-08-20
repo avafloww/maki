@@ -1,20 +1,20 @@
 #!/usr/bin/env lua5.1
--- Contract + perf smoke test for maki splash skins, no maki build needed.
+-- Contract + perf smoke test for maki splashes, no maki build needed.
 --
 -- Usage:
 --   lua5.1 smoke_test.lua [--dir DIR] [--sizes WxH[,WxH...]] name [name...]
 --
--- Each name is a skin module name (kaleidoscope) resolved in DIR
+-- Each name is a splash module name (kaleidoscope) resolved in DIR
 -- (default ~/.config/maki/lua), or a path to a .lua file.
 --
--- Checks per skin, per size, per time step:
+-- Checks per splash, per size, per time step:
 --   * render returns exactly h rows
 --   * each row's seg.glyphs concatenate to exactly w terminal cells
 --     (UTF-8 aware: multi-byte glyphs count once)
 --   * the frame is not entirely blank
 -- Then prints ms/frame at 80x24 (lua5.1, no jit: maki's luau-jit is ~5x
 -- faster, so treat this as a pessimistic bound; 2-3 ms is the norm for
--- full-cell skins, up to ~20 ms is tolerable).
+-- full-cell splashes, up to ~20 ms is tolerable).
 
 local DIR = os.getenv("HOME") .. "/.config/maki/lua"
 local SIZES = { { 80, 24 }, { 40, 12 }, { 120, 40 } }
@@ -80,7 +80,7 @@ local function check_rows(name, rows, w, h, t)
   assert(any, string.format("%s: frame entirely blank (t=%s)", name, t))
 end
 
-local function load_skin(name)
+local function load_splash(name)
   if name:match("%.lua$") then
     local chunk = assert(loadfile(name))
     return chunk()
@@ -90,7 +90,7 @@ end
 
 local mods = {}
 for _, name in ipairs(names) do
-  local m = load_skin(name)
+  local m = load_splash(name)
   assert(type(m) == "table" and type(m.render) == "function", name .. ": no M.render")
   mods[name] = m
   for _, s in ipairs(SIZES) do

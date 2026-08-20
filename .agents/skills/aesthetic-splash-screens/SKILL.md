@@ -1,24 +1,24 @@
 ---
 name: aesthetic-splash-screens
-description: Design and build visually striking maki splash screens (the animated home screen behind the prompt) as self-contained Lua skins. Covers the splash.render slot contract, the shared skin template, glyph-ramp shading, WGSL/GLSL shader porting, state management, perf budgets, and smoke testing without building maki. Use whenever someone wants a new splash, wants to polish an existing splash, mentions the maki home screen animation, asks to port a shader to a splash, wants to promote/bundle a skin into the maki distribution (the splash gallery), or is exploring terminal eye-candy for maki, even if they don't say the word "splash".
+description: Design and build visually striking maki splash screens (the animated home screen behind the prompt) as self-contained Lua splashes. Covers the splash.render slot contract, the shared splash template, glyph-ramp shading, WGSL/GLSL shader porting, state management, perf budgets, and smoke testing without building maki. Use whenever someone wants a new splash, wants to polish an existing splash, mentions the maki home screen animation, asks to port a shader to a splash, wants to promote/bundle a splash into the maki distribution (the bundled splashes), or is exploring terminal eye-candy for maki, even if they don't say the word "splash".
 ---
 
 # Aesthetic splash screens for maki
 
-Maki's home screen is a pull-driven canvas of terminal cells. A splash skin is
+Maki's home screen is a pull-driven canvas of terminal cells. A splash is
 a single Lua file that, given `(w, h, t, fade)`, returns `h` rows of styled
 glyph segments covering exactly `w` cells each. This skill is about making
 those frames beautiful, not just correct.
 
 ## What makes a splash look good
 
-These come from building 17 skins and watching what worked:
+These come from building 17 splashes and watching what worked:
 
-- **One clear idea per skin.** A spinning pentagram, rain with ripples, a Doom
-  fire. The moment a skin has two ideas it reads as noise. Pick one effect and
+- **One clear idea per splash.** A spinning pentagram, rain with ripples, a Doom
+  fire. The moment a splash has two ideas it reads as noise. Pick one effect and
   spend the whole budget on it.
 - **Restraint.** Most cells should be background most of the time. Negative
-  space is what makes the bright parts read. Full-field skins (plasma, fire,
+  space is what makes the bright parts read. Full-field splashes (plasma, fire,
   caustics) are the exception, and they earn it by being smooth gradients, not
   clutter.
 - **Motion with memory.** Trails, afterimages, and fades (`* -> + -> : -> .`)
@@ -37,7 +37,7 @@ These come from building 17 skins and watching what worked:
 - **Calm timing.** Splash effects run at 0.1-0.6 Hz in feel. If it pulses
   faster than ~2 Hz it competes with the user's attention instead of
   decorating the screen.
-- **A bottom-center label and top-right version** give every skin the same
+- **A bottom-center label and top-right version** give every splash the same
   furniture, so the cycle feels like one gallery rather than 17 apps.
 
 ## The contract (short version)
@@ -64,7 +64,7 @@ end)
   `maki.api.create_autocmd("SplashShown", { callback = ... })`. See
   `fire.lua`/`life.lua` in the live config for the pattern.
 - Every file also returns `M` with `M.render(w, h, t, fade)`, so a cycler in
-  `init.lua` can call skins directly. Keep the `set_slot` call too; the
+  `init.lua` can call splashes directly. Keep the `set_slot` call too; the
   cycler's later `set_slot` wins.
 
 ## Workflow
@@ -72,7 +72,7 @@ end)
 1. **Copy the template.** `references/template.lua` has all the boilerplate.
    It ships every common helper (atan2, smoothstep, hash01, ...); delete the
    ones your effect doesn't use — dead helpers in a copied file mislead the
-   next reader about what the skin actually does.
+   next reader about what the splash actually does.
 
    Details:
    theme colors, style cache, grid builder, segment coalescing, tiny-area
@@ -81,7 +81,7 @@ end)
    loop. Do not rewrite the boilerplate; it is the way it is because of hard
    lessons (style identity, UTF-8, fade handling).
 2. **Pick the idea and the genre** (see the sparks list below). Decide early
-   whether the skin is *sparse* (glyphs on background, most skins) or *full*
+   whether the splash is *sparse* (glyphs on background, most splashes) or *full*
    (every cell shaded, shader ports).
 3. **Smoke test after every change** with the bundled script (no maki build
    needed; it runs under stock lua5.1 with a stubbed `maki`):
@@ -105,33 +105,30 @@ end)
    pacing are only judgeable live. Iterate on the one effect until it's
    unmistakable.
 
-## Shipping a skin in the distribution
+## Shipping a splash in the distribution
 
-Once a skin earns its place, promote it from config to the bundled gallery so
-every user gets it via `require("splash.<name>")`. The gallery is
-test-covered and its tests run in `just ci`, which is also why promotion has
-a higher bar than the config playground.
+Once a splash earns its place, promote it from config to the bundled splashes so
+every user gets it via `require("splash.<name>")` and sees it in the
+`/splash` picker. Promotion ships to every install, so it has a higher bar
+than the config playground.
 
-Checklist (using `myskin` as the example):
+Checklist (using `mysplash` as the example):
 
-1. Copy the file to `plugins/splash_gallery/splash/myskin.lua`. Adapt the
-   header to the gallery banner (copy an existing skin's): activation line,
-   self-activation note, `M.render` mention. The file must both self-activate
-   on require AND return `M` with `M.render` — the gallery's module contract.
-2. **No Rust change needed for the skin itself.** `splash_gallery` is already
-   a `BundledPlugin` entry in `maki-lua/src/loader.rs`; any `.lua` dropped
-   under its `splash/` subdir becomes `require("splash.<name>")` on the next
-   build. The namespace is reserved (`splash.*` resolves bundled-first), so
-   never give a config skin a `splash.` name.
-3. Add the skin everywhere the gallery is enumerated:
-   - `maki-lua/tests/splash_gallery.rs`: `SKINS`, both `test_case` attribute
-     lists, and `min_filled` if the skin is sparse.
-   - `plugins/splash_gallery/README.md` table.
-   - `site/docs/content/splash/_index.md` gallery table (+ skin count).
+1. Copy the file to `plugins/splashes_default/splash/mysplash.lua`. Strip the
+   `set_slot` call from the config version and add `M.description` (one line
+   for the picker blurb); the module returns `M` with `M.description` and
+   `M.render` and does not activate itself. Copy an existing splash's header.
+2. Add `"mysplash"` to the `SPLASHES` list in `plugins/splashes_default/init.lua`.
+   **No Rust change needed for the splash itself.** `splashes_default` is
+   already a `BundledPlugin` entry in `maki-lua/src/loader.rs`; any `.lua`
+   dropped under its `splash/` subdir becomes `require("splash.<name>")` on
+   the next build. The namespace is reserved (`splash.*` resolves
+   bundled-first), so never give a config splash a `splash.` name.
+3. Add the splash to the table in `site/docs/content/splash/_index.md`.
 4. Verify in order:
-   - `lua5.1 .agents/skills/aesthetic-splash-screens/scripts/smoke_test.lua plugins/splash_gallery/splash/myskin.lua`
-   - `cargo test -p maki-lua --test splash_gallery` (runs the real VM:
-     require through the bundled path, frame contract, animation, density).
+   - `lua5.1 .agents/skills/aesthetic-splash-screens/scripts/smoke_test.lua plugins/splashes_default/splash/mysplash.lua`
+   - `cargo test -p maki-lua --test plugin_host` (runs the real VM: boots the
+     bundled renderers, checks the slot default, overrides, and error paths).
    `just ci` covers all of it on a full run.
 
 Build-env gotchas (homura VM): export `OPENSSL_NO_VENDOR=1` (system
@@ -139,21 +136,22 @@ libssl-dev exists; the vendored build fails), and if `include_dir!` claims a
 file that exists does not, the 9p dentry cache is stale —
 `sync && echo 3 > /proc/sys/vm/drop_caches` and retry.
 
-## Making gallery tests non-flaky
+## Making frame tests non-flaky
 
-The gallery tests assert things about frames, and stateful or RNG-driven
-skins make naive thresholds flaky. Rules learned the expensive way:
+Frame-asserting tests (the splash tests in `maki-lua/tests/plugin_host.rs`)
+assert things about frames, and stateful or RNG-driven splashes make naive
+thresholds flaky. Rules learned the expensive way:
 
-- **Drive warm-up time.** A stateful skin starts far from steady state
+- **Drive warm-up time.** A stateful splash starts far from steady state
   (matrix heads spawn up to 40 rows above the screen). Pull frames across
-  many simulated seconds before asserting anything; pure skins don't care,
-  so drive all skins uniformly.
+  many simulated seconds before asserting anything; pure splashes don't care,
+  so drive all splashes uniformly.
 - **Sample several frames.** Rain/CA density oscillates as drops respawn.
   Assert on the max of a handful of frames, not one arbitrary instant.
 - **Set thresholds from the expectation, not from what passed once.**
   Compute the steady-state mean and its sigma (binomial over columns, or
   just reason about it), put the floor several sigma below the mean — and
-  confirm it stays far above what a *broken* skin would produce (a skin
+  confirm it stays far above what a *broken* splash would produce (a splash
   that draws only its label and version shows ~15 cells, so any floor above
   that distinguishes working from dead). A threshold set at 1.8 sigma from
   the mean failed CI on the second machine that ran it.
@@ -174,13 +172,13 @@ skins make naive thresholds flaky. Rules learned the expensive way:
 - **Drift instead of jumps.** Parameters that morph over time (lissajous
   frequency ratio, wavebanner phase) should move with slow sines of `t`,
   period >= ~8 s, so the viewer sees evolution, not flicker.
-- **Performance budget.** Established full-cell skins run 2-3 ms/frame at
+- **Performance budget.** Established full-cell splashes run 2-3 ms/frame at
   80x24 on stock lua5.1 (slower than maki's luau-jit by ~5x). Up to ~20 ms on
   lua5.1 is acceptable. If a shader port is too slow, hoist terms that depend
   on only one axis into per-column or per-row precomputes (aurora went from
   33 ms to 9 ms this way), and memoize hashes.
 - **Small terminal guard.** Below the guard size return `flat_rows` (solid
-  background). Every existing skin guards; follow their thresholds.
+  background). Every existing splash guards; follow their thresholds.
 
 ## Porting shaders (WGSL / GLSL / shadertoy)
 
@@ -199,7 +197,7 @@ Genres already shipped, for contrast — orbital geometry (pentagram,
 lissajous), weather (rain, comets), cellular (fire, life), full-field shader
 ports (plasma, metaballs), typography (wavebanner, printer), perspective
 (tunnel, warp), nature (flowers). Six of the best are promoted to the
-bundled gallery (`plugins/splash_gallery/`): kaleidoscope, voronoi,
+bundled splashes (`plugins/splashes_default/splash/`): kaleidoscope, voronoi,
 caustics, metaballs, aurora (shader ports) and matrix (falling-code rain).
 Treat the gallery sources as canonical worked examples — they are the
 current bar for what ships.
@@ -214,7 +212,7 @@ Directions still open, roughly from safe to spicy:
   viewer, height -> glyph, distance fog.
 - **Clock/calendar art**: the time rendered as geometry (orbital clock,
   binary tree of seconds).
-- **CRT/glitch**: take any existing skin and add scanline dimming + rare
+- **CRT/glitch**: take any existing splash and add scanline dimming + rare
   horizontal slice offsets on a slow random schedule.
 
 Whatever you pick: one idea, mostly background, memory in the motion, theme in

@@ -5515,7 +5515,7 @@ fn bell_on_ask_predicate(needs_input: bool, ask: bool) {
 
 #[test]
 fn test_idle_splash_pulls_lua_frame() {
-    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     let dir = StateDir::from_path(env::temp_dir());
     let writer = Arc::new(test_writer(dir.clone()));
     let mut app = build_app_with_handle(dir, writer, handle);
@@ -5552,7 +5552,7 @@ fn slow_splash_renderer_does_not_block_tick_or_input() {
     const RENDER_SECS: f64 = 0.3;
     const MAX_TICK: Duration = Duration::from_millis(50);
 
-    let (handle, guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     guard
         .host()
         .load_source(
@@ -5620,7 +5620,7 @@ fn test_splash_survives_reset_to_empty_session() {
     // chat with a fresh splash clock and `splash_shown: false`. The reported
     // bug blanked the splash ~1s later; hold it up past the 1.6s entry fade
     // and fail the moment a frame goes missing.
-    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     let dir = StateDir::from_path(env::temp_dir());
     let writer = Arc::new(test_writer(dir.clone()));
     let mut app = build_app_with_handle(dir, writer, handle.clone());
@@ -5722,7 +5722,7 @@ fn test_splash_off_settles_idle() {
 
 #[test]
 fn test_splash_still_repulls_once_on_version_change() {
-    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     let dir = StateDir::from_path(env::temp_dir());
     let writer = Arc::new(test_writer(dir.clone()));
     let ui = UiConfig {

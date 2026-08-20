@@ -648,7 +648,7 @@ unloaded or reloaded.
 
 **Parameters:**
 
-- `{name}` (`string`) Registry name, e.g. `"splash.gallery"`.
+- `{name}` (`string`) Registry name, e.g. `"splash"`.
 - `{key}` (`string`) Stable contribution identifier.
 - `{value}` (`any`) Value exposed to registry consumers; tables may contain functions.
 

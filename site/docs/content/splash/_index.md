@@ -7,13 +7,13 @@ group = "Guides"
 
 # Home-screen splash
 
-When maki starts with no conversation, it shows the home screen: an animated starfield, the logo, a tagline, a tip, the help line, and the version in the top-right corner. All of it is drawn by a Lua plugin (`plugins/splash/init.lua`, bundled and enabled by default), so you can replace or tweak any of it from `init.lua` with no Rust rebuild and no new config.
+When maki starts with no conversation, it shows the home screen: an animated starfield, the logo, a tagline, a tip, the help line, and the version in the top-right corner. All of it is drawn by the bundled `splashes_default` plugin (`plugins/splashes_default/splash/default.lua`, enabled by default), so you can replace or tweak any of it from your `init.lua` with no Rust rebuild and no new config.
 
 Rust keeps the operationally sensitive pieces a plugin should not own: the frame clock, the repaint cadence, the entry-fade value, and the version/update check. The plugin answers a per-frame question with the pixels for the whole screen.
 
 ## The `splash.render` slot
 
-Every time the splash is allowed to animate, the UI pulls a frame from the slot `splash.render` and blits it. The bundled `splash` plugin owns the slot and renders the default screen. Your plugin can wrap it with `maki.api.set_slot("splash.render", ...)`.
+Every time the splash is allowed to animate, the UI pulls a frame from the slot `splash.render` and blits it. The bundled `splashes_default` plugin owns the slot and renders the default screen. Your plugin can wrap it with `maki.api.set_slot("splash.render", ...)`.
 
 ```lua
 maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
@@ -56,11 +56,18 @@ local v = maki.version()
 
 The default plugin draws the top-right version text and, when an update exists, appends ` run maki update to get v<latest>`. It queries `maki.version()` inside `splash.render`, so the version UI is fully plugin-owned.
 
-## Bundled gallery
+## Bundled splashes
 
-The default `splash_gallery` plugin provides six ready-made skins under the
-`splash.*` namespace. Use `/splash` to preview and commit a choice, or
-`/splash <name>` for direct selection. `/splash default` resets the preference.
+The `splashes` plugin is the picker: it presents every splash registered in
+the `splash` contribution registry as a switchable option, owns one stable
+`splash.render` layer, and changes which registered renderer draws. The
+bundled `splashes_default` plugin registers the default starfield under
+`default` plus six ready-made splashes under the `splash.*` namespace. Use
+`/splash` to preview and commit a choice, or `/splash <name>` for direct
+selection. `/splash default` selects the standard starfield. Selecting
+`default` draws the slot chain below the picker, so a user
+`set_slot("splash.render", ...)` layer still applies to the starfield; a
+named splash draws directly from the registry.
 
 ```lua
 local kaleidoscope = require("splash.kaleidoscope")
@@ -76,36 +83,39 @@ local rows = kaleidoscope.render(w, h, t, fade)
 | `splash.aurora` | northern-light bands drifting over a night gradient |
 | `splash.matrix` | green falling-code rain, resets on `SplashShown` |
 
-Each module returns `M` with `M.render(w, h, t, fade)` but does not activate itself. The default renderer remains owned by the standalone `splash` plugin. The gallery delegates `/splash default` to the previous `splash.render` slot instead of bundling a copy. The gallery owns one stable `splash.render` layer and changes which module renderer that layer calls. A custom layer can also rotate through the modules:
+Each module returns `M` with `M.description` and `M.render(w, h, t, fade)`
+but does not activate itself; `splashes_default` wires every module into the
+registry, and the picker's slot layer calls the registered renderer. A
+custom layer can also rotate through the modules:
 
 ```lua
-local skins = {
+local splashes = {
   require("splash.kaleidoscope"),
   require("splash.aurora"),
 }
 maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
-  local skin = skins[(math.floor(t / 3) % #skins) + 1]
-  return skin.render(w, h, t, fade)
+  local splash = splashes[(math.floor(t / 3) % #splashes) + 1]
+  return splash.render(w, h, t, fade)
 end)
 ```
 
-Bundled modules resolve before files in the config `lua/` dir, so personal skins must use plain names such as `require("myskin")` outside the `splash.*` namespace. The gallery sources live in `plugins/splash_gallery/` in the repository and follow the same single-file pattern as the custom skins below.
+Bundled modules resolve before files in the config `lua/` dir, so personal splashes must use plain names such as `require("mysplash")` outside the `splash.*` namespace. The bundled splashes live in `plugins/splashes_default/splash/` in the repository and follow the same single-file pattern as the custom splashes below.
 
-Third-party plugins can add gallery entries with `maki.api.register`. The `activate` callback returns a renderer. Contributions are removed automatically when their plugin unloads. The gallery re-resolves active and previewed contributions after unload or reload, so it does not retain a function from the old plugin instance.
+Third-party plugins can add entries to the same registry with `maki.api.register`. The `activate` callback returns a renderer. Contributions are removed automatically when their plugin unloads. The picker re-resolves active and previewed contributions after unload or reload, so it does not retain a function from the old plugin instance.
 
 ```lua
-local myskin = require("myskin")
+local mysplash = require("mysplash")
 
-maki.api.register("splash.gallery", "myskin", {
-  label = "My skin",
+maki.api.register("splash", "mysplash", {
+  label = "My splash",
   description = "A short description",
   activate = function()
-    return myskin.render
+    return mysplash.render
   end,
 })
 ```
 
-The gallery validates a selection before it persists the selection. If an active renderer fails later, the gallery switches to the previous renderer and repairs the persisted selection asynchronously. Invalid or unavailable persisted entries fall back to the standalone default.
+The picker validates a selection before it persists the selection. If an active renderer fails later, the picker switches to the previous renderer and repairs the persisted selection asynchronously. Invalid or unavailable persisted entries fall back to the `default` splash.
 
 ## Lifecycle events
 
@@ -204,4 +214,4 @@ end)
 Two notes on writing overrides:
 
 - The renderer must be pure and pull-driven. It runs on the Lua thread while the UI waits for the frame, so do not call blocking maki API from inside it (for example an `open_win` that waits on the UI would deadlock). The default and the example above only read `maki.version()` and theme colors.
-- A full replace only works while the bundled `splash` plugin stays enabled, so `splash.render` keeps its default. Wrapping with `prev(...)` lets a layer tweak the default instead of replacing it.
+- A full replace only works while the bundled `splashes_default` plugin stays enabled, so `splash.render` keeps its default. Wrapping with `prev(...)` lets a layer tweak the default instead of replacing it.

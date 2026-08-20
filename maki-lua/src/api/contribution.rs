@@ -54,7 +54,7 @@ impl ContributionStore {
 /// existing key. Contributions are removed automatically when their plugin is
 /// unloaded or reloaded.
 ///
-/// @param name string Registry name, e.g. `"splash.gallery"`.
+/// @param name string Registry name, e.g. `"splash"`.
 /// @param key string Stable contribution identifier.
 /// @param value any Value exposed to registry consumers; tables may contain functions.
 /// @return

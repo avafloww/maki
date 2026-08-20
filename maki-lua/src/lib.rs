@@ -194,6 +194,8 @@ pub mod test_support {
     /// Never created on the real disk; hosts run on the in-memory backend.
     pub const TEST_STATE_DIR: &str = "/maki-test-state";
 
+    pub use crate::api::fs::InMemoryFs;
+
     /// Boots a real `PluginHost` (background Lua thread) pre-loading the given
     /// builtins on an in-memory FS backend with a synthetic state dir, so the
     /// whole host runs disk-free. Returns a live `EventHandle` plus a guard
@@ -201,19 +203,37 @@ pub mod test_support {
     /// instead of the disconnected/probed handles so end-to-end Lua behavior
     /// (e.g. pulling a `splash.render` frame) can be exercised.
     pub fn spawn_host_for_tests(plugins: &[&str]) -> (crate::EventHandle, PluginHostGuard) {
+        spawn_host_with_fs_for_tests(
+            plugins,
+            std::sync::Arc::new(crate::api::fs::InMemoryFs::new()),
+            None,
+        )
+    }
+
+    /// Same as [`spawn_host_for_tests`], but on a caller-provided backend so
+    /// tests can pre-seed state files, with `pre_init` loaded before the
+    /// builtins — mirroring the real boot order where user `init.lua` runs
+    /// first and its `set_slot` layers sit below the builtins'.
+    pub fn spawn_host_with_fs_for_tests(
+        plugins: &[&str],
+        fs: std::sync::Arc<crate::api::fs::InMemoryFs>,
+        pre_init: Option<&str>,
+    ) -> (crate::EventHandle, PluginHostGuard) {
         use maki_config::PluginsConfig;
         use std::collections::HashMap;
         use std::sync::Arc;
 
-        let backend = Arc::new(crate::api::fs::InMemoryFs::new());
         let registry = Arc::new(maki_agent::tools::ToolRegistry::new());
-        let fs: std::sync::Arc<dyn crate::api::fs::FsBackend> = Arc::clone(&backend) as _;
+        let backend: std::sync::Arc<dyn crate::api::fs::FsBackend> = Arc::clone(&fs) as _;
         let mut host = crate::PluginHost::with_fs_for_tests(
             registry,
-            fs,
+            backend,
             std::path::PathBuf::from(TEST_STATE_DIR),
         )
         .unwrap();
+        if let Some(source) = pre_init {
+            host.load_source("user_init", source).unwrap();
+        }
         let config = PluginsConfig {
             enabled: true,
             names: plugins.iter().map(|s| s.to_string()).collect(),
@@ -221,7 +241,7 @@ pub mod test_support {
         };
         host.load_builtins(&config).unwrap();
         let handle = host.event_handle();
-        (handle, PluginHostGuard { host, backend })
+        (handle, PluginHostGuard { host, backend: fs })
     }
 
     /// Keeps a booted [`PluginHost`] alive (its `Drop` joins the Lua thread)

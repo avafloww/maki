@@ -451,7 +451,7 @@ mod tests {
 
         let golden = cells_map(include_str!("splash_golden.txt"));
         assert!(!golden.is_empty(), "golden fixture missing");
-        let (handle, _guard) = spawn_host_for_tests(&["splash"]);
+        let (handle, _guard) = spawn_host_for_tests(&["splashes_default"]);
         handle.set_version(update::CURRENT, None);
 
         // Back off between pulls so the host's render queue (which every

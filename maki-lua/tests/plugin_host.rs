@@ -4544,7 +4544,7 @@ mod read_tool_required_params {
     }
 }
 
-// ---- splash plugin (home-screen) ----
+// ---- splashes_default plugin (home-screen) ----
 
 fn wait_for_splash_text(handle: &maki_lua::EventHandle, needle: &str) -> maki_lua::SplashFrame {
     // Each timed-out pull leaves a render queued on the host, so a tight loop
@@ -4578,7 +4578,7 @@ fn frame_has_text(frame: &maki_lua::SplashFrame, needle: &str) -> bool {
 
 #[test]
 fn test_splash_host_boots_and_serves_frames() {
-    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     let frame = wait_for_splash_text(&handle, "luna-maki");
     assert_eq!(frame.width, 80);
     assert_eq!(frame.height, 20);
@@ -4587,7 +4587,7 @@ fn test_splash_host_boots_and_serves_frames() {
 
 #[test]
 fn test_splash_slot_default() {
-    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     handle.set_version("0.4.8-luna", None);
     let frame = wait_for_splash_text(&handle, "luna-maki");
     assert!(frame_has_text(&frame, "luna-maki"), "{frame:?}");
@@ -4611,7 +4611,7 @@ fn test_splash_slot_default() {
 
 #[test]
 fn test_splash_slot_override() {
-    let (handle, guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     guard
         .host()
         .load_source(
@@ -4651,7 +4651,7 @@ end)
 
 #[test]
 fn test_splash_renderer_error_suppresses() {
-    let (handle, guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     guard
         .host()
         .load_source(

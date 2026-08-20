@@ -1,6 +1,6 @@
--- Bundled splash-gallery skin, part of the maki distribution.
--- Require from init.lua with:   local skin = require("splash.voronoi")
--- The module returns M with M.render(w, h, t, fade) and does not activate itself.
+-- Bundled splash, part of the maki distribution.
+-- Require from init.lua with:   local splash = require("splash.voronoi")
+-- The module returns M with M.description and M.render(w, h, t, fade) and does not activate itself.
 --
 -- Voronoi cells splash. Software port of the WGSL "Voronoi Cells" shader
 
@@ -9,6 +9,7 @@ local SCALE = 6.0
 local RAMP = " .:-=+*#%@"
 local SAMPLE_STEP = 2
 local M = {}
+M.description = "Animated Voronoi cells with warm glowing borders."
 
 local function theme_or(name, fallback)
   local c = maki.ui.theme_color(name)

@@ -1,7 +1,8 @@
 -- Bundled default splash renderer. Rust owns the frame clock, the cadence,
--- and the update check; this plugin owns every visible element (starfield,
--- logo, tagline, tip, help, and the top-right version/update notice) and is
--- fully replaceable with `maki.api.set_slot("splash.render", ...)`.
+-- and the update check; this module owns every visible element (starfield,
+-- logo, tagline, tip, help, and the top-right version/update notice). The
+-- splashes_default plugin wires it into the `splash.render` slot and the
+-- `splash` registry. Replace or wrap it with maki.api.set_slot.
 
 local INTENSITY_SCALE = 0.3
 local VIGNETTE_SCALE = 0.25
@@ -295,6 +296,7 @@ local function render_splash(w, h, t, fade)
   return rows
 end
 
-maki.api.declare_slot("splash.render", render_splash)
-
-return { render = render_splash }
+return {
+  description = "The standard Maki splash screen.",
+  render = render_splash,
+}

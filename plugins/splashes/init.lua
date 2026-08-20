@@ -1,8 +1,12 @@
-local REGISTRY = "splash.gallery"
+local REGISTRY = "splash"
+local FALLBACK_NAME = "default"
+local STATE_DIR = "splashes"
+local STATE_FILE = "selection.json"
+
 local renderers = {}
 local renderers_revision = -1
 local candidate
-local committed = { name = "default" }
+local committed = { name = FALLBACK_NAME }
 local previous_committed
 local persisted_name
 local last_render
@@ -12,26 +16,17 @@ local function refresh_renderers()
   local revision = maki.api.contribution_revision(REGISTRY)
   if revision ~= renderers_revision then
     renderers = maki.api.collect(REGISTRY)
-    renderers.default = {
-      label = "default",
-      description = "The standard Maki splash screen.",
-    }
     renderers_revision = revision
   end
 end
 
 local function resolve(selection)
-  if selection.name == "default" then
-    selection.renderer = nil
-    selection.revision = maki.api.contribution_revision(REGISTRY)
-    return true
-  end
   refresh_renderers()
   if selection.revision == renderers_revision and type(selection.renderer) == "function" then
     return true
   end
   local entry = renderers[selection.name]
-  if not entry then
+  if type(entry) ~= "table" or type(entry.activate) ~= "function" then
     return nil, "unknown splash: " .. selection.name
   end
   local ok, renderer, err = pcall(entry.activate)
@@ -44,7 +39,6 @@ local function resolve(selection)
   selection.renderer = renderer
   selection.revision = renderers_revision
   selection.validated = nil
-  selection.frame = nil
   return true
 end
 
@@ -52,7 +46,13 @@ local function items()
   refresh_renderers()
   local out = {}
   for name, entry in pairs(renderers) do
-    out[#out + 1] = { label = entry.label, detail = entry.description, name = name }
+    if type(entry) == "table" and type(entry.activate) == "function" then
+      out[#out + 1] = {
+        label = entry.label or name,
+        detail = entry.description or "",
+        name = name,
+      }
+    end
   end
   table.sort(out, function(a, b)
     return a.label < b.label
@@ -74,64 +74,68 @@ local function invoke(selection, input)
   if not resolved then
     return nil, err
   end
-  if selection.name == "default" then
+  -- The fallback draws the chain below the picker (user set_slot layers, then
+  -- the slot default), so wrapping the default keeps working.
+  if selection.name == FALLBACK_NAME then
     return pcall(input.prev, input.w, input.h, input.t, input.fade)
   end
   return pcall(selection.renderer, input.w, input.h, input.t, input.fade)
 end
 
 local function validate(selection)
-  if selection.validated then
+  if selection.validated or selection.name == FALLBACK_NAME then
     return true
   end
-  local input = last_render
-  if not input then
-    if selection.name == "default" then
-      return true
-    end
-    input = { w = 80, h = 24, t = 0, fade = 1 }
-  end
-  local ok, frame = invoke(selection, input)
+  local ok, frame = invoke(selection, last_render or { w = 80, h = 24, t = 0, fade = 1 })
   if not ok then
     return nil, frame
   end
   selection.validated = true
-  selection.frame = frame
   return true
 end
 
+local function state_dir()
+  local dir = maki.env.state_dir()
+  if dir then
+    return maki.fs.joinpath(dir, STATE_DIR)
+  end
+  return nil
+end
+
+local function state_path()
+  local dir = state_dir()
+  if dir then
+    return maki.fs.joinpath(dir, STATE_FILE)
+  end
+  return nil
+end
+
 local function load_preference()
-  local state_dir = maki.env.state_dir()
-  if not state_dir then
+  local path = state_path()
+  if not path then
     return nil
   end
-  local path = maki.fs.joinpath(state_dir, "splash_gallery", "selection.json")
-  local content = maki.fs.read(path)
+  local ok, content = pcall(maki.fs.read, path)
   if not content then
-    return nil, false
+    return nil, not ok
   end
-  local ok, value = pcall(maki.json.decode, content)
-  if ok and type(value) == "table" and type(value.name) == "string" then
+  local decoded, value = pcall(maki.json.decode, content)
+  if decoded and type(value) == "table" and type(value.name) == "string" then
     return value.name, false
   end
   return nil, true
 end
 
 local function persist(name)
-  local state_dir = maki.env.state_dir()
-  if not state_dir then
+  local dir = state_dir()
+  if not dir then
     return true
   end
-  local path = maki.fs.joinpath(state_dir, "splash_gallery", "selection.json")
-  if name == "default" then
-    return maki.fs.rm(path, { force = true })
-  end
-  local dir = maki.fs.joinpath(state_dir, "splash_gallery")
   local ok, err = maki.fs.mkdir(dir, { parents = true })
   if not ok and err then
     return nil, err
   end
-  return maki.fs.atomic_write(path, maki.json.encode({ name = name }))
+  return maki.fs.atomic_write(maki.fs.joinpath(dir, STATE_FILE), maki.json.encode({ name = name }))
 end
 
 local function save_preference(name)
@@ -196,7 +200,7 @@ local function rollback()
   if previous_committed then
     committed, previous_committed = previous_committed, nil
   else
-    committed = { name = "default" }
+    committed = { name = FALLBACK_NAME }
   end
   queue_rollback()
 end
@@ -209,7 +213,6 @@ local function render(prev, w, h, t, fade)
     local ok, frame = invoke(pending, input)
     if ok then
       pending.validated = true
-      pending.frame = frame
       return frame
     end
     if candidate == pending then
@@ -226,46 +229,22 @@ local function render(prev, w, h, t, fade)
   if restored then
     return restored_frame
   end
-  committed = { name = "default" }
+  committed = { name = FALLBACK_NAME }
   queue_rollback()
   return prev(w, h, t, fade)
 end
 
 maki.api.set_slot("splash.render", render)
 
-local descriptions = {
-  aurora = "Drifting northern lights over a dark gradient.",
-  caustics = "Deep-water light patterns shimmering across the screen.",
-  kaleidoscope = "A mirrored fractal kaleidoscope with tenfold symmetry.",
-  matrix = "Green falling-code rain with persistent animated trails.",
-  metaballs = "Glowing metaballs that merge and flow together.",
-  voronoi = "Animated Voronoi cells with warm glowing borders.",
-}
-
-for _, module_name in ipairs({ "aurora", "caustics", "kaleidoscope", "matrix", "metaballs", "voronoi" }) do
-  local ok, module = pcall(require, "splash." .. module_name)
-  if ok and type(module) == "table" and type(module.render) == "function" then
-    maki.api.register(REGISTRY, module_name, {
-      label = module_name,
-      description = descriptions[module_name],
-      activate = function()
-        return module.render
-      end,
-    })
-  end
-end
-
+-- Load time only reads the preference into `committed`; the first frame
+-- resolves it. An unknown name fails then and rolls back to the fallback,
+-- repairing the file.
 local saved, invalid_saved = load_preference()
-persisted_name = invalid_saved and "invalid" or saved or "default"
-if saved and saved ~= "default" then
-  local selection = { name = saved }
-  if resolve(selection) then
-    previous_committed = committed
-    committed = selection
-  else
-    queue_rollback()
-  end
-elseif invalid_saved then
+persisted_name = invalid_saved and "invalid" or saved or FALLBACK_NAME
+if saved then
+  committed = { name = saved }
+end
+if invalid_saved then
   queue_rollback()
 end
 
@@ -292,7 +271,7 @@ local function command(opts)
 
   local picker_items = items()
   local result = maki.ui.open_list_picker(picker_items, {
-    title = "Splash gallery",
+    title = "Splash picker",
     cursor = item_index(picker_items, committed.name),
     timeout_ms = 100,
     notify_initial = true,

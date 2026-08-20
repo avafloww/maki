@@ -1,12 +1,13 @@
--- Bundled splash-gallery skin, part of the maki distribution.
--- Require from init.lua with:   local skin = require("splash.caustics")
--- The module returns M with M.render(w, h, t, fade) and does not activate itself.
+-- Bundled splash, part of the maki distribution.
+-- Require from init.lua with:   local splash = require("splash.caustics")
+-- The module returns M with M.description and M.render(w, h, t, fade) and does not activate itself.
 --
 -- Caustics splash. Software port of the WGSL "Caustics" shader from
 
 local RAMP = " .:-=+*#%@"
 local SAMPLE_STEP = 4
 local M = {}
+M.description = "Deep-water light patterns shimmering across the screen."
 
 local function theme_or(name, fallback)
   local c = maki.ui.theme_color(name)
