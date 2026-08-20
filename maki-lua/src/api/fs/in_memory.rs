@@ -11,7 +11,8 @@ use maki_agent::{GrepFileEntry, GrepLine, GrepMatchGroup};
 use regex::Regex;
 
 use super::{
-    DIR_MISSING_PREFIX, DIR_NOT_A_DIR_PREFIX, FsBackend, FsError, FsMeta, TYPE_DIRECTORY, TYPE_FILE,
+    BoxFuture, DIR_MISSING_PREFIX, DIR_NOT_A_DIR_PREFIX, FsBackend, FsError, FsMeta,
+    TYPE_DIRECTORY, TYPE_FILE,
 };
 
 /// Hermetic test backend: a deliberately dumb `BTreeMap` model. No symlinks,
@@ -136,274 +137,297 @@ fn resolve_root(path: Option<&str>) -> Result<PathBuf, FsError> {
 }
 
 impl FsBackend for InMemoryFs {
-    fn read(&self, path: &Path) -> IoResult<String> {
-        let inner = self.inner.read().unwrap();
-        match inner.entries.get(path) {
-            Some(Entry::File(bytes, _)) => String::from_utf8(bytes.clone())
-                .map_err(|_| IoError::new(ErrorKind::InvalidData, "non-utf8 content")),
-            Some(Entry::Dir) => Err(IoError::new(ErrorKind::IsADirectory, "is a directory")),
-            None => Err(IoError::from(ErrorKind::NotFound)),
-        }
+    fn read(&self, path: PathBuf) -> BoxFuture<'_, IoResult<String>> {
+        Box::pin(async move {
+            let inner = self.inner.read().unwrap();
+            match inner.entries.get(&path) {
+                Some(Entry::File(bytes, _)) => String::from_utf8(bytes.clone())
+                    .map_err(|_| IoError::new(ErrorKind::InvalidData, "non-utf8 content")),
+                Some(Entry::Dir) => Err(IoError::new(ErrorKind::IsADirectory, "is a directory")),
+                None => Err(IoError::from(ErrorKind::NotFound)),
+            }
+        })
     }
 
-    fn read_bytes(&self, path: &Path) -> IoResult<Vec<u8>> {
-        let inner = self.inner.read().unwrap();
-        match inner.entries.get(path) {
-            Some(Entry::File(bytes, _)) => Ok(bytes.clone()),
-            Some(Entry::Dir) => Err(IoError::new(ErrorKind::IsADirectory, "is a directory")),
-            None => Err(IoError::from(ErrorKind::NotFound)),
-        }
+    fn read_bytes(&self, path: PathBuf) -> BoxFuture<'_, IoResult<Vec<u8>>> {
+        Box::pin(async move {
+            let inner = self.inner.read().unwrap();
+            match inner.entries.get(&path) {
+                Some(Entry::File(bytes, _)) => Ok(bytes.clone()),
+                Some(Entry::Dir) => Err(IoError::new(ErrorKind::IsADirectory, "is a directory")),
+                None => Err(IoError::from(ErrorKind::NotFound)),
+            }
+        })
     }
 
-    fn stat(&self, path: &Path) -> IoResult<FsMeta> {
-        let inner = self.inner.read().unwrap();
-        match inner.entries.get(path) {
-            Some(Entry::File(bytes, seq)) => Ok(FsMeta {
-                size: bytes.len() as u64,
-                is_file: true,
-                is_dir: false,
-                mtime: Some(UNIX_EPOCH + Duration::from_secs(*seq)),
-            }),
-            Some(Entry::Dir) => Ok(FsMeta {
-                size: 0,
-                is_file: false,
-                is_dir: true,
-                mtime: None,
-            }),
-            None => Err(IoError::from(ErrorKind::NotFound)),
-        }
+    fn stat(&self, path: PathBuf) -> BoxFuture<'_, IoResult<FsMeta>> {
+        Box::pin(async move {
+            let inner = self.inner.read().unwrap();
+            match inner.entries.get(&path) {
+                Some(Entry::File(bytes, seq)) => Ok(FsMeta {
+                    size: bytes.len() as u64,
+                    is_file: true,
+                    is_dir: false,
+                    mtime: Some(UNIX_EPOCH + Duration::from_secs(*seq)),
+                }),
+                Some(Entry::Dir) => Ok(FsMeta {
+                    size: 0,
+                    is_file: false,
+                    is_dir: true,
+                    mtime: None,
+                }),
+                None => Err(IoError::from(ErrorKind::NotFound)),
+            }
+        })
     }
 
-    fn write(&self, path: &Path, content: &[u8]) -> IoResult<()> {
-        let mut inner = self.inner.write().unwrap();
-        if matches!(inner.entries.get(path), Some(Entry::Dir)) {
-            return Err(IoError::new(ErrorKind::IsADirectory, "is a directory"));
-        }
-        if !parent_exists(&inner, path) {
-            return Err(IoError::from(ErrorKind::NotFound));
-        }
-        let seq = Self::bump_seq(&mut inner);
-        inner
-            .entries
-            .insert(path.to_path_buf(), Entry::File(content.to_vec(), seq));
-        Ok(())
+    fn write(&self, path: PathBuf, content: Vec<u8>) -> BoxFuture<'_, IoResult<()>> {
+        Box::pin(async move {
+            let mut inner = self.inner.write().unwrap();
+            if matches!(inner.entries.get(&path), Some(Entry::Dir)) {
+                return Err(IoError::new(ErrorKind::IsADirectory, "is a directory"));
+            }
+            if !parent_exists(&inner, &path) {
+                return Err(IoError::from(ErrorKind::NotFound));
+            }
+            let seq = Self::bump_seq(&mut inner);
+            inner.entries.insert(path, Entry::File(content, seq));
+            Ok(())
+        })
     }
 
     /// Same contract as `write` here: no temp file, no rename.
-    fn atomic_write(&self, path: &Path, content: &[u8]) -> IoResult<()> {
-        self.write(path, content)
+    fn atomic_write(&self, path: PathBuf, content: Vec<u8>) -> BoxFuture<'_, IoResult<()>> {
+        Box::pin(async move { self.write(path, content).await })
     }
 
-    fn rm(&self, path: &Path, recursive: bool, force: bool) -> IoResult<()> {
-        let mut inner = self.inner.write().unwrap();
-        let is_dir = match inner.entries.get(path) {
-            Some(Entry::Dir) => true,
-            Some(Entry::File(..)) => false,
-            None => {
-                if force {
-                    return Ok(());
+    fn rm(&self, path: PathBuf, recursive: bool, force: bool) -> BoxFuture<'_, IoResult<()>> {
+        Box::pin(async move {
+            let mut inner = self.inner.write().unwrap();
+            let is_dir = match inner.entries.get(&path) {
+                Some(Entry::Dir) => true,
+                Some(Entry::File(..)) => false,
+                None => {
+                    if force {
+                        return Ok(());
+                    }
+                    return Err(IoError::from(ErrorKind::NotFound));
                 }
-                return Err(IoError::from(ErrorKind::NotFound));
-            }
-        };
-        if is_dir {
-            if !recursive
-                && inner
+            };
+            if is_dir {
+                if !recursive
+                    && inner
+                        .entries
+                        .keys()
+                        .any(|p| p != &path && p.starts_with(&path))
+                {
+                    return Err(IoError::other("rm: directory not empty"));
+                }
+                inner
                     .entries
-                    .keys()
-                    .any(|p| p != path && p.starts_with(path))
-            {
-                return Err(IoError::other("rm: directory not empty"));
+                    .retain(|p, _| p != &path && !p.starts_with(&path));
+            } else {
+                inner.entries.remove(&path);
             }
-            inner
-                .entries
-                .retain(|p, _| p != path && !p.starts_with(path));
-        } else {
-            inner.entries.remove(path);
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
-    fn mkdir(&self, path: &Path, parents: bool) -> IoResult<()> {
-        let mut inner = self.inner.write().unwrap();
-        if parents {
-            create_dir_all(&mut inner, path)
-        } else {
-            create_dir(&mut inner, path)
-        }
+    fn mkdir(&self, path: PathBuf, parents: bool) -> BoxFuture<'_, IoResult<()>> {
+        Box::pin(async move {
+            let mut inner = self.inner.write().unwrap();
+            if parents {
+                create_dir_all(&mut inner, &path)
+            } else {
+                create_dir(&mut inner, &path)
+            }
+        })
     }
 
-    fn dir(&self, path: &Path, max_depth: u32) -> Result<Vec<(String, &'static str)>, FsError> {
-        let meta = match self.stat(path) {
-            Ok(m) => m,
-            Err(_) => {
+    fn dir(
+        &self,
+        path: PathBuf,
+        max_depth: u32,
+    ) -> BoxFuture<'_, Result<Vec<(String, &'static str)>, FsError>> {
+        Box::pin(async move {
+            let meta = match self.stat(path.clone()).await {
+                Ok(m) => m,
+                Err(_) => {
+                    return Err(FsError::Message(format!(
+                        "{DIR_MISSING_PREFIX}{}",
+                        path.display()
+                    )));
+                }
+            };
+            if !meta.is_dir {
                 return Err(FsError::Message(format!(
-                    "{DIR_MISSING_PREFIX}{}",
+                    "{DIR_NOT_A_DIR_PREFIX}{}",
                     path.display()
                 )));
             }
-        };
-        if !meta.is_dir {
-            return Err(FsError::Message(format!(
-                "{DIR_NOT_A_DIR_PREFIX}{}",
-                path.display()
-            )));
-        }
-        let inner = self.inner.read().unwrap();
-        let mut out = Vec::new();
-        for (p, entry) in &inner.entries {
-            let Some(rel) = p
-                .strip_prefix(path)
-                .ok()
-                .filter(|r| !r.as_os_str().is_empty())
-            else {
-                continue;
-            };
-            if rel.components().count() as u32 > max_depth {
-                continue;
+            let inner = self.inner.read().unwrap();
+            let mut out = Vec::new();
+            for (p, entry) in &inner.entries {
+                let Some(rel) = p
+                    .strip_prefix(&path)
+                    .ok()
+                    .filter(|r| !r.as_os_str().is_empty())
+                else {
+                    continue;
+                };
+                if rel.components().count() as u32 > max_depth {
+                    continue;
+                }
+                let typ = match entry {
+                    Entry::File(..) => TYPE_FILE,
+                    Entry::Dir => TYPE_DIRECTORY,
+                };
+                out.push((rel.to_string_lossy().into_owned(), typ));
             }
-            let typ = match entry {
-                Entry::File(..) => TYPE_FILE,
-                Entry::Dir => TYPE_DIRECTORY,
-            };
-            out.push((rel.to_string_lossy().into_owned(), typ));
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 
     fn glob(
         &self,
-        patterns: &[String],
-        path: Option<&str>,
+        patterns: Vec<String>,
+        path: Option<String>,
         limit: Option<usize>,
         _gitignore: bool,
         sort_mtime: bool,
-    ) -> Result<Vec<String>, FsError> {
-        let compiled: Vec<GlobMatcher> = patterns
-            .iter()
-            .map(|p| {
-                Glob::new(p)
-                    .map(|g| g.compile_matcher())
-                    .map_err(|e| FsError::Message(format!("invalid glob pattern: {e}")))
-            })
-            .collect::<Result<_, _>>()?;
-        let root = resolve_root(path)?;
-        let inner = self.inner.read().unwrap();
-        let mut hits: Vec<(u64, String)> = Vec::new();
-        for (p, entry) in &inner.entries {
-            let Entry::File(_, seq) = entry else {
-                continue;
-            };
-            let Some(rel) = p
-                .strip_prefix(&root)
-                .ok()
-                .filter(|r| !r.as_os_str().is_empty())
-            else {
-                continue;
-            };
-            if compiled.iter().any(|g| g.is_match(rel)) {
-                hits.push((*seq, p.to_string_lossy().into_owned()));
+    ) -> BoxFuture<'_, Result<Vec<String>, FsError>> {
+        Box::pin(async move {
+            let compiled: Vec<GlobMatcher> = patterns
+                .iter()
+                .map(|p| {
+                    Glob::new(p)
+                        .map(|g| g.compile_matcher())
+                        .map_err(|e| FsError::Message(format!("invalid glob pattern: {e}")))
+                })
+                .collect::<Result<_, _>>()?;
+            let root = resolve_root(path.as_deref())?;
+            let inner = self.inner.read().unwrap();
+            let mut hits: Vec<(u64, String)> = Vec::new();
+            for (p, entry) in &inner.entries {
+                let Entry::File(_, seq) = entry else {
+                    continue;
+                };
+                let Some(rel) = p
+                    .strip_prefix(&root)
+                    .ok()
+                    .filter(|r| !r.as_os_str().is_empty())
+                else {
+                    continue;
+                };
+                if compiled.iter().any(|g| g.is_match(rel)) {
+                    hits.push((*seq, p.to_string_lossy().into_owned()));
+                }
             }
-        }
-        if sort_mtime {
-            hits.sort_by_key(|h| Reverse(h.0));
-        }
-        if let Some(lim) = limit {
-            hits.truncate(lim);
-        }
-        Ok(hits.into_iter().map(|(_, p)| p).collect())
+            if sort_mtime {
+                hits.sort_by_key(|h| Reverse(h.0));
+            }
+            if let Some(lim) = limit {
+                hits.truncate(lim);
+            }
+            Ok(hits.into_iter().map(|(_, p)| p).collect())
+        })
     }
 
-    fn grep(&self, params: GrepParams) -> Result<(PathBuf, Vec<GrepFileEntry>), FsError> {
-        let root = resolve_root(params.path.as_deref())?;
-        let re = Regex::new(&params.pattern)
-            .map_err(|e| FsError::Message(format!("invalid regex pattern: {e}")))?;
-        let include = params
-            .include
-            .as_deref()
-            .map(|p| Glob::new(p).map(|g| g.compile_matcher()))
-            .transpose()
-            .map_err(|e| FsError::Message(format!("invalid glob pattern: {e}")))?;
+    fn grep(
+        &self,
+        params: GrepParams,
+    ) -> BoxFuture<'_, Result<(PathBuf, Vec<GrepFileEntry>), FsError>> {
+        Box::pin(async move {
+            let root = resolve_root(params.path.as_deref())?;
+            let re = Regex::new(&params.pattern)
+                .map_err(|e| FsError::Message(format!("invalid regex pattern: {e}")))?;
+            let include = params
+                .include
+                .as_deref()
+                .map(|p| Glob::new(p).map(|g| g.compile_matcher()))
+                .transpose()
+                .map_err(|e| FsError::Message(format!("invalid glob pattern: {e}")))?;
 
-        let inner = self.inner.read().unwrap();
-        let mut files: Vec<(u64, &PathBuf)> = inner
-            .entries
-            .iter()
-            .filter_map(|(p, e)| match e {
-                Entry::File(_, seq) => Some((*seq, p)),
-                Entry::Dir => None,
-            })
-            .filter(|(_, p)| p.starts_with(&root))
-            .collect();
-        files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+            let inner = self.inner.read().unwrap();
+            let mut files: Vec<(u64, &PathBuf)> = inner
+                .entries
+                .iter()
+                .filter_map(|(p, e)| match e {
+                    Entry::File(_, seq) => Some((*seq, p)),
+                    Entry::Dir => None,
+                })
+                .filter(|(_, p)| p.starts_with(&root))
+                .collect();
+            files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
 
-        let mut total_groups = 0;
-        let mut out: Vec<GrepFileEntry> = Vec::new();
-        for (_, file) in files {
-            if total_groups >= params.limit {
-                break;
-            }
-            let Entry::File(bytes, _) = &inner.entries[file] else {
-                continue;
-            };
-            let Ok(content) = String::from_utf8(bytes.clone()) else {
-                continue;
-            };
-            let rel = file.strip_prefix(&root).unwrap_or(file);
-            if let Some(g) = &include
-                && !g.is_match(rel)
-            {
-                continue;
-            }
-            let lines: Vec<&str> = content.split('\n').collect();
-            let mut groups: Vec<GrepMatchGroup> = Vec::new();
-            for (idx, line) in lines.iter().enumerate() {
-                if line.len() > params.max_line_bytes || !re.is_match(line) {
-                    continue;
-                }
-                let mut group_lines: Vec<GrepLine> = Vec::new();
-                for (i, &text) in lines
-                    .iter()
-                    .enumerate()
-                    .take(idx)
-                    .skip(idx.saturating_sub(params.context_before))
-                {
-                    if text.len() <= params.max_line_bytes {
-                        group_lines.push(GrepLine::context(i + 1, text));
-                    }
-                }
-                group_lines.push(GrepLine::matched(idx + 1, *line));
-                for (i, &text) in lines
-                    .iter()
-                    .enumerate()
-                    .skip(idx + 1)
-                    .take(params.context_after)
-                {
-                    if text.len() <= params.max_line_bytes {
-                        group_lines.push(GrepLine::context(i + 1, text));
-                    }
-                }
-                groups.push(GrepMatchGroup { lines: group_lines });
-                total_groups += 1;
+            let mut total_groups = 0;
+            let mut out: Vec<GrepFileEntry> = Vec::new();
+            for (_, file) in files {
                 if total_groups >= params.limit {
                     break;
                 }
+                let Entry::File(bytes, _) = &inner.entries[file] else {
+                    continue;
+                };
+                let Ok(content) = String::from_utf8(bytes.clone()) else {
+                    continue;
+                };
+                let rel = file.strip_prefix(&root).unwrap_or(file);
+                if let Some(g) = &include
+                    && !g.is_match(rel)
+                {
+                    continue;
+                }
+                let lines: Vec<&str> = content.split('\n').collect();
+                let mut groups: Vec<GrepMatchGroup> = Vec::new();
+                for (idx, line) in lines.iter().enumerate() {
+                    if line.len() > params.max_line_bytes || !re.is_match(line) {
+                        continue;
+                    }
+                    let mut group_lines: Vec<GrepLine> = Vec::new();
+                    for (i, &text) in lines
+                        .iter()
+                        .enumerate()
+                        .take(idx)
+                        .skip(idx.saturating_sub(params.context_before))
+                    {
+                        if text.len() <= params.max_line_bytes {
+                            group_lines.push(GrepLine::context(i + 1, text));
+                        }
+                    }
+                    group_lines.push(GrepLine::matched(idx + 1, *line));
+                    for (i, &text) in lines
+                        .iter()
+                        .enumerate()
+                        .skip(idx + 1)
+                        .take(params.context_after)
+                    {
+                        if text.len() <= params.max_line_bytes {
+                            group_lines.push(GrepLine::context(i + 1, text));
+                        }
+                    }
+                    groups.push(GrepMatchGroup { lines: group_lines });
+                    total_groups += 1;
+                    if total_groups >= params.limit {
+                        break;
+                    }
+                }
+                if !groups.is_empty() {
+                    out.push(GrepFileEntry {
+                        path: rel.to_string_lossy().into_owned(),
+                        groups,
+                    });
+                }
             }
-            if !groups.is_empty() {
-                out.push(GrepFileEntry {
-                    path: rel.to_string_lossy().into_owned(),
-                    groups,
-                });
-            }
-        }
-        Ok((root, out))
+            Ok((root, out))
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::ErrorKind;
-    use std::path::Path;
+    use std::path::PathBuf;
 
     use super::*;
 
@@ -411,31 +435,34 @@ mod tests {
 
     fn seeded() -> InMemoryFs {
         let fs = InMemoryFs::new();
-        fs.mkdir(Path::new(ROOT), true).unwrap();
-        fs.write(Path::new("/t/a.rs"), b"fn a()").unwrap();
-        fs.write(Path::new("/t/b.txt"), b"hello").unwrap();
+        smol::block_on(fs.mkdir(PathBuf::from(ROOT), true)).unwrap();
+        smol::block_on(fs.write(PathBuf::from("/t/a.rs"), b"fn a()".to_vec())).unwrap();
+        smol::block_on(fs.write(PathBuf::from("/t/b.txt"), b"hello".to_vec())).unwrap();
         fs
     }
 
     #[test]
     fn write_read_roundtrip_and_stat_fields() {
         let fs = InMemoryFs::new();
-        fs.mkdir(Path::new(ROOT), true).unwrap();
-        fs.write(Path::new("/t/note.md"), b"hello-maki").unwrap();
+        smol::block_on(fs.mkdir(PathBuf::from(ROOT), true)).unwrap();
+        smol::block_on(fs.write(PathBuf::from("/t/note.md"), b"hello-maki".to_vec())).unwrap();
 
-        assert_eq!(fs.read(Path::new("/t/note.md")).unwrap(), "hello-maki");
         assert_eq!(
-            fs.read_bytes(Path::new("/t/note.md")).unwrap(),
+            smol::block_on(fs.read(PathBuf::from("/t/note.md"))).unwrap(),
+            "hello-maki"
+        );
+        assert_eq!(
+            smol::block_on(fs.read_bytes(PathBuf::from("/t/note.md"))).unwrap(),
             b"hello-maki"
         );
 
-        let meta = fs.stat(Path::new("/t/note.md")).unwrap();
+        let meta = smol::block_on(fs.stat(PathBuf::from("/t/note.md"))).unwrap();
         assert!(meta.is_file);
         assert!(!meta.is_dir);
         assert_eq!(meta.size, 10);
         assert!(meta.mtime.is_some(), "file mtime must be present");
 
-        let dir_meta = fs.stat(Path::new(ROOT)).unwrap();
+        let dir_meta = smol::block_on(fs.stat(PathBuf::from(ROOT))).unwrap();
         assert!(dir_meta.is_dir);
         assert!(!dir_meta.is_file);
         assert_eq!(dir_meta.size, 0);
@@ -447,36 +474,46 @@ mod tests {
         let fs = seeded();
 
         assert_eq!(
-            fs.read(Path::new("/t/missing")).unwrap_err().kind(),
-            ErrorKind::NotFound
-        );
-        assert_eq!(
-            fs.read(Path::new(ROOT)).unwrap_err().kind(),
-            ErrorKind::IsADirectory
-        );
-
-        fs.write(Path::new("/t/bin.dat"), &[0xff, 0xfe]).unwrap();
-        assert_eq!(
-            fs.read(Path::new("/t/bin.dat")).unwrap_err().kind(),
-            ErrorKind::InvalidData
-        );
-        assert_eq!(
-            fs.read_bytes(Path::new("/t/bin.dat")).unwrap(),
-            vec![0xff, 0xfe]
-        );
-
-        assert_eq!(
-            fs.write(Path::new(ROOT), b"x").unwrap_err().kind(),
-            ErrorKind::IsADirectory
-        );
-        assert_eq!(
-            fs.write(Path::new("/t/noparent/x.txt"), b"x")
+            smol::block_on(fs.read(PathBuf::from("/t/missing")))
                 .unwrap_err()
                 .kind(),
             ErrorKind::NotFound
         );
         assert_eq!(
-            fs.stat(Path::new("/t/missing")).unwrap_err().kind(),
+            smol::block_on(fs.read(PathBuf::from(ROOT)))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::IsADirectory
+        );
+
+        smol::block_on(fs.write(PathBuf::from("/t/bin.dat"), vec![0xff, 0xfe])).unwrap();
+        assert_eq!(
+            smol::block_on(fs.read(PathBuf::from("/t/bin.dat")))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(
+            smol::block_on(fs.read_bytes(PathBuf::from("/t/bin.dat"))).unwrap(),
+            vec![0xff, 0xfe]
+        );
+
+        assert_eq!(
+            smol::block_on(fs.write(PathBuf::from(ROOT), b"x".to_vec()))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::IsADirectory
+        );
+        assert_eq!(
+            smol::block_on(fs.write(PathBuf::from("/t/noparent/x.txt"), b"x".to_vec()))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::NotFound
+        );
+        assert_eq!(
+            smol::block_on(fs.stat(PathBuf::from("/t/missing")))
+                .unwrap_err()
+                .kind(),
             ErrorKind::NotFound
         );
     }
@@ -484,21 +521,31 @@ mod tests {
     #[test]
     fn mkdir_existing_fails_and_parents_creates_chain() {
         let fs = InMemoryFs::new();
-        fs.mkdir(Path::new(ROOT), true).unwrap();
+        smol::block_on(fs.mkdir(PathBuf::from(ROOT), true)).unwrap();
         assert_eq!(
-            fs.mkdir(Path::new(ROOT), false).unwrap_err().kind(),
+            smol::block_on(fs.mkdir(PathBuf::from(ROOT), false))
+                .unwrap_err()
+                .kind(),
             ErrorKind::AlreadyExists
         );
         // `parents = true` is a no-op on an existing dir, like `create_dir_all`.
-        fs.mkdir(Path::new(ROOT), true).unwrap();
+        smol::block_on(fs.mkdir(PathBuf::from(ROOT), true)).unwrap();
 
-        let deep = Path::new("/t/x/y/z");
-        fs.mkdir(deep, true).unwrap();
-        assert!(matches!(fs.stat(deep), Ok(m) if m.is_dir));
-        assert!(matches!(fs.stat(Path::new("/t/x/y")), Ok(m) if m.is_dir));
+        let deep = PathBuf::from("/t/x/y/z");
+        smol::block_on(fs.mkdir(deep.clone(), true)).unwrap();
+        assert!(matches!(
+            smol::block_on(fs.stat(deep)),
+            Ok(m) if m.is_dir
+        ));
+        assert!(matches!(
+            smol::block_on(fs.stat(PathBuf::from("/t/x/y"))),
+            Ok(m) if m.is_dir
+        ));
 
         assert_eq!(
-            fs.mkdir(Path::new("/t/p/q"), false).unwrap_err().kind(),
+            smol::block_on(fs.mkdir(PathBuf::from("/t/p/q"), false))
+                .unwrap_err()
+                .kind(),
             ErrorKind::NotFound
         );
     }
@@ -506,48 +553,48 @@ mod tests {
     #[test]
     fn rm_edges() {
         let fs = InMemoryFs::new();
-        fs.mkdir(Path::new("/t/tree/nested"), true).unwrap();
-        fs.write(Path::new("/t/tree/a.txt"), b"a").unwrap();
-        fs.write(Path::new("/t/tree/nested/b.txt"), b"b").unwrap();
+        smol::block_on(fs.mkdir(PathBuf::from("/t/tree/nested"), true)).unwrap();
+        smol::block_on(fs.write(PathBuf::from("/t/tree/a.txt"), b"a".to_vec())).unwrap();
+        smol::block_on(fs.write(PathBuf::from("/t/tree/nested/b.txt"), b"b".to_vec())).unwrap();
 
         assert_eq!(
-            fs.rm(Path::new("/t/tree"), false, false)
+            smol::block_on(fs.rm(PathBuf::from("/t/tree"), false, false))
                 .unwrap_err()
                 .kind(),
             ErrorKind::Other
         );
-        assert!(fs.stat(Path::new("/t/tree")).is_ok());
+        assert!(smol::block_on(fs.stat(PathBuf::from("/t/tree"))).is_ok());
 
-        assert!(fs.rm(Path::new("/t/ghost"), false, true).is_ok());
+        assert!(smol::block_on(fs.rm(PathBuf::from("/t/ghost"), false, true)).is_ok());
         assert_eq!(
-            fs.rm(Path::new("/t/ghost"), false, false)
+            smol::block_on(fs.rm(PathBuf::from("/t/ghost"), false, false))
                 .unwrap_err()
                 .kind(),
             ErrorKind::NotFound
         );
 
-        fs.rm(Path::new("/t/tree"), true, false).unwrap();
-        assert!(fs.stat(Path::new("/t/tree")).is_err());
-        assert!(fs.stat(Path::new("/t/tree/a.txt")).is_err());
-        assert!(fs.stat(Path::new("/t/tree/nested/b.txt")).is_err());
+        smol::block_on(fs.rm(PathBuf::from("/t/tree"), true, false)).unwrap();
+        assert!(smol::block_on(fs.stat(PathBuf::from("/t/tree"))).is_err());
+        assert!(smol::block_on(fs.stat(PathBuf::from("/t/tree/a.txt"))).is_err());
+        assert!(smol::block_on(fs.stat(PathBuf::from("/t/tree/nested/b.txt"))).is_err());
 
-        fs.write(Path::new("/t/solo.txt"), b"x").unwrap();
-        fs.rm(Path::new("/t/solo.txt"), false, false).unwrap();
-        assert!(fs.stat(Path::new("/t/solo.txt")).is_err());
+        smol::block_on(fs.write(PathBuf::from("/t/solo.txt"), b"x".to_vec())).unwrap();
+        smol::block_on(fs.rm(PathBuf::from("/t/solo.txt"), false, false)).unwrap();
+        assert!(smol::block_on(fs.stat(PathBuf::from("/t/solo.txt"))).is_err());
 
-        fs.mkdir(Path::new("/t/empty"), false).unwrap();
-        fs.rm(Path::new("/t/empty"), false, false).unwrap();
-        assert!(fs.stat(Path::new("/t/empty")).is_err());
+        smol::block_on(fs.mkdir(PathBuf::from("/t/empty"), false)).unwrap();
+        smol::block_on(fs.rm(PathBuf::from("/t/empty"), false, false)).unwrap();
+        assert!(smol::block_on(fs.stat(PathBuf::from("/t/empty"))).is_err());
     }
 
     #[test]
     fn dir_recursive_lists_relative_names_and_types() {
         let fs = InMemoryFs::new();
-        fs.mkdir(Path::new("/t/x"), true).unwrap();
-        fs.write(Path::new("/t/x/file.txt"), b"x").unwrap();
-        fs.mkdir(Path::new("/t/y"), false).unwrap();
+        smol::block_on(fs.mkdir(PathBuf::from("/t/x"), true)).unwrap();
+        smol::block_on(fs.write(PathBuf::from("/t/x/file.txt"), b"x".to_vec())).unwrap();
+        smol::block_on(fs.mkdir(PathBuf::from("/t/y"), false)).unwrap();
 
-        let entries = fs.dir(Path::new("/t"), 2).unwrap();
+        let entries = smol::block_on(fs.dir(PathBuf::from("/t"), 2)).unwrap();
         let mut names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
         names.sort();
         assert_eq!(names, vec!["x", "x/file.txt", "y"]);
@@ -557,7 +604,7 @@ mod tests {
         assert_eq!(types["x/file.txt"], TYPE_FILE);
         assert_eq!(types["y"], TYPE_DIRECTORY);
 
-        let shallow = fs.dir(Path::new("/t"), 1).unwrap();
+        let shallow = smol::block_on(fs.dir(PathBuf::from("/t"), 1)).unwrap();
         let shallow_names: Vec<&str> = shallow.iter().map(|(n, _)| n.as_str()).collect();
         assert!(shallow_names.contains(&"x"));
         assert!(
@@ -570,58 +617,72 @@ mod tests {
     fn dir_missing_and_not_a_directory_messages() {
         let fs = seeded();
 
-        let missing = fs.dir(Path::new("/t/nope"), 1).unwrap_err().to_string();
+        let missing = smol::block_on(fs.dir(PathBuf::from("/t/nope"), 1))
+            .unwrap_err()
+            .to_string();
         assert!(missing.starts_with(DIR_MISSING_PREFIX), "{missing}");
-        let not_dir = fs.dir(Path::new("/t/a.rs"), 1).unwrap_err().to_string();
+        let not_dir = smol::block_on(fs.dir(PathBuf::from("/t/a.rs"), 1))
+            .unwrap_err()
+            .to_string();
         assert!(not_dir.starts_with(DIR_NOT_A_DIR_PREFIX), "{not_dir}");
     }
 
     #[test]
     fn glob_scope_limit_and_mtime_order() {
         let fs = InMemoryFs::new();
-        fs.mkdir(Path::new("/t/sub"), true).unwrap();
-        fs.write(Path::new("/t/top.rs"), b"").unwrap();
-        fs.write(Path::new("/t/sub/inner.rs"), b"").unwrap();
+        smol::block_on(fs.mkdir(PathBuf::from("/t/sub"), true)).unwrap();
+        smol::block_on(fs.write(PathBuf::from("/t/top.rs"), Vec::new())).unwrap();
+        smol::block_on(fs.write(PathBuf::from("/t/sub/inner.rs"), Vec::new())).unwrap();
 
         // gitignore semantics (real backend delegates to the `ignore` crate):
         // a pattern without a slash matches at any depth under the scope.
-        let shallow = fs
-            .glob(&["*.rs".into()], Some("/t"), None, true, false)
-            .unwrap();
+        let shallow =
+            smol::block_on(fs.glob(vec!["*.rs".into()], Some("/t".into()), None, true, false))
+                .unwrap();
         let mut shallow: Vec<&str> = shallow.iter().map(String::as_str).collect();
         shallow.sort();
         assert_eq!(shallow, vec!["/t/sub/inner.rs", "/t/top.rs"]);
 
-        let scoped = fs
-            .glob(&["*.rs".into()], Some("/t/sub"), None, true, false)
-            .unwrap();
+        let scoped = smol::block_on(fs.glob(
+            vec!["*.rs".into()],
+            Some("/t/sub".into()),
+            None,
+            true,
+            false,
+        ))
+        .unwrap();
         assert_eq!(scoped, vec!["/t/sub/inner.rs"]);
 
-        let deep = fs
-            .glob(&["**/*.rs".into()], Some("/t"), None, true, false)
-            .unwrap();
+        let deep =
+            smol::block_on(fs.glob(vec!["**/*.rs".into()], Some("/t".into()), None, true, false))
+                .unwrap();
         let mut deep: Vec<&str> = deep.iter().map(String::as_str).collect();
         deep.sort();
         assert_eq!(deep, vec!["/t/sub/inner.rs", "/t/top.rs"]);
 
-        let limited = fs
-            .glob(&["**/*.rs".into()], Some("/t"), Some(1), true, false)
-            .unwrap();
+        let limited = smol::block_on(fs.glob(
+            vec!["**/*.rs".into()],
+            Some("/t".into()),
+            Some(1),
+            true,
+            false,
+        ))
+        .unwrap();
         assert_eq!(limited.len(), 1);
 
         // mtime sort is insertion order, newest first.
         let f = InMemoryFs::new();
-        f.mkdir(Path::new(ROOT), true).unwrap();
-        f.write(Path::new("/t/one.rs"), b"").unwrap();
-        f.write(Path::new("/t/two.rs"), b"").unwrap();
-        f.write(Path::new("/t/three.rs"), b"").unwrap();
-        let by_mtime = f
-            .glob(&["*.rs".into()], Some("/t"), None, true, true)
-            .unwrap();
+        smol::block_on(f.mkdir(PathBuf::from(ROOT), true)).unwrap();
+        smol::block_on(f.write(PathBuf::from("/t/one.rs"), Vec::new())).unwrap();
+        smol::block_on(f.write(PathBuf::from("/t/two.rs"), Vec::new())).unwrap();
+        smol::block_on(f.write(PathBuf::from("/t/three.rs"), Vec::new())).unwrap();
+        let by_mtime =
+            smol::block_on(f.glob(vec!["*.rs".into()], Some("/t".into()), None, true, true))
+                .unwrap();
         assert_eq!(by_mtime, vec!["/t/three.rs", "/t/two.rs", "/t/one.rs"]);
 
         assert!(
-            f.glob(&["[".into()], Some("/t"), None, true, false)
+            smol::block_on(f.glob(vec!["[".into()], Some("/t".into()), None, true, false,))
                 .is_err(),
             "invalid pattern must surface as an error"
         );
@@ -630,21 +691,20 @@ mod tests {
     #[test]
     fn grep_matches_with_context_include_and_limit() {
         let fs = InMemoryFs::new();
-        fs.mkdir(Path::new(ROOT), true).unwrap();
+        smol::block_on(fs.mkdir(PathBuf::from(ROOT), true)).unwrap();
         let mut content = String::new();
         for i in 1..=5 {
             content.push_str(&format!("line_{i}\n"));
         }
-        fs.write(Path::new("/t/data.rs"), content.as_bytes())
-            .unwrap();
-        fs.write(Path::new("/t/other.txt"), b"line_99\n").unwrap();
+        smol::block_on(fs.write(PathBuf::from("/t/data.rs"), content.into_bytes())).unwrap();
+        smol::block_on(fs.write(PathBuf::from("/t/other.txt"), b"line_99\n".to_vec())).unwrap();
 
         let mut params = GrepParams::new("line_3".to_string());
         params.path = Some("/t".to_string());
         params.context_before = 1;
         params.context_after = 1;
         params.include = Some("*.rs".to_string());
-        let (base, entries) = fs.grep(params).unwrap();
+        let (base, entries) = smol::block_on(fs.grep(params)).unwrap();
         assert_eq!(base, PathBuf::from("/t"));
         assert_eq!(entries.len(), 1, "include must exclude other.txt");
         assert_eq!(entries[0].path, "data.rs");
@@ -662,7 +722,7 @@ mod tests {
         // Without the include filter both files hit.
         let mut params = GrepParams::new("line_".to_string());
         params.path = Some("/t".to_string());
-        let (_, all) = fs.grep(params).unwrap();
+        let (_, all) = smol::block_on(fs.grep(params)).unwrap();
         assert_eq!(all.len(), 2);
 
         // The limit caps total groups across files.
@@ -670,12 +730,12 @@ mod tests {
         params.path = Some("/t".to_string());
         params.include = Some("*.rs".to_string());
         params.limit = 2;
-        let (_, capped) = fs.grep(params).unwrap();
+        let (_, capped) = smol::block_on(fs.grep(params)).unwrap();
         assert_eq!(capped[0].groups.len(), 2);
 
         let mut params = GrepParams::new("[".to_string());
         params.path = Some("/t".to_string());
-        let err = fs.grep(params).unwrap_err().to_string();
+        let err = smol::block_on(fs.grep(params)).unwrap_err().to_string();
         assert!(err.starts_with("invalid regex pattern"), "{err}");
     }
 

@@ -17,7 +17,7 @@ Tool handlers fail with `{ llm_output = msg, is_error = true }`; a plain string 
 
 ## maki.fs backends
 
-All `maki.fs` I/O dispatches through the `FsBackend` trait (`api/fs/mod.rs`). Two backends:
+All `maki.fs` I/O dispatches through the `FsBackend` trait (`api/fs/mod.rs`), async and object-safe via boxed futures (`BoxFuture<'_, T>`). Backends that perform blocking I/O hop to the smol thread pool themselves (`RealFs` wraps each call in `smol::unblock`); unit tests drive the methods with `smol::block_on`. Two backends:
 
 - `RealFs` (`api/fs/real.rs`): production. The exact semantics `maki.fs` always had — symlinks, gitignore, permissions, real mtimes. Keep it behavior-preserving; the `api::fs::tests` suite in `mod.rs` is the regression proof.
 - `InMemoryFs` (`api/fs/in_memory.rs`): hermetic tests. Deliberately dumb — no symlinks, no gitignore, no permissions, file mtime is an insertion counter. Behavior tests must not rely on real-filesystem vagaries (project roots derived from `.git`, gitignore filtering); those belong in the real-backend suite.

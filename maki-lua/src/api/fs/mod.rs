@@ -55,29 +55,39 @@ pub enum FsError {
     Message(String),
 }
 
-/// Sync on purpose: object-safe without future boxing. Callers hop to the
-/// thread pool with `smol::unblock`.
+/// Object-safe async return: a boxed future borrowing from `&self` only.
+pub(crate) type BoxFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// All methods return a boxed future so the trait stays object-safe; a
+/// backend that performs blocking I/O hops to a thread pool itself
+/// (`RealFs` uses `smol::unblock`).
 pub trait FsBackend: Send + Sync {
-    fn read(&self, path: &Path) -> std::io::Result<String>;
-    fn read_bytes(&self, path: &Path) -> std::io::Result<Vec<u8>>;
-    fn stat(&self, path: &Path) -> std::io::Result<FsMeta>;
-    fn write(&self, path: &Path, content: &[u8]) -> std::io::Result<()>;
-    fn atomic_write(&self, path: &Path, content: &[u8]) -> std::io::Result<()>;
-    fn rm(&self, path: &Path, recursive: bool, force: bool) -> std::io::Result<()>;
-    fn mkdir(&self, path: &Path, parents: bool) -> std::io::Result<()>;
-    fn dir(&self, path: &Path, max_depth: u32) -> Result<Vec<(String, &'static str)>, FsError>;
+    fn read(&self, path: PathBuf) -> BoxFuture<'_, std::io::Result<String>>;
+    fn read_bytes(&self, path: PathBuf) -> BoxFuture<'_, std::io::Result<Vec<u8>>>;
+    fn stat(&self, path: PathBuf) -> BoxFuture<'_, std::io::Result<FsMeta>>;
+    fn write(&self, path: PathBuf, content: Vec<u8>) -> BoxFuture<'_, std::io::Result<()>>;
+    fn atomic_write(&self, path: PathBuf, content: Vec<u8>) -> BoxFuture<'_, std::io::Result<()>>;
+    fn rm(&self, path: PathBuf, recursive: bool, force: bool)
+    -> BoxFuture<'_, std::io::Result<()>>;
+    fn mkdir(&self, path: PathBuf, parents: bool) -> BoxFuture<'_, std::io::Result<()>>;
+    fn dir(
+        &self,
+        path: PathBuf,
+        max_depth: u32,
+    ) -> BoxFuture<'_, Result<Vec<(String, &'static str)>, FsError>>;
     fn glob(
         &self,
-        patterns: &[String],
-        path: Option<&str>,
+        patterns: Vec<String>,
+        path: Option<String>,
         limit: Option<usize>,
         gitignore: bool,
         sort_mtime: bool,
-    ) -> Result<Vec<String>, FsError>;
+    ) -> BoxFuture<'_, Result<Vec<String>, FsError>>;
     fn grep(
         &self,
         params: maki_agent::tools::grep::GrepParams,
-    ) -> Result<(PathBuf, Vec<maki_agent::GrepFileEntry>), FsError>;
+    ) -> BoxFuture<'_, Result<(PathBuf, Vec<maki_agent::GrepFileEntry>), FsError>>;
 }
 
 pub(crate) struct FsBackendHandle(pub(crate) std::sync::Arc<dyn FsBackend>);
@@ -141,7 +151,7 @@ fn path_to_string(p: &Path) -> LuaResult<String> {
 async fn read(lua: Lua, path: String) -> LuaResult<Pair<String>> {
     let abs = make_absolute(&path)?;
     let fs = backend(&lua);
-    match smol::unblock(move || fs.read(&abs)).await {
+    match fs.read(abs).await {
         Ok(s) => Ok((Some(s), None)),
         Err(e) if e.kind() == ErrorKind::InvalidData => {
             Err(mlua::Error::runtime("non-utf8 content; use read_bytes"))
@@ -163,7 +173,7 @@ async fn read(lua: Lua, path: String) -> LuaResult<Pair<String>> {
 async fn read_bytes(lua: Lua, path: String) -> LuaResult<Pair<Buffer>> {
     let abs = make_absolute(&path)?;
     let fs = backend(&lua);
-    let bytes = try_pair!(smol::unblock(move || fs.read_bytes(&abs)).await);
+    let bytes = try_pair!(fs.read_bytes(abs).await);
     Ok((Some(lua.create_buffer(bytes)?), None))
 }
 
@@ -184,7 +194,7 @@ async fn read_bytes(lua: Lua, path: String) -> LuaResult<Pair<Buffer>> {
 async fn metadata(lua: Lua, path: String) -> LuaResult<Pair<Table>> {
     let abs = make_absolute(&path)?;
     let fs = backend(&lua);
-    match smol::unblock(move || fs.stat(&abs)).await {
+    match fs.stat(abs).await {
         Ok(meta) => {
             let tbl = lua.create_table()?;
             tbl.set("size", meta.size)?;
@@ -334,32 +344,29 @@ async fn root(lua: Lua, source: String, marker: Value) -> LuaResult<Option<Strin
     };
 
     let fs = backend(&lua);
-    smol::unblock(move || {
-        // `stat` follows symlinks, like the old `is_file`/`exists` probes.
-        // Any stat error counts as missing, as `!Path::exists()` did.
-        let start = Path::new(&source);
-        let stat = fs.stat(start);
-        let start_is_file = matches!(&stat, Ok(meta) if meta.is_file);
-        let start = if start_is_file || stat.is_err() {
-            start.parent().unwrap_or(start)
-        } else {
-            start
-        };
+    // `stat` follows symlinks, like the old `is_file`/`exists` probes.
+    // Any stat error counts as missing, as `!Path::exists()` did.
+    let start = Path::new(&source);
+    let stat = fs.stat(start.to_path_buf()).await;
+    let start_is_file = matches!(&stat, Ok(meta) if meta.is_file);
+    let start = if start_is_file || stat.is_err() {
+        start.parent().unwrap_or(start)
+    } else {
+        start
+    };
 
-        let mut dir = make_absolute(start.to_str().unwrap_or_default())?;
+    let mut dir = make_absolute(start.to_str().unwrap_or_default())?;
 
-        loop {
-            for m in &markers {
-                if fs.stat(&dir.join(m)).is_ok() {
-                    return Ok(Some(path_to_string(&dir)?));
-                }
-            }
-            if !dir.pop() {
-                return Ok(None);
+    loop {
+        for m in &markers {
+            if fs.stat(dir.join(m)).await.is_ok() {
+                return Ok(Some(path_to_string(&dir)?));
             }
         }
-    })
-    .await
+        if !dir.pop() {
+            return Ok(None);
+        }
+    }
 }
 
 /// Compute a relative path from {base} to {target}.
@@ -427,7 +434,7 @@ async fn dir(lua: Lua, path: String, opts: Option<Table>) -> LuaResult<Pair<Tabl
     };
     let fs = backend(&lua);
 
-    let result = smol::unblock(move || fs.dir(&abs, max_depth)).await;
+    let result = fs.dir(abs, max_depth).await;
 
     let entries = try_pair!(result);
     let tbl = lua.create_table()?;
@@ -453,7 +460,7 @@ async fn dir(lua: Lua, path: String, opts: Option<Table>) -> LuaResult<Pair<Tabl
 async fn write(lua: Lua, path: String, content: String) -> LuaResult<Pair<bool>> {
     let abs = make_absolute(&path)?;
     let fs = backend(&lua);
-    let result = smol::unblock(move || fs.write(&abs, content.as_bytes())).await;
+    let result = fs.write(abs, content.into_bytes()).await;
     Ok(pair(result.map(|()| true)))
 }
 
@@ -471,7 +478,7 @@ async fn write(lua: Lua, path: String, content: String) -> LuaResult<Pair<bool>>
 async fn atomic_write(lua: Lua, path: String, content: String) -> LuaResult<Pair<bool>> {
     let abs = make_absolute(&path)?;
     let fs = backend(&lua);
-    let result = smol::unblock(move || fs.atomic_write(&abs, content.as_bytes())).await;
+    let result = fs.atomic_write(abs, content.into_bytes()).await;
     Ok(pair(result.map(|()| true)))
 }
 
@@ -499,7 +506,7 @@ async fn rm(lua: Lua, path: String, opts: Option<Table>) -> LuaResult<Pair<bool>
         .and_then(|t| t.get::<bool>("force").ok())
         .unwrap_or(false);
     let fs = backend(&lua);
-    let result = smol::unblock(move || fs.rm(&abs, recursive, force)).await;
+    let result = fs.rm(abs, recursive, force).await;
     Ok(pair(result.map(|()| true)))
 }
 
@@ -519,7 +526,7 @@ async fn mkdir(lua: Lua, path: String, opts: Option<Table>) -> LuaResult<Pair<bo
         .and_then(|t| t.get::<bool>("parents").ok())
         .unwrap_or(false);
     let fs = backend(&lua);
-    let result = smol::unblock(move || fs.mkdir(&abs, parents)).await;
+    let result = fs.mkdir(abs, parents).await;
     Ok(pair(result.map(|()| true)))
 }
 
@@ -562,11 +569,10 @@ async fn glob(lua: Lua, pattern: Value, opts: Option<Table>) -> LuaResult<Pair<T
     let sort_mtime = sort.as_deref() == Some("mtime");
 
     let fs = backend(&lua);
-    let result: Result<Vec<String>, String> = smol::unblock(move || {
-        fs.glob(&patterns, path.as_deref(), limit, gitignore, sort_mtime)
-            .map_err(|e| e.to_string())
-    })
-    .await;
+    let result: Result<Vec<String>, String> = fs
+        .glob(patterns, path, limit, gitignore, sort_mtime)
+        .await
+        .map_err(|e| e.to_string());
 
     let paths = try_pair!(result.map_err(|e| format!("glob: {e}")));
     let tbl = lua.create_table()?;
@@ -620,7 +626,7 @@ async fn grep(lua: Lua, pattern: String, opts: Option<Table>) -> LuaResult<Pair<
     }
 
     let fs = backend(&lua);
-    let result = smol::unblock(move || fs.grep(params)).await;
+    let result = fs.grep(params).await;
 
     let (base, entries) = try_pair!(result.map_err(|e| e.to_string()));
     let arr = lua.create_table()?;
