@@ -14,3 +14,12 @@ Throwing is reserved for programmer errors, like passing a number where a string
 A call with nothing to return still answers `(true, nil)` on success, so `if not ok` always means failure.
 
 Tool handlers fail with `{ llm_output = msg, is_error = true }`; a plain string is always success (only `is_error` flags the result as an error to the provider).
+
+## maki.fs backends
+
+All `maki.fs` I/O dispatches through the `FsBackend` trait (`api/fs/mod.rs`). Two backends:
+
+- `RealFs` (`api/fs/real.rs`): production. The exact semantics `maki.fs` always had — symlinks, gitignore, permissions, real mtimes. Keep it behavior-preserving; the `api::fs::tests` suite in `mod.rs` is the regression proof.
+- `InMemoryFs` (`api/fs/in_memory.rs`): hermetic tests. Deliberately dumb — no symlinks, no gitignore, no permissions, file mtime is an insertion counter. Behavior tests must not rely on real-filesystem vagaries (project roots derived from `.git`, gitignore filtering); those belong in the real-backend suite.
+
+The backend is resolved per Lua state via app_data (`FsBackendHandle`); a state that carries none falls back to a static `RealFs`, so bare `Lua::new()` unit tests still hit the disk. Test hosts boot disk-free: `test_support::spawn_host_for_tests` runs on `InMemoryFs` with the synthetic `TEST_STATE_DIR` (never created on the real disk), and `PluginHostGuard::backend()` exposes the backend for assertions (see `tests/in_memory_host.rs`).

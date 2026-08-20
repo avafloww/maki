@@ -2621,6 +2621,7 @@ dependencies = [
  "flume 0.11.1",
  "futures",
  "futures-lite",
+ "globset",
  "htmd",
  "humantime",
  "image",

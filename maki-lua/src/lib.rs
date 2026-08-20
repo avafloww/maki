@@ -177,41 +177,45 @@ pub mod test_support {
         (crate::EventHandle::probed_for_test(tx), RequestProbe(rx))
     }
 
-    /// Boots a real `PluginHost` (background Lua thread) pre-loading the given
-    /// builtins, returning a live `EventHandle` plus a guard that keeps the
-    /// host alive until it drops. Real-host tests use this instead of the
-    /// disconnected/probed handles so end-to-end Lua behavior (e.g. pulling a
-    /// `splash.render` frame) can be exercised.
-    pub fn spawn_host_for_tests(plugins: &[&str]) -> (crate::EventHandle, PluginHostGuard) {
-        let state_dir = tempfile::tempdir().unwrap();
-        let host = spawn_host_for_tests_with_state(plugins, state_dir.path().to_owned());
-        let handle = host.event_handle();
-        (handle, PluginHostGuard { host, state_dir })
-    }
+    /// Synthetic state dir for hosts booted by [`spawn_host_for_tests`].
+    /// Never created on the real disk; hosts run on the in-memory backend.
+    pub const TEST_STATE_DIR: &str = "/maki-test-state";
 
-    pub fn spawn_host_for_tests_with_state(
-        plugins: &[&str],
-        state_dir: std::path::PathBuf,
-    ) -> PluginHost {
+    /// Boots a real `PluginHost` (background Lua thread) pre-loading the given
+    /// builtins on an in-memory FS backend with a synthetic state dir, so the
+    /// whole host runs disk-free. Returns a live `EventHandle` plus a guard
+    /// that keeps the host alive until it drops. Real-host tests use this
+    /// instead of the disconnected/probed handles so end-to-end Lua behavior
+    /// (e.g. pulling a `splash.render` frame) can be exercised.
+    pub fn spawn_host_for_tests(plugins: &[&str]) -> (crate::EventHandle, PluginHostGuard) {
         use maki_config::PluginsConfig;
         use std::collections::HashMap;
         use std::sync::Arc;
 
+        let backend = Arc::new(crate::api::fs::InMemoryFs::new());
         let registry = Arc::new(maki_agent::tools::ToolRegistry::new());
-        let mut host = crate::PluginHost::with_state_dir_for_tests(registry, state_dir).unwrap();
+        let fs: std::sync::Arc<dyn crate::api::fs::FsBackend> = Arc::clone(&backend) as _;
+        let mut host = crate::PluginHost::with_fs_for_tests(
+            registry,
+            fs,
+            std::path::PathBuf::from(TEST_STATE_DIR),
+        )
+        .unwrap();
         let config = PluginsConfig {
             enabled: true,
             names: plugins.iter().map(|s| s.to_string()).collect(),
             opts: HashMap::new(),
         };
         host.load_builtins(&config).unwrap();
-        host
+        let handle = host.event_handle();
+        (handle, PluginHostGuard { host, backend })
     }
 
-    /// Keeps a booted [`PluginHost`] alive (its `Drop` joins the Lua thread).
+    /// Keeps a booted [`PluginHost`] alive (its `Drop` joins the Lua thread)
+    /// and exposes the in-memory backend the host ran on.
     pub struct PluginHostGuard {
         host: PluginHost,
-        state_dir: tempfile::TempDir,
+        backend: std::sync::Arc<crate::api::fs::InMemoryFs>,
     }
 
     impl PluginHostGuard {
@@ -219,8 +223,8 @@ pub mod test_support {
             &self.host
         }
 
-        pub fn state_dir(&self) -> &std::path::Path {
-            self.state_dir.path()
+        pub fn backend(&self) -> &std::sync::Arc<crate::api::fs::InMemoryFs> {
+            &self.backend
         }
     }
 

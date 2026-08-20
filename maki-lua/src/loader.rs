@@ -11,6 +11,7 @@ use maki_agent::tools::ToolRegistry;
 use maki_config::{PluginsConfig, RawConfig};
 
 use crate::api::completion::{CompletionCtx, ItemSpec};
+use crate::api::fs::{FsBackend, RealFs};
 use crate::api::keymap::KeymapReader;
 use crate::api::options::{PluginOptionSpecs, PluginOpts};
 use crate::api::util::command::{HintReader, LuaCommandReader, UiAction};
@@ -158,6 +159,7 @@ static BUNDLED_DIRS: LazyLock<&'static [&'static Dir<'static>]> = LazyLock::new(
 pub struct PluginHost {
     inner: LuaThread,
     plugin_rules: Arc<PluginRuleStore>,
+    registry: Arc<ToolRegistry>,
 }
 
 impl Drop for PluginHost {
@@ -189,35 +191,45 @@ impl PluginHost {
     /// interpreter with full debug info. Applied at VM creation, so
     /// every chunk gets it, init.lua files included.
     pub fn with_jit(registry: Arc<ToolRegistry>, jit: bool) -> Result<Self, PluginError> {
-        Self::with_jit_and_state_dir(registry, jit, None)
+        Self::with_jit_and_state_dir(registry, jit, Arc::new(RealFs), None)
     }
 
-    pub(crate) fn with_state_dir_for_tests(
+    pub(crate) fn with_fs_for_tests(
         registry: Arc<ToolRegistry>,
+        fs: Arc<dyn FsBackend>,
         state_dir: PathBuf,
     ) -> Result<Self, PluginError> {
-        Self::with_jit_and_state_dir(registry, true, Some(state_dir))
+        Self::with_jit_and_state_dir(registry, true, fs, Some(state_dir))
     }
 
     fn with_jit_and_state_dir(
         registry: Arc<ToolRegistry>,
         jit: bool,
+        fs: Arc<dyn FsBackend>,
         state_dir: Option<PathBuf>,
     ) -> Result<Self, PluginError> {
         let modes = Arc::new(maki_agent::ModeRegistry::builtin());
         let plugin_rules = Arc::new(PluginRuleStore::default());
         let lua = runtime::spawn(
-            registry,
+            Arc::clone(&registry),
             modes,
             *BUNDLED_DIRS,
             jit,
             Arc::clone(&plugin_rules),
             state_dir,
+            fs,
         )?;
         Ok(Self {
             inner: lua,
             plugin_rules,
+            registry,
         })
+    }
+
+    /// The tool registry the host booted with, so tests can execute the
+    /// plugins' tools outside the Lua thread.
+    pub fn registry(&self) -> Arc<ToolRegistry> {
+        Arc::clone(&self.registry)
     }
 
     /// The store that `maki.api.register_permission_rule` writes into. Hand

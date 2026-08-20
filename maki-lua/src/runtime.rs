@@ -34,6 +34,7 @@ use crate::api::autocmd::AutocmdStore;
 use crate::api::completion::{self, CompletionCtx, ItemSpec};
 use crate::api::contribution::ContributionStore;
 use crate::api::create_maki_global;
+use crate::api::fs::FsBackend;
 use crate::api::r#fn::{JobOwner, JobStore, deliver_job_event};
 use crate::api::keymap::KeymapReader;
 use crate::api::keymap::{KeymapStore, KeymapWriter};
@@ -1470,6 +1471,7 @@ impl LuaRuntime {
         jit: bool,
         plugin_rules: Arc<PluginRuleStore>,
         state_dir: Option<PathBuf>,
+        fs: Arc<dyn FsBackend>,
     ) -> Result<Self, PluginError> {
         let lua = Lua::new();
         let compiler = install_compiler(&lua, jit);
@@ -1515,6 +1517,7 @@ impl LuaRuntime {
         if let Some(state_dir) = state_dir {
             lua.set_app_data(crate::api::env::StateDirOverride(state_dir));
         }
+        lua.set_app_data(crate::api::fs::FsBackendHandle(fs));
         completion::install(&lua);
 
         let plugins: PluginMap = Rc::new(RefCell::new(HashMap::new()));
@@ -2706,6 +2709,7 @@ pub fn spawn(
     jit: bool,
     plugin_rules: Arc<PluginRuleStore>,
     state_dir: Option<PathBuf>,
+    fs: Arc<dyn FsBackend>,
 ) -> Result<LuaThread, PluginError> {
     let (tx, rx) = flume::unbounded::<Request>();
     let (prio_tx, prio_rx) = flume::unbounded::<Request>();
@@ -2753,6 +2757,7 @@ pub fn spawn(
                 jit,
                 plugin_rules,
                 state_dir,
+                fs,
             ) {
                 Ok(r) => {
                     let _ = init_tx.send(Ok(()));
