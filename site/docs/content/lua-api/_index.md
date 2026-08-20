@@ -4765,7 +4765,7 @@ current row instead of jumping to the best match.
   - `on_change` (`function`) `on_change(item, index)` with the original item and its 1-based index, fired when the selection moves.
   - `on_timeout` (`function`) `on_timeout()` when the idle window elapses.
 
-**Returns:** (`table`) `{ type = "choice", index = n }` with the 1-based index of the chosen item, `{ type = "delete", index = n }` when the user presses Ctrl+D twice on an item (the first press flashes "Press Ctrl+D again to delete"), or `{ type = "close" }` when dismissed with Esc or Ctrl+C, or when no UI is attached.
+**Returns:** (`table`) `{ type = "choice", index = n }` with the 1-based index of the chosen item, `{ type = "delete", index = n }` when the user presses Ctrl+D twice on an item (the first press flashes "Press Ctrl+D again to delete"), or `{ type = "close" }` when dismissed with Esc or Ctrl+C, or when the UI channel drops mid-pick.
 
 **Example:**
 
@@ -5456,18 +5456,6 @@ M.EMPTY_OLD_STRING = "old_string must not be empty"
 -- whitespace and indentation drift. Returns the new content, or nil plus
 -- one of the error constants above.
 function M.replace(content, old_string, new_string, replace_all)
-```
-
-### `require("maki.list_picker")`
-
-```lua
--- Open a fuzzy-filter picker in a floating window and block until the user
--- decides. {items} is a list of strings or { label, detail? } tables. {opts}:
--- title, footer, cursor (initial index), submit_keys (extra submit keys
--- besides enter), on_change(item, index), notify_initial (call on_change for
--- the initial item), on_timeout(), and timeout_ms.
--- Returns { type = "choice"|"delete", index } or { type = "close" }.
-function ListPicker.open(items, opts)
 ```
 
 ### `require("maki.output_limits")`

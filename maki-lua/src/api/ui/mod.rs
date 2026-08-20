@@ -324,7 +324,7 @@ async fn open_editor(
 ///   - timeout_ms (integer): idle window; when it elapses `on_timeout` fires, and keeps firing while the dialog stays idle. Zero or omitted disables the window.
 ///   - on_change (function): `on_change(item, index)` with the original item and its 1-based index, fired when the selection moves.
 ///   - on_timeout (function): `on_timeout()` when the idle window elapses.
-/// @return (table) `{ type = "choice", index = n }` with the 1-based index of the chosen item, `{ type = "delete", index = n }` when the user presses Ctrl+D twice on an item (the first press flashes "Press Ctrl+D again to delete"), or `{ type = "close" }` when dismissed with Esc or Ctrl+C, or when no UI is attached.
+/// @return (table) `{ type = "choice", index = n }` with the 1-based index of the chosen item, `{ type = "delete", index = n }` when the user presses Ctrl+D twice on an item (the first press flashes "Press Ctrl+D again to delete"), or `{ type = "close" }` when dismissed with Esc or Ctrl+C, or when the UI channel drops mid-pick.
 /// @example
 /// local result = maki.ui.open_list_picker({ "alpha", "beta" }, { title = "Pick" })
 /// if result.type == "choice" then

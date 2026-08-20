@@ -1,5 +1,3 @@
-local ListPicker = require("maki.list_picker")
-
 local REGISTRY = "splash.gallery"
 local renderers = {}
 local renderers_revision = -1
@@ -293,7 +291,7 @@ local function command(opts)
   end
 
   local picker_items = items()
-  local result = ListPicker.open(picker_items, {
+  local result = maki.ui.open_list_picker(picker_items, {
     title = "Splash gallery",
     cursor = item_index(picker_items, committed.name),
     timeout_ms = 100,

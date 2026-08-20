@@ -1,6 +1,5 @@
 local ToolView = require("maki.tool_view")
 local helpers = require("memory_helpers")
-local ListPicker = require("maki.list_picker")
 
 local WRITE_TOOLS = { "write", "edit", "multiedit", "edit_lines", "insert_lines" }
 
@@ -292,7 +291,7 @@ maki.api.register_command({
       if last_cursor > #items then
         last_cursor = math.max(1, #items)
       end
-      local event = ListPicker.open(items, {
+      local event = maki.ui.open_list_picker(items, {
         title = " Memory Files ",
         cursor = last_cursor,
         submit_keys = { "ctrl+o" },

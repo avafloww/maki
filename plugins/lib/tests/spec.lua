@@ -1216,8 +1216,6 @@ case("text_input_trace_cases", function()
   end
 end)
 
-local ListPicker = require("maki.list_picker")
-
 case("set_highlight_number_width_scales", function()
   local buf = mock_buf()
   local view = ToolView.new(buf, { max_lines = 200 })
@@ -1259,71 +1257,6 @@ case("set_highlight_toggle_keeps_lines_and_collapses_back", function()
   eq(view.expanded, false)
   eq(buf.lines[3][2][1], "c", "collapsed shows the head window")
   eq(buf.lines[4][1][1], "... (2 lines) (click to expand)")
-end)
-
-local function with_picker(events, opts, fn)
-  local original = { buf = maki.ui.buf, open_win = maki.ui.open_win }
-  local buf = mock_buf()
-  local cursors = {}
-  local event_index = 0
-  maki.ui.buf = function()
-    return buf
-  end
-  maki.ui.open_win = function()
-    return {
-      width = 40,
-      height = 10,
-      close = function() end,
-      set_cursor = function(_, line)
-        cursors[#cursors + 1] = line
-      end,
-      recv = function()
-        event_index = event_index + 1
-        return events[event_index]
-      end,
-    }
-  end
-  local ok, result = pcall(ListPicker.open, { "alpha", "beta", "gamma" }, opts)
-  maki.ui.buf, maki.ui.open_win = original.buf, original.open_win
-  assert(ok, tostring(result))
-  fn(result, buf, cursors)
-end
-
-case("list_picker_initial_callback_is_opt_in", function()
-  local changes = {}
-  with_picker({ { type = "close" } }, {
-    on_change = function(_, index)
-      changes[#changes + 1] = index
-    end,
-  }, function()
-    eq(#changes, 0, "initial selection does not notify by default")
-  end)
-  with_picker({ { type = "close" } }, {
-    notify_initial = true,
-    cursor = 2,
-    on_change = function(_, index)
-      changes[#changes + 1] = index
-    end,
-  }, function()
-    eq(changes[1], 2, "opt-in notifies the initial original index")
-  end)
-end)
-
-case("list_picker_navigation_filter_choice_and_cancel", function()
-  local changes = {}
-  with_picker({ { type = "key", key = "down" }, { type = "key", key = "a" }, { type = "key", key = "enter" } }, {
-    on_change = function(_, index)
-      changes[#changes + 1] = index
-    end,
-  }, function(result)
-    eq(result.type, "choice")
-    eq(result.index, 1, "filter resets to the best matching original item")
-    eq(changes[1], 2, "navigation notifies")
-    eq(changes[2], 1, "filter reset notifies")
-  end)
-  with_picker({ { type = "key", key = "esc" } }, {}, function(result)
-    eq(result.type, "close", "escape cancels")
-  end)
 end)
 
 local Spans = require("maki.spans")
