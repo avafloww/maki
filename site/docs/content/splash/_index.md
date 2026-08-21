@@ -113,7 +113,31 @@ maki.store.register("splash", "mysplash", {
 })
 ```
 
-The picker validates a selection before it persists the selection. If an active renderer fails later, the picker switches to the previous renderer and repairs the persisted selection asynchronously. Invalid or unavailable persisted entries fall back to the `default` splash.
+The picker validates a selection before it persists the selection. If an active renderer fails later, the picker switches to the previous renderer and repairs the persisted selection asynchronously. Invalid or unavailable persisted entries fall back to the `default` splash. Selections made with `persist = false` never touch the file.
+
+## Choosing a splash at startup
+
+The picker takes a `splash` option: the splash to select when maki boots. It wins over the persisted selection and updates it to the option's value, so it is a declarative default that re-wins on every boot; `/splash` can still override it at runtime.
+
+```lua
+maki.setup({
+  plugins = {
+    splashes = { splash = "aurora" },
+  },
+})
+```
+
+The name resolves once the registry has it: a bundled name is applied before the first frame, and a splash you registered in `init.lua` itself is applied at load time. An unknown name falls back to the `default` splash with a flash, and nothing is persisted.
+
+## Switching splashes programmatically
+
+Any Lua context can select a splash by firing the `SplashSelect` autocmd. The picker commits it with the same rules as `/splash`: it validates the renderer, persists the choice, and rolls back if the renderer fails later.
+
+```lua
+maki.api.exec_autocmds("SplashSelect", { data = { name = "aurora" } })
+```
+
+`data` needs `name` (the registry key). The optional `persist` flag (default `true`) skips the persisted selection, which is what a temporary switch wants.
 
 ## Lifecycle events
 

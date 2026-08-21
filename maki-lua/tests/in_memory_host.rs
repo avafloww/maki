@@ -501,6 +501,225 @@ fn splash_picker_re_resolves_after_contribution_unloads() {
     assert!(content.contains("name"), "repaired file: {content}");
 }
 
+// A splash that draws "b" rows and fails once it has been drawn twice: the
+// first draw is the commit-time validation, the second is the first served
+// frame, the third trips the rollback.
+const BOOM_SOURCE: &str = r##"
+local calls = 0
+
+local function render(w, h, _t, _fade)
+  calls = calls + 1
+  if calls > 2 then
+    error("late boom")
+  end
+  local rows = {}
+  for i = 1, h do
+    rows[i] = { { glyphs = string.rep("b", w), style = "#00ff41" } }
+  end
+  return rows
+end
+
+maki.store.register("splash", "boom", {
+  label = "boom",
+  description = "test splash",
+  renderer = render,
+})
+"##;
+
+fn splash_opts(
+    splash: &str,
+) -> std::collections::HashMap<String, serde_json::Map<String, serde_json::Value>> {
+    let mut opts = std::collections::HashMap::new();
+    opts.insert(
+        "splashes".to_string(),
+        serde_json::json!({ "splash": splash })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    opts
+}
+
+#[test]
+fn splash_picker_startup_option_wins_over_saved() {
+    let fs = Arc::new(InMemoryFs::new());
+    fs.seed(&selection_path(), SELECTION_MATRIX_JSON.as_bytes().to_vec());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_and_opts_for_tests(
+        &["splashes", "splashes_default"],
+        Arc::clone(&fs),
+        None,
+        splash_opts("voronoi"),
+    );
+
+    // The option applies during boot, before the first frame is pulled.
+    let frame = pull_frame(&handle, None);
+    assert!(
+        !frame_text(&frame).contains("luna-maki"),
+        "the option splash draws, not the starfield"
+    );
+    let content = wait_for_selection(&guard, "voronoi");
+    assert!(content.contains("name"), "persisted file: {content}");
+}
+
+#[test]
+fn splash_picker_startup_option_selects_load_time_contribution() {
+    let fs = Arc::new(InMemoryFs::new());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_and_opts_for_tests(
+        &["splashes", "splashes_default"],
+        Arc::clone(&fs),
+        Some(CONTRIBUTION_SOURCE),
+        splash_opts("vortex"),
+    );
+
+    let frame = pull_frame(&handle, Some("sss"));
+    assert!(
+        !frame.rows.is_empty(),
+        "the load-time contribution serves before the first frame"
+    );
+    let content = wait_for_selection(&guard, "vortex");
+    assert!(content.contains("name"), "persisted file: {content}");
+}
+
+#[test]
+fn splash_picker_startup_option_typo_keeps_fallback() {
+    let fs = Arc::new(InMemoryFs::new());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_and_opts_for_tests(
+        &["splashes", "splashes_default"],
+        Arc::clone(&fs),
+        None,
+        splash_opts("nope"),
+    );
+
+    let frame = pull_frame(&handle, Some("luna-maki"));
+    assert!(!frame.rows.is_empty(), "the fallback splash serves frames");
+    assert!(
+        selection_content(&guard).is_none(),
+        "an unresolvable startup selection must not persist a file"
+    );
+}
+
+#[test]
+fn splash_picker_splash_select_commits_and_persists() {
+    let fs = Arc::new(InMemoryFs::new());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
+        &["splashes", "splashes_default"],
+        Arc::clone(&fs),
+        None,
+    );
+
+    handle.fire_autocmd("SplashSelect", serde_json::json!({ "name": "matrix" }));
+    let content = wait_for_selection(&guard, SELECTION_MATRIX);
+    assert!(content.contains("name"), "persisted file: {content}");
+    let frame = pull_frame(&handle, None);
+    assert!(
+        !frame_text(&frame).contains("luna-maki"),
+        "the selected splash serves frames"
+    );
+}
+
+#[test]
+fn splash_picker_splash_select_transient_keeps_file() {
+    let fs = Arc::new(InMemoryFs::new());
+    fs.seed(&selection_path(), SELECTION_MATRIX_JSON.as_bytes().to_vec());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
+        &["splashes", "splashes_default"],
+        Arc::clone(&fs),
+        None,
+    );
+
+    // matrix (persisted) is committed from the seeded file.
+    let frame = pull_frame(&handle, None);
+    assert!(
+        !frame_text(&frame).contains("luna-maki"),
+        "the seeded selection draws before the switch"
+    );
+
+    handle.fire_autocmd(
+        "SplashSelect",
+        serde_json::json!({ "name": "voronoi", "persist": false }),
+    );
+    let frame = pull_frame(&handle, None);
+    assert!(
+        !frame_text(&frame).contains("luna-maki"),
+        "the transient selection serves frames"
+    );
+    let content = wait_for_selection(&guard, SELECTION_MATRIX);
+    assert!(
+        content.contains(SELECTION_MATRIX),
+        "the transient switch must not rewrite the file: {content}"
+    );
+}
+
+#[test]
+fn splash_picker_rollback_does_not_persist_transient_chain() {
+    let fs = Arc::new(InMemoryFs::new());
+    fs.seed(&selection_path(), SELECTION_MATRIX_JSON.as_bytes().to_vec());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
+        &["splashes", "splashes_default"],
+        Arc::clone(&fs),
+        Some(CONTRIBUTION_SOURCE),
+    );
+    guard.host().load_source("boom", BOOM_SOURCE).unwrap();
+
+    // matrix (persisted) is committed from the seeded file.
+    let frame = pull_frame(&handle, None);
+    assert!(
+        !frame_text(&frame).contains("luna-maki"),
+        "the seeded selection draws before the switches"
+    );
+
+    handle.fire_autocmd(
+        "SplashSelect",
+        serde_json::json!({ "name": "vortex", "persist": false }),
+    );
+    let frame = pull_frame(&handle, Some("sss"));
+    assert!(!frame.rows.is_empty(), "the transient vortex serves");
+
+    // boom passes its one-shot validation, serves one frame, then fails: the
+    // rollback must land on the transient vortex and leave the file alone.
+    handle.fire_autocmd(
+        "SplashSelect",
+        serde_json::json!({ "name": "boom", "persist": false }),
+    );
+    let frame = pull_frame(&handle, Some("bbb"));
+    assert!(
+        !frame.rows.is_empty(),
+        "the transient boom serves its first frame"
+    );
+    let frame = pull_frame(&handle, Some("sss"));
+    assert!(
+        !frame.rows.is_empty(),
+        "the transient vortex serves after the rollback"
+    );
+
+    // Settle queued async writes: a load round-trip drains the Lua thread's
+    // task queue before it answers.
+    guard.host().load_source("settle", "return {}").unwrap();
+    let content = selection_content(&guard).unwrap_or_default();
+    assert!(
+        content.contains(SELECTION_MATRIX),
+        "the rollback must not persist the transient chain: {content}"
+    );
+}
+
+#[test]
+fn splash_picker_splash_select_rejects_bad_data() {
+    let fs = Arc::new(InMemoryFs::new());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
+        &["splashes", "splashes_default"],
+        Arc::clone(&fs),
+        None,
+    );
+
+    handle.fire_autocmd("SplashSelect", serde_json::json!({}));
+    let frame = pull_frame(&handle, Some("luna-maki"));
+    assert!(!frame.rows.is_empty(), "the fallback splash serves frames");
+    assert!(
+        selection_content(&guard).is_none(),
+        "bad data must not persist a selection"
+    );
+}
+
 const TIMER_TICKS_REL: &str = "timer_ticks";
 const TIMER_FOREVER_REL: &str = "timer_forever";
 const TIMER_QUIESCENCE: Duration = Duration::from_millis(300);

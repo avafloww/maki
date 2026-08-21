@@ -237,6 +237,12 @@ maki.setup({
 |-------|------|---------|-----|-------------|
 | `plugin_dev` | boolean | `true` | - | Offer the builtin maki-plugin-dev skill for writing maki plugins. |
 
+### `plugins.splashes`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `splash` | string | - | - | Splash to select at startup, e.g. 'aurora' or 'default'. Wins over the persisted selection, re-wins on every boot, and updates the persisted selection to its value. |
+
 ### `plugins.task`
 
 | Field | Type | Default | Min | Description |

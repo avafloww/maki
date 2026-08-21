@@ -219,8 +219,23 @@ pub mod test_support {
         fs: std::sync::Arc<crate::api::fs::InMemoryFs>,
         pre_init: Option<&str>,
     ) -> (crate::EventHandle, PluginHostGuard) {
+        spawn_host_with_fs_and_opts_for_tests(
+            plugins,
+            fs,
+            pre_init,
+            std::collections::HashMap::new(),
+        )
+    }
+
+    /// Same as [`spawn_host_with_fs_for_tests`], with per-builtin options
+    /// passed through to `maki.api.register_options`.
+    pub fn spawn_host_with_fs_and_opts_for_tests(
+        plugins: &[&str],
+        fs: std::sync::Arc<crate::api::fs::InMemoryFs>,
+        pre_init: Option<&str>,
+        opts: std::collections::HashMap<String, serde_json::Map<String, serde_json::Value>>,
+    ) -> (crate::EventHandle, PluginHostGuard) {
         use maki_config::PluginsConfig;
-        use std::collections::HashMap;
         use std::sync::Arc;
 
         let registry = Arc::new(maki_agent::tools::ToolRegistry::new());
@@ -237,7 +252,7 @@ pub mod test_support {
         let config = PluginsConfig {
             enabled: true,
             names: plugins.iter().map(|s| s.to_string()).collect(),
-            opts: HashMap::new(),
+            opts,
         };
         host.load_builtins(&config).unwrap();
         let handle = host.event_handle();

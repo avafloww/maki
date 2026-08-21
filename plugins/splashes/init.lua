@@ -8,9 +8,19 @@ local dirty = true
 local candidate
 local committed = { name = FALLBACK_NAME }
 local previous_committed
-local persisted_name
 local last_render
 local rollback_queued = false
+local startup
+
+local plugin_opts = maki.api.register_options({
+  splash = {
+    type = "string",
+    desc = "Splash to select at startup, e.g. 'aurora' or 'default'. Wins over the persisted selection, re-wins on every boot, and updates the persisted selection to its value.",
+  },
+})
+if type(plugin_opts.splash) == "string" then
+  startup = plugin_opts.splash:lower()
+end
 
 local function refresh_renderers()
   if not dirty then
@@ -130,7 +140,7 @@ local function load_preference()
   return nil, true
 end
 
-local function persist(name)
+local function save_preference(name)
   local dir = state_dir()
   if not dir then
     return true
@@ -142,16 +152,8 @@ local function persist(name)
   return maki.fs.atomic_write(maki.fs.joinpath(dir, STATE_FILE), maki.json.encode({ name = name }))
 end
 
-local function save_preference(name)
-  local ok, err = persist(name)
-  if ok then
-    persisted_name = name
-  end
-  return ok, err
-end
-
-local function queue_rollback()
-  if rollback_queued or persisted_name == committed.name then
+local function queue_rollback(failed_persisted)
+  if rollback_queued or not failed_persisted then
     return
   end
   rollback_queued = true
@@ -179,7 +181,7 @@ local function cancel()
   candidate = nil
 end
 
-local function commit(selection)
+local function commit(selection, persist)
   selection = selection or candidate
   if not selection then
     return nil, "no splash selected"
@@ -189,10 +191,13 @@ local function commit(selection)
     cancel()
     return nil, validation_err
   end
-  local saved, save_err = save_preference(selection.name)
-  if not saved then
-    cancel()
-    return nil, save_err
+  if persist then
+    local saved, save_err = save_preference(selection.name)
+    if not saved then
+      cancel()
+      return nil, save_err
+    end
+    selection.persisted = true
   end
   previous_committed, committed, candidate = committed, selection, nil
   rollback_queued = false
@@ -200,18 +205,28 @@ local function commit(selection)
 end
 
 local function rollback()
+  local failed = committed
   candidate = nil
   if previous_committed then
     committed, previous_committed = previous_committed, nil
   else
     committed = { name = FALLBACK_NAME }
   end
-  queue_rollback()
+  queue_rollback(failed.persisted)
 end
 
 local function render(prev, w, h, t, fade)
   local input = { prev = prev, w = w, h = h, t = t, fade = fade }
   last_render = input
+  -- A startup selection still pending here never became resolvable, so the
+  -- name is a typo or its plugin never loaded. Report once on the first frame.
+  if startup then
+    local pending = startup
+    startup = nil
+    maki.async.run(function()
+      maki.ui.flash("unknown splash: " .. pending)
+    end)
+  end
   if candidate then
     local pending = candidate
     local ok, frame = invoke(pending, input)
@@ -233,34 +248,13 @@ local function render(prev, w, h, t, fade)
   if restored then
     return restored_frame
   end
+  local failed = committed
   committed = { name = FALLBACK_NAME }
-  queue_rollback()
+  queue_rollback(failed.persisted)
   return prev(w, h, t, fade)
 end
 
-maki.api.set_slot("splash.render", render)
-
-maki.api.create_autocmd("StoreChanged", {
-  callback = function(ev)
-    if ev.data and ev.data.registry == REGISTRY then
-      dirty = true
-    end
-  end,
-})
-
--- Load time only reads the preference into `committed`; the first frame
--- resolves it. An unknown name fails then and rolls back to the fallback,
--- repairing the file.
-local saved, invalid_saved = load_preference()
-persisted_name = invalid_saved and "invalid" or saved or FALLBACK_NAME
-if saved then
-  committed = { name = saved }
-end
-if invalid_saved then
-  queue_rollback()
-end
-
-local function select_and_commit(name)
+local function select_and_commit(name, persist)
   if not candidate and committed.name == name then
     return true
   end
@@ -268,13 +262,35 @@ local function select_and_commit(name)
   if not selection then
     return nil, err
   end
-  return commit(selection)
+  return commit(selection, persist)
+end
+
+local function apply_startup()
+  if not startup then
+    return
+  end
+  local pending = startup
+  if committed.name == pending then
+    startup = nil
+    return
+  end
+  local selection, err = stage(pending)
+  if not selection then
+    return
+  end
+  startup = nil
+  maki.async.run(function()
+    local ok, err = commit(selection, true)
+    if not ok then
+      maki.ui.flash("splash selection failed: " .. tostring(err))
+    end
+  end)
 end
 
 local function command(opts)
   local name = opts.fargs[1]
   if name then
-    local ok, err = select_and_commit(name:lower())
+    local ok, err = select_and_commit(name:lower(), true)
     if not ok then
       maki.ui.flash("splash selection failed: " .. tostring(err))
     end
@@ -300,7 +316,7 @@ local function command(opts)
     if not selection or selection.name ~= item.name then
       selection = stage(item.name)
     end
-    local ok, err = commit(selection)
+    local ok, err = commit(selection, true)
     if not ok then
       maki.ui.flash("splash selection failed: " .. tostring(err))
     end
@@ -308,6 +324,35 @@ local function command(opts)
     cancel()
   end
 end
+
+maki.api.set_slot("splash.render", render)
+
+maki.api.create_autocmd("StoreChanged", {
+  callback = function(ev)
+    if ev.data and ev.data.registry == REGISTRY then
+      dirty = true
+      apply_startup()
+    end
+  end,
+})
+
+-- Programmatic selection: any Lua context (config, keymap, tool) can fire
+-- this. data = { name = <splash name>, persist = <boolean, default true> }.
+maki.api.create_autocmd("SplashSelect", {
+  callback = function(ev)
+    local data = ev.data
+    if type(data) ~= "table" or type(data.name) ~= "string" then
+      maki.ui.flash("SplashSelect requires data.name (string)")
+      return
+    end
+    maki.async.run(function()
+      local ok, err = select_and_commit(data.name:lower(), data.persist ~= false)
+      if not ok then
+        maki.ui.flash("splash selection failed: " .. tostring(err))
+      end
+    end)
+  end,
+})
 
 maki.api.register_command({
   name = "/splash",
@@ -336,7 +381,7 @@ maki.api.register_command({
       if not selection or selection.name ~= item.insertion then
         selection = stage(item.insertion)
       end
-      local ok, err = commit(selection)
+      local ok, err = commit(selection, true)
       if not ok then
         maki.ui.flash("splash selection failed: " .. tostring(err))
       end
@@ -345,5 +390,22 @@ maki.api.register_command({
   },
   handler = command,
 })
+
+-- Load time only reads the preference into `committed`; the first frame
+-- resolves it. An unknown name fails then and rolls back to the fallback,
+-- repairing the file.
+local saved, invalid_saved = load_preference()
+if saved then
+  committed = { name = saved, persisted = true }
+end
+if invalid_saved then
+  maki.async.run(function()
+    local ok, err = save_preference(FALLBACK_NAME)
+    if not ok then
+      maki.ui.flash("splash rollback failed: " .. tostring(err))
+    end
+  end)
+end
+apply_startup()
 
 return { render = render }
