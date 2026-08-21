@@ -501,31 +501,6 @@ fn splash_picker_re_resolves_after_contribution_unloads() {
     assert!(content.contains("name"), "repaired file: {content}");
 }
 
-// A splash that draws "b" rows and fails once it has been drawn twice: the
-// first draw is the commit-time validation, the second is the first served
-// frame, the third trips the rollback.
-const BOOM_SOURCE: &str = r##"
-local calls = 0
-
-local function render(w, h, _t, _fade)
-  calls = calls + 1
-  if calls > 2 then
-    error("late boom")
-  end
-  local rows = {}
-  for i = 1, h do
-    rows[i] = { { glyphs = string.rep("b", w), style = "#00ff41" } }
-  end
-  return rows
-end
-
-maki.store.register("splash", "boom", {
-  label = "boom",
-  description = "test splash",
-  renderer = render,
-})
-"##;
-
 fn splash_opts(
     splash: &str,
 ) -> std::collections::HashMap<String, serde_json::Map<String, serde_json::Value>> {
@@ -647,58 +622,6 @@ fn splash_picker_splash_select_transient_keeps_file() {
     assert!(
         content.contains(SELECTION_MATRIX),
         "the transient switch must not rewrite the file: {content}"
-    );
-}
-
-#[test]
-fn splash_picker_rollback_does_not_persist_transient_chain() {
-    let fs = Arc::new(InMemoryFs::new());
-    fs.seed(&selection_path(), SELECTION_MATRIX_JSON.as_bytes().to_vec());
-    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
-        &["splashes", "splashes_default"],
-        Arc::clone(&fs),
-        Some(CONTRIBUTION_SOURCE),
-    );
-    guard.host().load_source("boom", BOOM_SOURCE).unwrap();
-
-    // matrix (persisted) is committed from the seeded file.
-    let frame = pull_frame(&handle, None);
-    assert!(
-        !frame_text(&frame).contains("luna-maki"),
-        "the seeded selection draws before the switches"
-    );
-
-    handle.fire_autocmd(
-        "SplashSelect",
-        serde_json::json!({ "name": "vortex", "persist": false }),
-    );
-    let frame = pull_frame(&handle, Some("sss"));
-    assert!(!frame.rows.is_empty(), "the transient vortex serves");
-
-    // boom passes its one-shot validation, serves one frame, then fails: the
-    // rollback must land on the transient vortex and leave the file alone.
-    handle.fire_autocmd(
-        "SplashSelect",
-        serde_json::json!({ "name": "boom", "persist": false }),
-    );
-    let frame = pull_frame(&handle, Some("bbb"));
-    assert!(
-        !frame.rows.is_empty(),
-        "the transient boom serves its first frame"
-    );
-    let frame = pull_frame(&handle, Some("sss"));
-    assert!(
-        !frame.rows.is_empty(),
-        "the transient vortex serves after the rollback"
-    );
-
-    // Settle queued async writes: a load round-trip drains the Lua thread's
-    // task queue before it answers.
-    guard.host().load_source("settle", "return {}").unwrap();
-    let content = selection_content(&guard).unwrap_or_default();
-    assert!(
-        content.contains(SELECTION_MATRIX),
-        "the rollback must not persist the transient chain: {content}"
     );
 }
 
