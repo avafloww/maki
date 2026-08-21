@@ -500,3 +500,127 @@ fn splash_picker_re_resolves_after_contribution_unloads() {
     let content = wait_for_selection(&guard, SELECTION_DEFAULT);
     assert!(content.contains("name"), "repaired file: {content}");
 }
+
+const TIMER_TICKS_REL: &str = "timer_ticks";
+const TIMER_FOREVER_REL: &str = "timer_forever";
+const TIMER_QUIESCENCE: Duration = Duration::from_millis(300);
+
+const TIMER_SELF_STOP_SOURCE: &str = r##"
+local base = maki.env.state_dir()
+assert(base, "state dir missing in test host")
+local ok, err = maki.fs.mkdir(base, { parents = true })
+assert(ok, "mkdir failed: " .. tostring(err))
+local path = maki.fs.joinpath(base, "timer_ticks")
+local n = 0
+maki.timer.set(0.05, function(id)
+  n = n + 1
+  if n >= 3 then
+    maki.timer.del(id)
+  end
+  local ok, err = maki.fs.atomic_write(path, tostring(n))
+  assert(ok, "timer tick write failed: " .. tostring(err))
+end)
+"##;
+
+const TIMER_FOREVER_SOURCE: &str = r##"
+local base = maki.env.state_dir()
+local ok, err = maki.fs.mkdir(base, { parents = true })
+assert(ok, "mkdir failed: " .. tostring(err))
+local path = maki.fs.joinpath(base, "timer_forever")
+local n = 0
+maki.timer.set(0.05, function()
+  n = n + 1
+  local ok, err = maki.fs.atomic_write(path, tostring(n))
+  assert(ok, "timer tick write failed: " .. tostring(err))
+end)
+"##;
+
+const TIMER_CONFIG_SOURCE: &str = r##"
+local base = maki.env.state_dir()
+local ok, err = maki.fs.mkdir(base, { parents = true })
+assert(ok, "mkdir failed: " .. tostring(err))
+local path = maki.fs.joinpath(base, "timer_ticks")
+local n = 0
+maki.timer.set(0.05, function()
+  n = n + 1
+  local ok, err = maki.fs.atomic_write(path, tostring(n))
+  assert(ok, "timer tick write failed: " .. tostring(err))
+end)
+"##;
+
+fn ticks_file(guard: &maki_lua::test_support::PluginHostGuard, rel: &str) -> Option<u64> {
+    let path = std::path::Path::new(maki_lua::test_support::TEST_STATE_DIR).join(rel);
+    guard
+        .backend()
+        .files()
+        .into_iter()
+        .find(|(p, _)| p.as_path() == path.as_path())
+        .and_then(|(_, bytes)| String::from_utf8(bytes).ok()?.parse().ok())
+}
+
+fn wait_for_ticks(guard: &maki_lua::test_support::PluginHostGuard, rel: &str, n: u64) {
+    let deadline = Instant::now() + SPLASH_DEADLINE;
+    loop {
+        if ticks_file(guard, rel).is_some_and(|v| v >= n) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timer never reached tick {n}");
+        std::thread::sleep(SPLASH_BACKOFF);
+    }
+}
+
+#[test]
+fn timer_fires_repeatedly_until_deleted() {
+    let fs = Arc::new(InMemoryFs::new());
+    let (_handle, guard) =
+        maki_lua::test_support::spawn_host_with_fs_for_tests(&[], Arc::clone(&fs), None);
+
+    guard
+        .host()
+        .load_source("tick", TIMER_SELF_STOP_SOURCE)
+        .unwrap();
+    wait_for_ticks(&guard, TIMER_TICKS_REL, 3);
+    std::thread::sleep(TIMER_QUIESCENCE);
+    assert_eq!(
+        ticks_file(&guard, TIMER_TICKS_REL),
+        Some(3),
+        "no fires after del"
+    );
+}
+
+#[test]
+fn timer_unload_drops_schedules() {
+    let fs = Arc::new(InMemoryFs::new());
+    let (_handle, guard) =
+        maki_lua::test_support::spawn_host_with_fs_for_tests(&[], Arc::clone(&fs), None);
+
+    guard
+        .host()
+        .load_source("tick", TIMER_FOREVER_SOURCE)
+        .unwrap();
+    wait_for_ticks(&guard, TIMER_FOREVER_REL, 2);
+    guard.host().unload("tick").unwrap();
+
+    let frozen = ticks_file(&guard, TIMER_FOREVER_REL).unwrap();
+    std::thread::sleep(TIMER_QUIESCENCE);
+    assert_eq!(
+        ticks_file(&guard, TIMER_FOREVER_REL),
+        Some(frozen),
+        "unload must drop the schedule"
+    );
+}
+
+#[test]
+fn timer_registered_from_config_does_not_block_boot() {
+    let fs = Arc::new(InMemoryFs::new());
+    let (_handle, guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
+        &[],
+        Arc::clone(&fs),
+        Some(TIMER_CONFIG_SOURCE),
+    );
+
+    // Boot (config + every builtin) has already returned: a timer registered
+    // during config load must not stall the load barrier, and it must fire
+    // on the pump once the loop is running.
+    wait_for_ticks(&guard, TIMER_TICKS_REL, 1);
+}

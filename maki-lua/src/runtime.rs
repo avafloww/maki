@@ -40,6 +40,7 @@ use crate::api::keymap::{KeymapStore, KeymapWriter};
 use crate::api::options::{PluginOptionSpecs, PluginOpts, collect_plugin_options};
 use crate::api::slot::SlotStore;
 use crate::api::store::{self, Store};
+use crate::api::timer::{self, TimerStore};
 use crate::api::tool::{
     LuaTool, PendingRules, PendingTool, PendingTools, PermissionScopeSpec, ToolCallReply,
 };
@@ -96,7 +97,10 @@ const CANCEL_ABANDON_AFTER: Duration = Duration::from_secs(5);
 const OPT_LEVEL_JIT: u8 = 2;
 const OPT_LEVEL_DEBUGGABLE: u8 = 1;
 const DEBUG_INFO_FULL: u8 = 2;
-const ASYNC_RUN_DEFAULT_DEADLINE: Duration = Duration::from_secs(60);
+pub(crate) const ASYNC_RUN_DEFAULT_DEADLINE: Duration = Duration::from_secs(60);
+/// Upper bound for `maki.timer.set` seconds values: `f64::MAX` seconds
+/// would panic in `Duration::from_secs_f64`.
+pub(crate) const MAX_LUA_SECONDS: f64 = 1e9;
 /// Async tasks spawned during restore may spawn further tasks; cap the rounds.
 const RESTORE_SPAWN_ROUNDS: usize = 8;
 /// Keeps a buggy plugin's restore task from freezing the lua loop.
@@ -1114,6 +1118,7 @@ pub(crate) fn enqueue_async_task(lua: &Lua, work_fn: RegistryKey) -> Result<(), 
         live_ctx,
         owner: None,
         command_depth,
+        timer_id: None,
     };
 
     if let Some(h) = &handle {
@@ -1269,6 +1274,8 @@ pub(crate) struct PendingAsyncTask {
     pub live_ctx: Option<LiveCtx>,
     pub owner: Option<Arc<BufsClaim>>,
     pub command_depth: u8,
+    /// Timer fires pass their id as the first callback argument.
+    pub timer_id: Option<u64>,
 }
 
 /// Shared ownership of a task's `bufs`: the scope holds one clone, each
@@ -1349,9 +1356,13 @@ async fn run_work_fn(
     lua: &Lua,
     work_fn: &RegistryKey,
     handle: &TaskHandle,
+    timer_id: Option<u64>,
 ) -> Result<LuaValue, mlua::Error> {
     let func: Function = lua.registry_value(work_fn)?;
-    let fut = lua.create_thread(func)?.into_async::<LuaValue>(())?;
+    let fut = match timer_id {
+        Some(id) => lua.create_thread(func)?.into_async::<LuaValue>((id,))?,
+        None => lua.create_thread(func)?.into_async::<LuaValue>(())?,
+    };
     until_abandoned(fut, handle).await
 }
 
@@ -1381,7 +1392,7 @@ fn spawn_async_task(
         let scope = TaskScope::new(&lua, cell);
         let handle = Arc::clone(scope.handle());
         let result = scope
-            .scope_future(run_work_fn(&lua, &task.work_fn, &handle))
+            .scope_future(run_work_fn(&lua, &task.work_fn, &handle, task.timer_id))
             .await;
         if let Err(e) = &result {
             let tool_id = task.live_ctx.as_ref().map(|l| l.tool_use_id.as_str());
@@ -1512,6 +1523,7 @@ impl LuaRuntime {
         lua.set_app_data(PromptHintCallbacks::default());
         lua.set_app_data(PluginOptionSpecs::default());
         lua.set_app_data(AutocmdStore::default());
+        lua.set_app_data(TimerStore::new());
         lua.set_app_data(Store::default());
         lua.set_app_data(SlotStore::default());
         lua.set_app_data(crate::splash::VersionInfo::default());
@@ -1599,6 +1611,11 @@ impl LuaRuntime {
         }
         if let Some(mut store) = self.lua.app_data_mut::<AutocmdStore>() {
             store.clear_plugin(name);
+        }
+        if let Some(mut store) = self.lua.app_data_mut::<TimerStore>() {
+            for key in store.clear_plugin(name) {
+                let _ = self.lua.remove_registry_value(key);
+            }
         }
         let changed = if let Some(mut store) = self.lua.app_data_mut::<Store>() {
             store.clear_plugin(name)
@@ -2279,7 +2296,7 @@ async fn run_inline_tasks(lua: &Lua, scope: &TaskScope) {
                 )
                 .into_handle();
                 if let Err(e) = scope
-                    .scope_future(run_work_fn(lua, &task.work_fn, &handle))
+                    .scope_future(run_work_fn(lua, &task.work_fn, &handle, task.timer_id))
                     .await
                 {
                     tracing::debug!(error = %e, "restore inline async task failed");
@@ -2831,6 +2848,7 @@ pub fn spawn(
                 .expect("spawn queue installed at init")
                 .rx
                 .clone();
+            let timer_wake_rx = timer::wake_rx(&rt.lua);
 
             let mut codegen_armed = false;
 
@@ -2854,7 +2872,9 @@ pub fn spawn(
                     // Biased: user-initiated requests (commands, keybinds) jump
                     // ahead of bulk work like session restores so the UI stays
                     // snappy, and queued `maki.async.run` tasks jump ahead of
-                    // plain requests.
+                    // plain requests. Timer fires lose to anything queued: a late
+                    // fire is a refresh, not a request.
+                    let timer_deadline = timer::next_deadline(&rt.lua);
                     let next = smol::future::or(
                         async { prio_rx.recv_async().await.map(Some) },
                         smol::future::or(
@@ -2863,7 +2883,31 @@ pub fn spawn(
                                 spawn_async_task(&rt.lua, &ex, &gate, task);
                                 Ok(None)
                             },
-                            async { rx.recv_async().await.map(Some) },
+                            smol::future::or(
+                                async { rx.recv_async().await.map(Some) },
+                                async {
+                                    // A task may register a timer with a
+                                    // deadline earlier than the one being
+                                    // slept on; `set` pokes the wake channel
+                                    // so the loop re-picks without the delay.
+                                    if let Some(deadline) = timer_deadline {
+                                        let _ = futures_lite::future::or(
+                                            async { smol::Timer::at(deadline).await; },
+                                            async {
+                                                let _ =
+                                                    timer_wake_rx.recv_async().await;
+                                            },
+                                        )
+                                        .await;
+                                    } else {
+                                        let _ = timer_wake_rx.recv_async().await;
+                                    }
+                                    for task in timer::due_tasks(&rt.lua) {
+                                        spawn_async_task(&rt.lua, &ex, &gate, task);
+                                    }
+                                    Ok(None)
+                                },
+                            ),
                         ),
                     )
                     .await;
@@ -3650,6 +3694,7 @@ mod tests {
             live_ctx: None,
             owner: None,
             command_depth: 0,
+            timer_id: None,
         }
     }
 
@@ -4181,6 +4226,7 @@ mod tests {
             live_ctx: None,
             owner: None,
             command_depth: 0,
+            timer_id: None,
         };
 
         let ex = Rc::new(smol::LocalExecutor::new());

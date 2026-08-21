@@ -78,6 +78,7 @@ a string belongs.
 | [`maki.net`](#maki-net) | HTTP client for fetching web content. |
 | [`maki.session`](#maki-session) | Host session primitives. |
 | [`maki.text`](#maki-text) | Text transformation utilities. |
+| [`maki.timer`](#maki-timer) | Recurring callbacks on the runtime's timer pump. |
 | [`maki.treesitter`](#maki-treesitter) | Tree-sitter parsing and query API. |
 | [`maki.treesitter.language`](#maki-treesitter-language) | Language registry for tree-sitter grammars. |
 | [`maki.treesitter.query`](#maki-treesitter-query) | Query compilation and lookup. |
@@ -3299,6 +3300,89 @@ Useful for cleaning up web content fetched with `maki.webfetch`.
 local md, err = maki.text.html_to_markdown("<h1>Hello</h1><p>world</p>")
 if err then return end
 print(md) -- "# Hello\n\nworld"
+```
+
+
+## maki.timer {#maki-timer}
+
+Recurring callbacks on the runtime's timer pump.
+
+Use `set` for anything that must happen every N seconds: demo loops,
+periodic refreshes, watchdogs. Each fire runs as a fresh task, so
+callbacks may sleep or do I/O, and fires land exactly on schedule
+instead of being polled each frame. Timers registered by a plugin are
+dropped when the plugin is unloaded.
+
+```lua
+local id = maki.timer.set(5, function()
+  print("five seconds gone")
+end)
+```
+
+---
+
+### `maki.timer.set()` {#maki-timer-set}
+
+```lua
+maki.timer.set({seconds}, {callback})
+```
+
+Schedule {callback} to run every {seconds} on the runtime's timer pump.
+
+Each fire runs as a fresh task, so the callback may be async (`sleep`,
+fs, ...) and fires exactly when due: no per-frame polling. The callback
+receives the timer's id as its first argument - use it with
+`maki.timer.del` to stop the timer. Do not capture the returned id in the
+callback instead: `local id = maki.timer.set(5, function()
+maki.timer.del(id) end)` captures nil (a Luau value-capture quirk), which
+is why the id is passed as an argument. A fire still running when the
+next deadline arrives runs alongside it; every fire task carries the
+standard 60s async deadline. Deadlines missed while the runtime was busy
+coalesce into a single fire.
+
+Registration is synchronous - nothing runs until the first deadline - so
+calling this from `init.lua` or a command is safe.
+
+**Parameters:**
+
+- `{seconds}` (`number`) Interval between fires, in seconds. Must be a finite number > 0 and < 1e9.
+- `{callback}` (`function`) Called on each fire with the timer id. May be async.
+
+**Returns:** integer Id. Pass to `maki.timer.del` to stop the timer.
+
+**Example:**
+
+```lua
+local runs = 0
+maki.timer.set(1, function(id)
+  runs = runs + 1
+  if runs == 10 then
+    maki.timer.del(id)
+  end
+end)
+```
+
+---
+
+### `maki.timer.del()` {#maki-timer-del}
+
+```lua
+maki.timer.del({id})
+```
+
+Stop the timer {id}. Does nothing for an unknown id. A fire that already
+started keeps running out.
+
+**Parameters:**
+
+- `{id}` (`integer`) Id returned by `maki.timer.set`.
+
+**Example:**
+
+```lua
+local id = maki.timer.set(5, on_tick)
+-- later
+maki.timer.del(id)
 ```
 
 

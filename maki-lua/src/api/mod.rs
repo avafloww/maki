@@ -20,6 +20,7 @@ pub(crate) mod slot;
 pub(crate) mod split;
 pub(crate) mod store;
 pub(crate) mod text;
+pub(crate) mod timer;
 pub(crate) mod tool;
 pub(crate) mod treesitter;
 pub(crate) mod ui;
@@ -98,6 +99,10 @@ pub(crate) fn create_maki_global(
     maki.set(
         "keymap",
         keymap::create_keymap_table(lua, Arc::clone(&plugin))?,
+    )?;
+    maki.set(
+        "timer",
+        timer::create_timer_table(lua, Arc::clone(&plugin))?,
     )?;
     crate::splash::register_version_api(lua, &maki)?;
 
