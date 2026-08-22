@@ -129,18 +129,37 @@ Defaults: gemini-2.5-pro (strong), gemini-2.5-flash (medium), gemini-2.0-flash-l
 
 ### Copilot
 
-- **Env var**: `GH_COPILOT_TOKEN` (or run `maki auth login copilot` to import a token from gh)
+- **Env var**: `GH_COPILOT_TOKEN` (or run `maki auth login copilot` to import a token from gh CLI, the Copilot client, or the system keyring)
 - **API**: `https://api.githubcopilot.com (or GraphQL-discovered Copilot API endpoint)`
 - **Features**: Native Copilot Chat HTTP API with model endpoint discovery
 
 | Tier | Models | Pricing (in/out per 1M tokens) | Context |
 |------|--------|-------------------------------|---------|
-| Weak | **gpt-5-mini, gpt-5 mini, claude-haiku-4.5** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
-| Medium | **gpt-5.2, gpt-4.1, claude-sonnet-4.5** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
-| Strong | **gpt-5.4, gpt-5.3-codex, claude-opus-4.6, grok-code-fast-1** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
-| Strong | claude-opus-4.7 | $0.00 / $0.00 | 264K ctx / 64K out |
+| Weak | gpt-5-mini | $0.25 / $2.00 | 200K ctx / 100K out |
+| Weak | gpt-5.4-mini | $0.75 / $4.50 | 200K ctx / 100K out |
+| Weak | gpt-5.4-nano | $0.20 / $1.25 | 200K ctx / 100K out |
+| Weak | claude-haiku-4.5 | $1.00 / $5.00 | 200K ctx / 64K out |
+| Weak | gemini-3.5-flash | $1.50 / $9.00 | 200K ctx / 65K out |
+| Weak | mai-code-1-flash-picker | $0.75 / $4.50 | 200K ctx / 100K out |
+| Weak | **gpt-5.6-luna** (default) | $0.20 / $1.20 | 200K ctx / 100K out |
+| Medium | gemini-3.6-flash | $0.75 / $3.75 | 200K ctx / 65K out |
+| Medium | gemini-3.7-flash | $0.75 / $3.75 | 200K ctx / 65K out |
+| Medium | claude-sonnet-4.5, claude-sonnet-4.6 | $3.00 / $15.00 | 200K ctx / 64K out |
+| Medium | claude-sonnet-5 | $2.00 / $10.00 | 200K ctx / 100K out |
+| Medium | kimi-k2.7-code | $0.95 / $4.00 | 200K ctx / 100K out |
+| Medium | gemini-3.1-pro-preview | $2.00 / $12.00 | 200K ctx / 65K out |
+| Medium | **gpt-5.6-terra** (default) | $2.00 / $12.00 | 200K ctx / 100K out |
+| Medium | grok-4.5 | $2.00 / $6.00 | 200K ctx / 100K out |
+| Medium | grok-4.6 | $2.00 / $6.00 | 200K ctx / 100K out |
+| Strong | gpt-5.5 | $5.00 / $30.00 | 200K ctx / 100K out |
+| Strong | kimi-k3 | $3.00 / $15.00 | 200K ctx / 100K out |
+| Strong | gpt-5.4 | $2.50 / $15.00 | 200K ctx / 100K out |
+| Strong | gpt-5.6-sol | $5.00 / $30.00 | 200K ctx / 100K out |
+| Strong | gpt-5.3-codex | $1.75 / $14.00 | 200K ctx / 100K out |
+| Strong | **claude-opus-5, claude-opus-4.8, claude-opus-4.7, claude-opus-4.6, claude-opus-4.5** (default) | $5.00 / $25.00 | 200K ctx / 64K out |
+| Strong | claude-opus-4.8-fast, claude-fable-5 | $10.00 / $50.00 | 200K ctx / 100K out |
 
-Defaults: gpt-5-mini (weak), gpt-5.2 (medium), gpt-5.4 (strong)
+Defaults: gpt-5.6-luna (weak), gpt-5.6-terra (medium), claude-opus-5 (strong)
 
 ### Ollama
 
@@ -197,11 +216,12 @@ Defaults: glm-5-code (strong), glm-4.7-flash (weak), glm-4.7 (medium)
 - **Env var**: `DEEPSEEK_API_KEY`
 - **API**: `https://api.deepseek.com`
 - **Features**: Thinking mode toggle (on/off), open-weight models
+- **Peak pricing**: the prices below are off-peak; each turn is billed as it happens, at 2x during 01:00-04:00, 06:00-10:00 UTC
 
 | Tier | Models | Pricing (in/out per 1M tokens) | Context |
 |------|--------|-------------------------------|---------|
-| Medium | **deepseek-v4-flash** (default) | $0.14 / $0.28 | 1000K ctx / 384K out |
-| Strong | **deepseek-v4-pro** (default) | $0.43 / $0.87 | 1000K ctx / 384K out |
+| Medium | **deepseek-v4-flash** (default) | $0.22 / $0.66 | 1000K ctx / 384K out |
+| Strong | **deepseek-v4-pro** (default) | $0.66 / $1.98 | 1000K ctx / 384K out |
 
 Defaults: deepseek-v4-flash (medium), deepseek-v4-pro (strong)
 
@@ -271,6 +291,14 @@ Defaults: grok-4.6 (strong), grok-4.3 (medium)
 OAuth uses the same first-party xAI client as the official Grok CLI (`maki auth login xai`). Browser login (PKCE) is the desktop default; device code is recommended over SSH or in a container. Tokens refresh automatically. After login, Maki fetches your account catalog from `GET /v1/models-v2` on the Grok CLI proxy and caches it for 15 minutes. `XAI_BASE_URL` only redirects the public API-key endpoint, never the OAuth proxy.
 
 If `~/.grok/auth.json` already exists, login offers to reuse it without writing that file.
+
+### Aperture
+
+- **Env var**: `APERTURE_HOST` (e.g. `https://your-host.tailnet.ts.net`)
+- **API**: `Aperture gateway (set APERTURE_HOST)`
+- **Features**: Tailscale Aperture LLM gateway; set APERTURE_HOST or configure in providers.toml
+
+Aperture discovers models from your gateway. Set `APERTURE_HOST` to your Tailscale Aperture endpoint (e.g. `https://your-host.tailnet.ts.net`). No API key needed, Tailscale handles auth.
 
 ### Opencode Go
 
@@ -346,6 +374,7 @@ supports_vision = false
 | `discover_models` | bool | When true, also probe the provider's model list endpoint (default false) |
 | `enable_free_models` | bool | Opencode only. Show free catalog models (default false) |
 | `models` | array | Declared models for custom providers (see below) |
+| `overrides` | table | Aperture only. Per-upstream model overrides (see below) |
 
 ### Model fields
 
@@ -366,6 +395,25 @@ supports_vision = false
 Custom slugs must not reuse a built-in provider name. A bad TOML parse exits with code 2 at startup so a typo cannot silently empty the registry.
 
 You can also create a custom provider interactively with `maki auth login` and choosing the custom option. That writes a starter entry to this file.
+
+### Aperture overrides
+
+Aperture proxies upstream providers, exposing each model as `aperture/<upstream>/<model>`. Overrides keyed by upstream provider id live under `[aperture.overrides]`:
+
+```toml
+[aperture.overrides.llmserver]
+base = "llama-cpp"
+context_window = 131072
+max_output_tokens = 16384
+
+[aperture.overrides.llmserver.models."qwen-3.6"]
+context_window = 262144
+supports_vision = true
+```
+
+Provider-level fields apply to every model from that upstream; per-model entries under `models` win field by field. Fields: `context_window`, `max_output_tokens`, `supports_thinking`, `supports_vision`, `base` (remaps an opaque vendor to a native provider; e.g. `llama-cpp`, `google`, `anthropic`), and `path_prefix`. Model ids containing dots must be quoted (`"qwen3.6"`) since TOML treats a bare dotted key as a nested table.
+
+Maki sends `/v1` (or `/v1beta` for Gemini routes, nothing for Anthropic and Z.AI), and Aperture appends that path to the upstream's base url. If an upstream base url already carries its own path, set `path_prefix = ""` for it to avoid a doubled path. Z.AI defaults to no prefix since its API path has no `/v1` segment; point the upstream base url at the full API root (e.g. `https://api.z.ai/api/paas/v4`).
 
 ### Plans
 
@@ -405,7 +453,7 @@ To add a custom provider or proxy, drop an executable script into the config `pr
 
 `resolve` is called each time a new agent spawns, so scripts should read tokens from disk instead of caching them in memory. That way auth changes from other processes get picked up.
 
-The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `copilot`, `ollama`, `llama-cpp`, `mistral`, `zai`, `deepseek`, `openrouter`, `synthetic`, `tensorx`, `opencode`, `xai`.
+The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `copilot`, `ollama`, `llama-cpp`, `mistral`, `zai`, `deepseek`, `openrouter`, `synthetic`, `tensorx`, `opencode`, `xai`, `aperture`.
 
 If your provider serves models not in the base catalog, add a `models` subcommand returning:
 

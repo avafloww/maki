@@ -19,10 +19,13 @@ use crossterm::event::{
 };
 use maki_agent::command::CustomCommand;
 use maki_agent::permissions::PermissionManager;
-use maki_agent::{AgentConfig, CancelToken, McpCommand, McpConfigErrors, McpHandle, mcp};
+use maki_agent::{
+    AgentConfig, AgentEvent, CancelToken, Envelope, McpCommand, McpConfigErrors, McpHandle, mcp,
+};
 use maki_config::{ModelPolicy, UiConfig};
 use maki_lua::{
-    EventHandle, HintReader, KeymapReader, LuaCommandReader, SessionReply, SessionRequest, UiAction,
+    EventHandle, HintReader, KeymapReader, LuaCommandReader, ModelRequest, SessionRequest,
+    UiAction, UiReply,
 };
 use maki_providers::Timeouts;
 use maki_providers::provider::{Provider, fetch_all_models, from_model};
@@ -39,7 +42,7 @@ use crate::agent::{
     AgentCommand, AgentHandles, ModelSlot, SystemPromptOverride, shared_queue::QueueItem,
 };
 use crate::app::shell::{ShellEvent, spawn_shell};
-use crate::app::{App, Msg, QueuedMessage, SubmitOutcome};
+use crate::app::{App, Msg, Notification, QueuedMessage, SubmitOutcome, turn_response};
 use crate::color_compat;
 use crate::components::input::Submission;
 use crate::components::usage_modal::UsageFetchState;
@@ -54,6 +57,9 @@ use crate::terminal;
 const DRAIN_BUDGET: usize = 256;
 const AGENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DELETE_FOCUSED_ERR: &str = "cannot delete the focused session";
+const MODEL_POLICY_ERR: &str = "Model is not allowed by policy";
+const INVALID_MODEL_ERR: &str = "Invalid model";
+const PROVIDER_INIT_ERR: &str = "Failed to create provider";
 const NOT_LIVE_ERR: &str = "session not live";
 
 /// Tabs carry their in-memory sessions so `/reload` reopens them without a
@@ -95,6 +101,94 @@ enum SessionStatus {
     Idle,
 }
 
+enum PendingCompletion {
+    WaitingForQueueDrain(Notification),
+    Due(Notification),
+}
+
+#[derive(Default)]
+struct RunNotificationState {
+    response_candidate: Option<String>,
+    pending_completion: Option<PendingCompletion>,
+    last_attention: Option<Notification>,
+}
+
+impl RunNotificationState {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn on_queue_item_consumed(&mut self) {
+        self.response_candidate = None;
+        self.pending_completion = None;
+    }
+
+    fn on_turn_complete(&mut self, message: &Message) {
+        self.response_candidate = turn_response(message);
+    }
+
+    fn on_done(&mut self, event: &AgentEvent) {
+        let notification = match event {
+            AgentEvent::Done { .. } => Notification::TurnComplete {
+                response: self.response_candidate.take(),
+            },
+            AgentEvent::Error { .. } => {
+                self.response_candidate = None;
+                Notification::error_completion()
+            }
+            _ => return,
+        };
+        self.pending_completion = Some(PendingCompletion::WaitingForQueueDrain(notification));
+    }
+
+    fn on_drain(&mut self) {
+        self.pending_completion = match self.pending_completion.take() {
+            Some(PendingCompletion::WaitingForQueueDrain(notification)) => {
+                Some(PendingCompletion::Due(notification))
+            }
+            pending => pending,
+        };
+    }
+
+    fn on_manual_exit(&mut self) {
+        self.pending_completion = None;
+    }
+
+    /// True between `Done`/`Error` and the run's `QueueDrained`. An exit must
+    /// not fire in that window: a queued follow-up may still start a new run.
+    fn waiting_for_drain(&self) -> bool {
+        matches!(
+            self.pending_completion,
+            Some(PendingCompletion::WaitingForQueueDrain(_))
+        )
+    }
+
+    fn reconcile(
+        &mut self,
+        attention: Option<Notification>,
+        status: SessionStatus,
+        queue_empty: bool,
+        terminal_focused: bool,
+    ) -> Option<Notification> {
+        let settled = attention.is_none() && status == SessionStatus::Idle && queue_empty;
+        let prompt = (attention != self.last_attention)
+            .then(|| attention.clone())
+            .flatten();
+        self.last_attention = attention;
+
+        // A due completion is decided on its first reconcile: fire if the
+        // session settled, otherwise drop it for good.
+        let completion = match self.pending_completion.take() {
+            Some(PendingCompletion::Due(notification)) => settled.then_some(notification),
+            waiting => {
+                self.pending_completion = waiting;
+                None
+            }
+        };
+        (!terminal_focused).then(|| prompt.or(completion)).flatten()
+    }
+}
+
 impl SessionStatus {
     fn of(app: &App) -> Self {
         if app.awaiting_input() {
@@ -120,6 +214,51 @@ fn prepend_preamble(preamble: &mut Vec<Message>, mut leading: Vec<Message>) {
     *preamble = leading;
 }
 
+fn is_current_top_level(current_run_id: u64, envelope: &Envelope) -> bool {
+    envelope.run_id == current_run_id && envelope.subagent.is_none()
+}
+
+fn select_notification(
+    selected: Option<Notification>,
+    candidate: Option<Notification>,
+) -> Option<Notification> {
+    match (selected, candidate) {
+        (Some(current), Some(candidate)) if candidate.is_urgent() && !current.is_urgent() => {
+            Some(candidate)
+        }
+        (selected @ Some(_), _) => selected,
+        (None, candidate) => candidate,
+    }
+}
+
+#[cfg(not(windows))]
+fn terminal_focus_event(event: &Event) -> Option<bool> {
+    match event {
+        Event::FocusGained => Some(true),
+        Event::FocusLost => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
+fn terminal_focus_event(_event: &Event) -> Option<bool> {
+    None
+}
+
+#[cfg(not(windows))]
+fn terminal_input_proves_focus(event: &Event) -> bool {
+    match event {
+        Event::Key(key) => key.kind == KeyEventKind::Press,
+        Event::Paste(_) | Event::Mouse(_) => true,
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn terminal_input_proves_focus(_event: &Event) -> bool {
+    false
+}
+
 fn parse_session_id(id: &str) -> Result<MakiId, String> {
     id.parse().map_err(|e: MakiIdParseError| e.to_string())
 }
@@ -130,11 +269,20 @@ struct SessionRuntime {
     shell_tx: flume::Sender<ShellEvent>,
     shell_rx: flume::Receiver<ShellEvent>,
     last_status: SessionStatus,
+    notifications: RunNotificationState,
 }
 
 impl SessionRuntime {
     fn id(&self) -> MakiId {
         self.app.state.session.id
+    }
+
+    /// New work cancels an `exit_on_done` exit still waiting on its drain.
+    fn reset_run_notifications(&mut self) {
+        if self.notifications.waiting_for_drain() {
+            self.app.clear_exit_request();
+        }
+        self.notifications.reset();
     }
 
     /// A wake may only start a background run when the session is fully
@@ -220,6 +368,7 @@ impl SpawnCtx {
             shell_tx,
             shell_rx,
             last_status: SessionStatus::Idle,
+            notifications: RunNotificationState::default(),
         }
     }
 }
@@ -229,6 +378,8 @@ pub(crate) struct EventLoop<'t> {
     sessions: Vec<SessionRuntime>,
     focused: usize,
     last_focused: Option<MakiId>,
+    terminal_focused: bool,
+    notifier: Option<terminal::TerminalNotifier>,
     ctx: SpawnCtx,
     input: InputReader,
     warn_rx: flume::Receiver<String>,
@@ -396,6 +547,7 @@ impl<'t> EventLoop<'t> {
         let bg = spawn_model_fetch(&model_slot, timeouts, Arc::clone(&model_policy));
         let storage_writer = Arc::new(StorageWriter::new(storage.clone(), bg.warn_tx.clone()));
 
+        let notifier = terminal::TerminalNotifier::new(ui_config.notifications);
         let ctx = SpawnCtx {
             storage,
             config,
@@ -446,6 +598,8 @@ impl<'t> EventLoop<'t> {
             sessions: runtimes,
             focused,
             last_focused: None,
+            terminal_focused: false,
+            notifier,
             ctx,
             input: InputReader::spawn(),
             warn_rx: bg.warn_rx,
@@ -488,14 +642,13 @@ impl<'t> EventLoop<'t> {
                 }
             }
 
-            if let Some(i) = self
-                .sessions
-                .iter()
-                .position(|rt| rt.app.exit_request != ExitRequest::None)
-            {
+            if let Some(i) = self.sessions.iter().position(|rt| {
+                rt.app.exit_request != ExitRequest::None && !rt.notifications.waiting_for_drain()
+            }) {
                 // A backgrounded session can finish an `exit_on_done` turn;
                 // focus it so shutdown reports its exit code and id.
                 self.focused = i;
+                self.emit_notifications();
                 break Ok(());
             }
 
@@ -601,6 +754,27 @@ impl<'t> EventLoop<'t> {
     }
 
     fn handle_agent(&mut self, idx: usize, envelope: Box<maki_agent::Envelope>) {
+        let rt = &mut self.sessions[idx];
+        let current = is_current_top_level(rt.app.run_id, &envelope);
+        match &envelope.event {
+            AgentEvent::QueueDrained => {
+                if current {
+                    rt.notifications.on_drain();
+                }
+                return;
+            }
+            AgentEvent::QueueItemConsumed { .. } if current => {
+                rt.notifications.on_queue_item_consumed();
+                if rt.app.exit_on_done {
+                    rt.app.clear_exit_request();
+                }
+            }
+            AgentEvent::TurnComplete(turn) if current => {
+                rt.notifications.on_turn_complete(&turn.message);
+            }
+            event if current => rt.notifications.on_done(event),
+            _ => {}
+        }
         let actions = self.sessions[idx].app.update(Msg::Agent(envelope));
         self.dispatch(idx, actions);
     }
@@ -633,8 +807,23 @@ impl<'t> EventLoop<'t> {
         // These two only fire Lua autocmds. Anything a handler does comes back
         // as a `UiAction` on the next wake, which repaints then.
         self.emit_focus_change();
+        dirty |= self.start_mailbox_runs();
         self.emit_status_changes();
-        Ok(dirty | self.start_mailbox_runs())
+        self.emit_notifications();
+        // An `exit_on_done` exit waits on `QueueDrained`; a dead agent loop
+        // can never send it, so fail instead of hanging forever.
+        if let Some(runtime) = self.sessions.iter().find(|rt| {
+            rt.app.exit_request != ExitRequest::None
+                && rt.notifications.waiting_for_drain()
+                && rt.handles.is_finished()
+                && rt.handles.agent_rx.is_empty()
+        }) {
+            return Err(eyre!(
+                "agent for session {} stopped before queue drain",
+                runtime.id()
+            ));
+        }
+        Ok(dirty)
     }
 
     fn handle_ui_action(&mut self, action: UiAction) {
@@ -683,6 +872,9 @@ impl<'t> EventLoop<'t> {
             UiAction::Session { req, reply_tx } => {
                 self.handle_session_request(req, reply_tx);
             }
+            UiAction::Model { req, reply_tx } => {
+                let _ = reply_tx.send(self.handle_model_request(req));
+            }
             UiAction::WinSaveView { reply_tx } => {
                 let _ = reply_tx.send(self.focused_app().win_view());
             }
@@ -720,6 +912,7 @@ impl<'t> EventLoop<'t> {
             let _pause = self.input.pause();
             terminal::open_in_editor(path, self.terminal)
         };
+        self.terminal_focused = false;
         match result {
             Ok(code) => code,
             Err(e) => {
@@ -746,6 +939,28 @@ impl<'t> EventLoop<'t> {
                     "focused": i == self.focused,
                 }),
             );
+        }
+    }
+
+    fn emit_notifications(&mut self) {
+        let Some(notifier) = &self.notifier else {
+            return;
+        };
+        let mut selected = None;
+        for rt in &mut self.sessions {
+            let candidate = rt.notifications.reconcile(
+                rt.app.attention(),
+                rt.last_status,
+                rt.handles.queue.is_empty(),
+                self.terminal_focused,
+            );
+            selected = select_notification(selected, candidate);
+        }
+        if let Some(notification) = selected
+            && let Err(error) = notifier.notify(&notification.message())
+        {
+            warn!(notifier = ?notifier.notifier(), %error, "terminal notifications disabled after write failure");
+            self.notifier = None;
         }
     }
 
@@ -789,11 +1004,7 @@ impl<'t> EventLoop<'t> {
     /// `List` replies from a background task (the scan can be slow); every
     /// other request is answered synchronously by the event loop, which owns
     /// the live runtimes.
-    fn handle_session_request(
-        &mut self,
-        req: SessionRequest,
-        reply_tx: flume::Sender<SessionReply>,
-    ) {
+    fn handle_session_request(&mut self, req: SessionRequest, reply_tx: flume::Sender<UiReply>) {
         match req {
             SessionRequest::List => {
                 let storage = self.ctx.storage.clone();
@@ -941,7 +1152,38 @@ impl<'t> EventLoop<'t> {
         }
     }
 
-    fn submit_text(&mut self, idx: usize, text: String) -> SessionReply {
+    /// Lua acts on the focused session, the same target the model picker and
+    /// `/thinking` write to.
+    fn handle_model_request(&mut self, req: ModelRequest) -> UiReply {
+        match req {
+            ModelRequest::Get => Ok(self.focused_app().model_state()),
+            ModelRequest::Available => {
+                let available = self.ctx.available_models.load();
+                Ok(json!(
+                    available.as_deref().map(Vec::as_slice).unwrap_or(&[])
+                ))
+            }
+            ModelRequest::Set {
+                spec,
+                thinking,
+                fast,
+            } => {
+                if let Some(spec) = spec {
+                    self.change_model(&spec)?;
+                }
+                let app = self.focused_app();
+                if let Some(thinking) = thinking {
+                    app.set_thinking(&thinking)?;
+                }
+                if let Some(fast) = fast {
+                    app.set_fast(fast)?;
+                }
+                Ok(app.model_state())
+            }
+        }
+    }
+
+    fn submit_text(&mut self, idx: usize, text: String) -> UiReply {
         let msg = QueuedMessage {
             text,
             images: Vec::new(),
@@ -1013,6 +1255,19 @@ impl<'t> EventLoop<'t> {
     }
 
     fn translate(&mut self, raw: Event) -> (Option<Msg>, Option<Event>) {
+        let supports_focus_reporting = self
+            .notifier
+            .as_ref()
+            .is_some_and(terminal::TerminalNotifier::supports_focus_reporting);
+        if let Some(focused) = terminal_focus_event(&raw) {
+            if supports_focus_reporting {
+                self.terminal_focused = focused;
+            }
+            return (None, None);
+        }
+        if supports_focus_reporting && terminal_input_proves_focus(&raw) {
+            self.terminal_focused = true;
+        }
         match raw {
             Event::Key(key) if key.kind == KeyEventKind::Press => (Some(Msg::Key(key)), None),
             Event::Key(_) => (None, None),
@@ -1094,6 +1349,7 @@ impl<'t> EventLoop<'t> {
 
     fn respawn_agent(&mut self, idx: usize, history: Vec<Message>) {
         let rt = &mut self.sessions[idx];
+        rt.reset_run_notifications();
         let lua_handle = rt.app.lua_event_handle.clone();
         let permissions = Arc::clone(&rt.app.permissions);
         rt.handles.respawn(
@@ -1111,6 +1367,7 @@ impl<'t> EventLoop<'t> {
         match action {
             Action::SendMessage(input) => {
                 let rt = &mut self.sessions[idx];
+                rt.reset_run_notifications();
                 let mut input = *input;
                 prepend_preamble(&mut input.preamble, rt.app.shell.drain_results());
                 let run_id = rt.app.run_id;
@@ -1123,10 +1380,9 @@ impl<'t> EventLoop<'t> {
                 });
             }
             Action::CancelAgent { run_id } => {
-                let _ = self.sessions[idx]
-                    .handles
-                    .cmd_tx
-                    .try_send(AgentCommand::Cancel { run_id });
+                let rt = &mut self.sessions[idx];
+                rt.notifications.reset();
+                let _ = rt.handles.cmd_tx.try_send(AgentCommand::Cancel { run_id });
             }
             Action::CancelSubagent { tool_use_id } => {
                 let _ = self.sessions[idx]
@@ -1152,7 +1408,11 @@ impl<'t> EventLoop<'t> {
                 }
                 self.respawn_agent(idx, loaded.messages);
             }
-            Action::ChangeModel(spec) => self.change_model(spec),
+            Action::ChangeModel(spec) => {
+                if let Err(e) = self.change_model(&spec) {
+                    self.focused_app().flash(e);
+                }
+            }
             Action::RefreshProvider { slug } => self.refresh_provider(slug),
             Action::AssignTier(spec, tier) => {
                 maki_providers::model_registry::set_and_persist(spec, tier, &self.ctx.storage);
@@ -1162,6 +1422,7 @@ impl<'t> EventLoop<'t> {
             }
             Action::Compact => {
                 let rt = &mut self.sessions[idx];
+                rt.reset_run_notifications();
                 let run_id = rt.app.run_id;
                 rt.handles.queue.push(QueueItem::Compact { run_id });
             }
@@ -1197,6 +1458,7 @@ impl<'t> EventLoop<'t> {
                     let _pause = self.input.pause();
                     terminal::edit_temp_content(&current_text, self.terminal)
                 };
+                self.terminal_focused = false;
                 match result {
                     Ok(edited) => {
                         self.sessions[idx].app.refresh_at_ref_labels(&edited);
@@ -1216,37 +1478,32 @@ impl<'t> EventLoop<'t> {
             Action::Suspend => {
                 let _pause = self.input.pause();
                 terminal::suspend(self.terminal);
+                self.terminal_focused = false;
             }
             Action::Bell => ring_bell(),
             Action::RefreshModels => self.refresh_models(),
             Action::RefreshUsage => self.refresh_usage(),
+            Action::ManualExit => self.sessions[idx].notifications.on_manual_exit(),
         }
     }
 
-    fn change_model(&mut self, spec: String) {
-        if !self.ctx.model_policy.allows(&spec) {
-            self.focused_app()
-                .flash(format!("Model is not allowed by policy: {spec}"));
-            return;
+    fn change_model(&mut self, spec: &str) -> Result<(), String> {
+        if !self.ctx.model_policy.allows(spec) {
+            return Err(format!("{MODEL_POLICY_ERR}: {spec}"));
         }
-        match Model::from_spec(&spec) {
-            Ok(mut new_model) => match from_model(&mut new_model, self.ctx.timeouts) {
-                Ok(new_provider) => {
-                    let app = self.focused_app();
-                    app.update_model(&new_model);
-                    app.record_recent_model(&spec);
-                    app.usage_slot.store(None);
-                    self.ctx.model_slot.store(Arc::new(ModelSlot {
-                        model: new_model,
-                        provider: Arc::from(new_provider),
-                    }));
-                }
-                Err(e) => self
-                    .focused_app()
-                    .flash(format!("Failed to create provider: {e}")),
-            },
-            Err(e) => self.focused_app().flash(format!("Invalid model: {e}")),
-        }
+        let mut new_model =
+            Model::from_spec(spec).map_err(|e| format!("{INVALID_MODEL_ERR}: {e}"))?;
+        let new_provider = from_model(&mut new_model, self.ctx.timeouts)
+            .map_err(|e| format!("{PROVIDER_INIT_ERR}: {e}"))?;
+        let app = self.focused_app();
+        app.update_model(&new_model);
+        app.record_recent_model(spec);
+        app.usage_slot.store(None);
+        self.ctx.model_slot.store(Arc::new(ModelSlot {
+            model: new_model,
+            provider: Arc::from(new_provider),
+        }));
+        Ok(())
     }
 
     fn refresh_models(&self) {
@@ -1292,8 +1549,10 @@ impl<'t> EventLoop<'t> {
                     provider: Arc::from(provider),
                 }));
             }
-        } else if let Some(builtin) = maki_config::providers::builtin_provider(&slug) {
-            self.change_model(builtin.default_model.to_string());
+        } else if let Some(builtin) = maki_config::providers::builtin_provider(&slug)
+            && let Err(e) = self.change_model(builtin.default_model)
+        {
+            self.focused_app().flash(e);
         }
     }
 
@@ -1374,9 +1633,129 @@ fn ring_bell() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maki_agent::DoneReason;
+    use maki_providers::TokenUsage;
+    use test_case::test_case;
 
     const OBSERVATION: &str = "failed";
     const SHELL_RESULT: &str = "command finished";
+
+    fn done_event() -> AgentEvent {
+        AgentEvent::Done {
+            usage: TokenUsage::default(),
+            num_turns: 1,
+            reason: DoneReason::EndTurn,
+        }
+    }
+
+    fn due_completion() -> RunNotificationState {
+        let mut state = RunNotificationState::default();
+        state.on_done(&done_event());
+        state.on_drain();
+        state
+    }
+
+    #[test]
+    fn completion_waits_for_queue_drain() {
+        let mut state = RunNotificationState {
+            response_candidate: Some("done".into()),
+            ..RunNotificationState::default()
+        };
+
+        state.on_done(&done_event());
+        assert!(state.waiting_for_drain());
+        assert_eq!(
+            state.reconcile(None, SessionStatus::Idle, true, false),
+            None
+        );
+
+        state.on_drain();
+        assert!(!state.waiting_for_drain());
+        assert_eq!(
+            state.reconcile(None, SessionStatus::Idle, true, false),
+            Some(Notification::TurnComplete {
+                response: Some("done".into())
+            })
+        );
+    }
+
+    #[test_case(SessionStatus::Idle, true, false, true ; "fires_when_settled_and_unfocused")]
+    #[test_case(SessionStatus::Idle, true, true, false ; "focused_terminal_swallows")]
+    #[test_case(SessionStatus::Idle, false, false, false ; "queued_message_swallows")]
+    #[test_case(SessionStatus::Working, true, false, false ; "busy_session_swallows")]
+    fn due_completion_is_decided_on_first_reconcile(
+        status: SessionStatus,
+        queue_empty: bool,
+        terminal_focused: bool,
+        fires: bool,
+    ) {
+        let mut state = due_completion();
+
+        let first = state.reconcile(None, status, queue_empty, terminal_focused);
+        assert_eq!(first.is_some(), fires);
+        assert_eq!(
+            state.reconcile(None, SessionStatus::Idle, true, false),
+            None
+        );
+    }
+
+    #[test]
+    fn prompt_wins_over_completion_and_is_not_repeated_unchanged() {
+        let prompt = Notification::QuestionRequested;
+        let mut state = due_completion();
+
+        assert_eq!(
+            state.reconcile(Some(prompt.clone()), SessionStatus::Idle, true, false),
+            Some(prompt.clone())
+        );
+        assert_eq!(
+            state.reconcile(Some(prompt), SessionStatus::NeedsInput, true, false),
+            None
+        );
+        assert_eq!(
+            state.reconcile(None, SessionStatus::Idle, true, false),
+            None
+        );
+    }
+
+    #[test]
+    fn notification_selection_prefers_priority_then_session_order() {
+        let completion = Notification::TurnComplete { response: None };
+        let first_prompt = Notification::QuestionRequested;
+        let second_prompt = Notification::AuthenticationRequired;
+
+        let selected = select_notification(None, Some(completion));
+        let selected = select_notification(selected, Some(first_prompt.clone()));
+        let selected = select_notification(selected, Some(second_prompt));
+
+        assert_eq!(selected, Some(first_prompt));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn focus_events_map_to_terminal_focus_state() {
+        assert_eq!(terminal_focus_event(&Event::FocusGained), Some(true));
+        assert_eq!(terminal_focus_event(&Event::FocusLost), Some(false));
+        assert_eq!(terminal_focus_event(&Event::Resize(80, 24)), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn interactive_input_proves_terminal_focus() {
+        let release = crossterm::event::KeyEvent {
+            code: crossterm::event::KeyCode::Enter,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+            kind: KeyEventKind::Release,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+
+        assert!(terminal_input_proves_focus(&Event::Key(
+            crate::components::key(crossterm::event::KeyCode::Enter)
+        )));
+        assert!(terminal_input_proves_focus(&Event::Paste("text".into())));
+        assert!(!terminal_input_proves_focus(&Event::Key(release)));
+        assert!(!terminal_input_proves_focus(&Event::Resize(80, 24)));
+    }
 
     #[test]
     fn shell_results_do_not_replace_existing_preamble() {

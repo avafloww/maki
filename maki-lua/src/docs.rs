@@ -35,6 +35,7 @@ pub struct FnDoc {
     pub returns: &'static str,
     /// Lua snippet rendered as a fenced code block, or "" when absent.
     pub example: &'static str,
+    pub guard: Option<&'static str>,
 }
 
 pub struct ParamDoc {
@@ -72,6 +73,7 @@ pub fn api_docs() -> Vec<&'static ModuleDoc> {
         &api::log::DOCS,
         &api::r#match::DOCS,
         &api::mode::DOCS,
+        &api::model::DOCS,
         &api::net::DOCS,
         &api::session::DOCS,
         &api::text::DOCS,

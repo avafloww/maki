@@ -69,8 +69,10 @@ TODO
 * DeepSeek - `DEEPSEEK_API_KEY`.
 * OpenRouter - `OPENROUTER_API_KEY`.
 * Synthetic - `SYNTHETIC_API_KEY`.
+* TensorX - `TENSORX_API_KEY`.
 * OpenCode Zen - `OPENCODE_API_KEY`, or the free `public` key for zero-cost models. Models from the models.dev catalog.
 * OpenCode Go - `OPENCODE_API_KEY`. Models from the models.dev catalog.
+* Aperture - `APERTURE_HOST` (e.g. `https://your-host.tailnet.ts.net`). No API key needed, Tailscale handles auth.
 
 **Dynamic providers** - drop an executable script into `~/.config/maki/providers/` to add custom providers or proxies. See [docs](https://maki.sh/docs/providers/#dynamic-providers) for details.
 
@@ -156,8 +158,8 @@ Run `maki acp` or configure your ACP supporting editor to use maki, e.g. in [Zed
 
 More info at the [official docs](https://maki.sh/docs).
 
-> DISCLAIMER: >90% of code in maki was written by maki, guided by humans. The code is not as good as what I would've made in the artisanal hand-made style. But it's also not slop / vibe coded. I just think people should be honest about their use of AI in projects in this era.
-
 ## Example config
 
 [tontinton/makiconf](https://github.com/tontinton/makiconf) - includes a [semble](https://github.com/MinishLab/semble) tool (Lua code) for semantic code search, and an [ast-grep](https://ast-grep.github.io) MCP server for AST-based search and replace.
+
+> DISCLAIMER: >90% of code in maki was written by maki, guided by humans. Some parts of the code are not as good as what I would've made in the artisanal hand-made style. But it's also not slop / vibe coded, and can easily be refactor if needed nowadays.

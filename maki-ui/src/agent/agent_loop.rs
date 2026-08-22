@@ -137,11 +137,18 @@ impl AgentLoop {
         }
 
         while let Ok(()) = self.queue.recv_notify().await {
+            let mut last_run_id = None;
             while let Some(entry) = self.queue.pop() {
                 if entry.run_id() < self.min_run_id {
                     continue;
                 }
+                last_run_id = Some(entry.run_id());
                 self.process_entry(entry).await;
+            }
+            if let Some(run_id) = last_run_id {
+                let event_tx = EventSender::new(self.agent_tx.clone(), run_id);
+                self.queue
+                    .publish_if_empty(|| event_tx.try_send(AgentEvent::QueueDrained));
             }
         }
     }

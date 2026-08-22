@@ -13,6 +13,7 @@ pub(crate) mod keymap;
 pub(crate) mod log;
 pub(crate) mod r#match;
 pub(crate) mod mode;
+pub(crate) mod model;
 pub(crate) mod net;
 pub(crate) mod options;
 pub(crate) mod session;
@@ -80,6 +81,10 @@ pub(crate) fn create_maki_global(
     maki.set(
         "session",
         session::create_session_table(lua, ui_action_tx.clone())?,
+    )?;
+    maki.set(
+        "model",
+        model::create_model_table(lua, ui_action_tx.clone())?,
     )?;
     maki.set(
         "ui",

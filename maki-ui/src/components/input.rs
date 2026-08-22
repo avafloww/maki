@@ -17,7 +17,7 @@ use maki_providers::ImageSource;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
@@ -43,6 +43,13 @@ const PLACEHOLDER_SUGGESTIONS: &[&str] = &[
     "refactor a module",
     "remove dead code",
 ];
+
+#[derive(Clone, Copy)]
+pub enum Placeholder {
+    Suggestion,
+    Blank,
+    Queue,
+}
 
 pub enum InputAction {
     Submit(Submission),
@@ -329,7 +336,7 @@ impl InputBox {
         &mut self,
         frame: &mut Frame,
         area: Rect,
-        streaming: bool,
+        placeholder: Placeholder,
         border_style: Style,
         focused: bool,
         top_right_hint: Option<Line<'_>>,
@@ -359,32 +366,29 @@ impl InputBox {
         let is_empty = self.buffer.value().is_empty();
         let mut styled_lines: Vec<Line> = if is_empty && self.pending_images.is_empty() {
             let placeholder_base = theme::current().input_placeholder;
-            if streaming {
-                vec![Line::from(vec![
-                    super::chevron_span(),
-                    if focused {
-                        Span::styled("Q", placeholder_base.reversed())
-                    } else {
-                        Span::styled("Q", placeholder_base)
-                    },
-                    Span::styled("ueue another prompt...", placeholder_base),
-                ])]
+            let (head, tail) = match placeholder {
+                Placeholder::Suggestion => (
+                    "Ask maki to ",
+                    vec![
+                        Span::styled(
+                            self.placeholder_hint,
+                            placeholder_base.add_modifier(Modifier::ITALIC),
+                        ),
+                        Span::styled("...", placeholder_base),
+                    ],
+                ),
+                Placeholder::Queue => ("Queue another prompt...", Vec::new()),
+                Placeholder::Blank => (" ", Vec::new()),
+            };
+            let mut spans = vec![super::chevron_span()];
+            if focused && !head.is_empty() {
+                spans.push(Span::styled(&head[..1], placeholder_base.reversed()));
+                spans.push(Span::styled(&head[1..], placeholder_base));
             } else {
-                vec![Line::from(vec![
-                    super::chevron_span(),
-                    if focused {
-                        Span::styled("A", placeholder_base.reversed())
-                    } else {
-                        Span::styled("A", placeholder_base)
-                    },
-                    Span::styled("sk maki to ", placeholder_base),
-                    Span::styled(
-                        self.placeholder_hint,
-                        placeholder_base.add_modifier(ratatui::style::Modifier::ITALIC),
-                    ),
-                    Span::styled("...", placeholder_base),
-                ])]
+                spans.push(Span::styled(head, placeholder_base));
             }
+            spans.extend(tail);
+            vec![Line::from(spans)]
         } else {
             let cursor_y = self.buffer.y();
             let cursor_x = self.buffer.x();
@@ -1012,7 +1016,19 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, width, height);
-                input.view(frame, area, streaming, border_style, true, None, "");
+                input.view(
+                    frame,
+                    area,
+                    if streaming {
+                        Placeholder::Queue
+                    } else {
+                        Placeholder::Suggestion
+                    },
+                    border_style,
+                    true,
+                    None,
+                    "",
+                );
             })
             .unwrap();
         terminal

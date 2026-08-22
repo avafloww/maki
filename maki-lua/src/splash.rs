@@ -203,4 +203,5 @@ pub(crate) const version__doc: FnDoc = FnDoc {
     params: &[],
     returns: "(table) { current = string, latest = string|nil, update_available = boolean }",
     example: "local v = maki.version()\nif v.update_available then\n  print(\"run maki update to get v\" .. v.latest)\nend",
+    guard: None,
 };

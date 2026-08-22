@@ -84,11 +84,11 @@ Edit lines by number. Replaces lines from `start` to `end` (inclusive) with `new
 
 ### `insert_lines` <span class="badge badge-optin">opt-in</span> {#insert_lines}
 
-Insert lines before a given line number. Lines at `line` and below shift down. Existing lines are preserved. Do not use with the batch tool.
+Insert `new_string` after line `line`, or at the top with 0. Only include new lines, never lines already in the file. Do not use with the batch tool.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `line` | integer | yes | Line number to insert before (1-indexed). Use 1 to insert at the top. |
+| `line` | integer | yes | Line number to insert after (1-indexed). Use 0 to insert at the top. |
 | `new_string` | string | yes | Text to insert |
 | `path` | string | yes | Absolute path to the file |
 
@@ -146,7 +146,7 @@ Execute Python code in a sandboxed interpreter with tools as callable functions.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `code` | string | yes |  | Python code to execute. Tools are async functions that return strings (not objects). You MUST await every call: `result = await read(path='/file', offset=1, limit=0)`. Use `await asyncio.gather(...)` for concurrency. |
+| `code` | string | yes |  | Python code to execute. Tools are async functions that return strings (not objects). You MUST await every call: `result = await read(path='/file', offset=1, limit=0)`. Use `await gather(...)` for concurrency. |
 | `timeout` | integer | no | 30 | Script execution timeout in seconds |
 
 ### `plan_submit` {#plan_submit}

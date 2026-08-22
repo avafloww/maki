@@ -209,6 +209,7 @@ supports_vision = false
 | `discover_models` | bool | When true, also probe the provider's model list endpoint (default false) |
 | `enable_free_models` | bool | Opencode only. Show free catalog models (default false) |
 | `models` | array | Declared models for custom providers (see below) |
+| `overrides` | table | Aperture only. Per-upstream model overrides (see below) |
 
 ### Model fields
 
@@ -229,6 +230,25 @@ supports_vision = false
 Custom slugs must not reuse a built-in provider name. A bad TOML parse exits with code 2 at startup so a typo cannot silently empty the registry.
 
 You can also create a custom provider interactively with `maki auth login` and choosing the custom option. That writes a starter entry to this file.
+
+### Aperture overrides
+
+Aperture proxies upstream providers, exposing each model as `aperture/<upstream>/<model>`. Overrides keyed by upstream provider id live under `[aperture.overrides]`:
+
+```toml
+[aperture.overrides.llmserver]
+base = "llama-cpp"
+context_window = 131072
+max_output_tokens = 16384
+
+[aperture.overrides.llmserver.models."qwen-3.6"]
+context_window = 262144
+supports_vision = true
+```
+
+Provider-level fields apply to every model from that upstream; per-model entries under `models` win field by field. Fields: `context_window`, `max_output_tokens`, `supports_thinking`, `supports_vision`, `base` (remaps an opaque vendor to a native provider; e.g. `llama-cpp`, `google`, `anthropic`), and `path_prefix`. Model ids containing dots must be quoted (`"qwen3.6"`) since TOML treats a bare dotted key as a nested table.
+
+Maki sends `/v1` (or `/v1beta` for Gemini routes, nothing for Anthropic and Z.AI), and Aperture appends that path to the upstream's base url. If an upstream base url already carries its own path, set `path_prefix = ""` for it to avoid a doubled path. Z.AI defaults to no prefix since its API path has no `/v1` segment; point the upstream base url at the full API root (e.g. `https://api.z.ai/api/paas/v4`).
 
 ### Plans
 
@@ -342,6 +362,8 @@ fn format_auth(kind: ProviderKind) -> String {
     let env = kind.api_key_env();
     if kind == ProviderKind::Ollama {
         format!("`OLLAMA_HOST` for local/remote (e.g. `http://localhost:11434`), `{env}` for auth")
+    } else if kind == ProviderKind::Aperture {
+        "`APERTURE_HOST` (e.g. `https://your-host.tailnet.ts.net`)".into()
     } else {
         format!("`{env}`")
     }
@@ -396,7 +418,7 @@ fn build_sections() -> Vec<ProviderSection> {
                     kind,
                     name: kind.display_name(),
                     auth_line: format!(
-                        "{} (or run `maki auth login copilot` to import a token from gh)",
+                        "{} (or run `maki auth login copilot` to import a token from gh CLI, the Copilot client, or the system keyring)",
                         format_auth(kind)
                     ),
                     urls: vec![kind.base_url()],
@@ -480,6 +502,10 @@ fn no_catalog_note(kind: ProviderKind) -> &'static str {
             "Connects to any OpenAI-compatible `/v1` endpoint. Point `LLAMA_CPP_HOST` \
              to your server address (defaults to `http://localhost:8080`)."
         }
+        ProviderKind::Aperture => {
+            "Aperture discovers models from your gateway. Set `APERTURE_HOST` to your Tailscale Aperture \
+             endpoint (e.g. `https://your-host.tailnet.ts.net`). No API key needed, Tailscale handles auth."
+        }
         ProviderKind::OpenRouter => {
             "OpenRouter aggregates models from many providers behind a single API key. \
              Browse available models at [openrouter.ai/models](https://openrouter.ai/models). \
@@ -504,6 +530,16 @@ fn write_section(out: &mut String, section: &ProviderSection) {
 
     if let Some(features) = section.features {
         let _ = writeln!(out, "- **Features**: {features}");
+    }
+
+    // Rendered from the schedule, so the docs cannot drift from what we bill.
+    if let Some(schedule) = ManifestRegistry::get(&section.kind.to_string())
+        .and_then(|manifest| manifest.pricing_schedule)
+    {
+        let _ = writeln!(
+            out,
+            "- **Peak pricing**: the prices below are off-peak; each turn is billed as it happens, at {schedule}"
+        );
     }
 
     let _ = writeln!(out);
