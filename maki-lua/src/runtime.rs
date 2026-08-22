@@ -272,6 +272,32 @@ pub enum CommandArgumentLifecycle {
     Cancel,
 }
 
+/// Whether `pending` makes `this` stale for the coalescing lifecycle
+/// channel. Highlights coalesce with each other, and a highlight overtaken
+/// by a later accept or cancel is stale. Accepts are never superseded, and
+/// cancels only coalesce with each other: both are terminal actions of
+/// their own session, and an event that arrives after one belongs to a
+/// newer session (the popup reopens after accept/close). Evicting an
+/// Accept would silently drop its `on_accept` side effects, e.g. a splash
+/// selection save.
+pub(crate) fn lifecycle_superseded(
+    this: &CommandArgumentLifecycleRequest,
+    pending: &CommandArgumentLifecycleRequest,
+) -> bool {
+    match pending.event {
+        CommandArgumentLifecycle::Highlight => {
+            matches!(this.event, CommandArgumentLifecycle::Highlight)
+        }
+        CommandArgumentLifecycle::Accept => {
+            matches!(this.event, CommandArgumentLifecycle::Highlight)
+        }
+        CommandArgumentLifecycle::Cancel => matches!(
+            this.event,
+            CommandArgumentLifecycle::Highlight | CommandArgumentLifecycle::Cancel
+        ),
+    }
+}
+
 pub(crate) struct CommandArgumentLifecycleRequest {
     pub(crate) context: CommandArgumentContext,
     pub(crate) event: CommandArgumentLifecycle,
@@ -2766,9 +2792,10 @@ pub fn spawn(
     };
     let command_argument_lifecycle = {
         let tx = tx.clone();
-        crate::coalesced_latest::CoalescedLatest::new(move |work| {
-            tx.send(Request::CommandArgumentLifecycle(work)).is_ok()
-        })
+        crate::coalesced_latest::CoalescedLatest::with_supersede(
+            move |work| tx.send(Request::CommandArgumentLifecycle(work)).is_ok(),
+            lifecycle_superseded,
+        )
     };
     let splash_frames = {
         let prio_tx = prio_tx.clone();
@@ -3235,7 +3262,7 @@ pub fn spawn(
                             });
                         }
                         Request::CommandArgumentLifecycle(work) => {
-                            if work.is_latest() {
+                            if !work.is_superseded() {
                                 let request = work.value();
                                 let _ = run_command_completion_scoped(
                                     &rt.lua,
@@ -3316,6 +3343,44 @@ mod tests {
         let lua = Lua::new();
         lua.set_app_data(BufferStore::new());
         lua
+    }
+
+    fn lifecycle_req(event: CommandArgumentLifecycle) -> CommandArgumentLifecycleRequest {
+        CommandArgumentLifecycleRequest {
+            context: CommandArgumentContext {
+                command: Arc::from("/cmd"),
+                plugin: Arc::from("plugin"),
+                args: String::new(),
+                arg: String::new(),
+                index: 0,
+                mode: "build".into(),
+                session: 1,
+                generation: 1,
+            },
+            event,
+            item: None,
+            cancel: CancelToken::none(),
+        }
+    }
+
+    #[test_case(CommandArgumentLifecycle::Highlight, CommandArgumentLifecycle::Highlight, true  ; "highlight_coalesces_highlight")]
+    #[test_case(CommandArgumentLifecycle::Accept,  CommandArgumentLifecycle::Highlight, false ; "late_highlight_keeps_accept")]
+    #[test_case(CommandArgumentLifecycle::Cancel,  CommandArgumentLifecycle::Highlight, false ; "late_highlight_keeps_cancel")]
+    #[test_case(CommandArgumentLifecycle::Highlight, CommandArgumentLifecycle::Accept,  true  ; "accept_supersedes_highlight")]
+    #[test_case(CommandArgumentLifecycle::Highlight, CommandArgumentLifecycle::Cancel,  true  ; "cancel_supersedes_highlight")]
+    #[test_case(CommandArgumentLifecycle::Accept,  CommandArgumentLifecycle::Accept,  false ; "accepts_both_run")]
+    #[test_case(CommandArgumentLifecycle::Accept,  CommandArgumentLifecycle::Cancel,  false ; "accept_then_cancel_both_run")]
+    #[test_case(CommandArgumentLifecycle::Cancel,  CommandArgumentLifecycle::Accept,  false ; "cancel_then_accept_both_run")]
+    #[test_case(CommandArgumentLifecycle::Cancel,  CommandArgumentLifecycle::Cancel,  true  ; "cancels_coalesce")]
+    fn lifecycle_superseded_table(
+        this_event: CommandArgumentLifecycle,
+        pending_event: CommandArgumentLifecycle,
+        expected: bool,
+    ) {
+        assert_eq!(
+            lifecycle_superseded(&lifecycle_req(this_event), &lifecycle_req(pending_event)),
+            expected
+        );
     }
 
     #[test]

@@ -7,9 +7,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use maki_agent::AgentMode;
+use maki_agent::cancel::CancelToken;
 use maki_agent::tools::ToolRegistry;
 use maki_agent::tools::test_support::stub_ctx;
 use maki_lua::test_support::InMemoryFs;
+use maki_lua::{CommandArgumentContext, CommandArgumentItem, CommandArgumentLifecycle};
 
 const NOTE_PATH: &str = "note.md";
 const NOTE_BODY: &str = "hello-maki";
@@ -126,6 +128,7 @@ const SELECTION_MATRIX_JSON: &str = r#"{"name":"matrix"}"#;
 const SELECTION_INVALID: &[u8] = &[0xff, 0xfe, 0x00];
 const SELECTION_DEFAULT: &str = "default";
 const SELECTION_MATRIX: &str = "matrix";
+const SELECTION_VORTEX: &str = "vortex";
 
 const WRAPPER_SOURCE: &str = r##"
 maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
@@ -203,6 +206,27 @@ fn pull_frame(handle: &maki_lua::EventHandle, needle: Option<&str>) -> maki_lua:
 
 fn frame_text(frame: &maki_lua::SplashFrame) -> String {
     frame.rows.iter().map(|r| r.glyphs.as_str()).collect()
+}
+
+fn lifecycle_ctx() -> CommandArgumentContext {
+    CommandArgumentContext {
+        command: Arc::from("/splash"),
+        plugin: Arc::from("splashes"),
+        args: SELECTION_VORTEX.into(),
+        arg: SELECTION_VORTEX.into(),
+        index: 1,
+        mode: "build".into(),
+        session: 1,
+        generation: 1,
+    }
+}
+
+fn lifecycle_item() -> CommandArgumentItem {
+    CommandArgumentItem {
+        label: SELECTION_VORTEX.into(),
+        insertion: SELECTION_VORTEX.into(),
+        description: None,
+    }
 }
 
 #[test]
@@ -313,6 +337,52 @@ fn splash_picker_command_persists_selection() {
             .contains(SELECTION_MATRIX),
         "selection must survive the first frame"
     );
+}
+
+#[test]
+fn splash_picker_accept_survives_late_highlight() {
+    let state = std::path::Path::new(maki_lua::test_support::TEST_STATE_DIR);
+    assert!(
+        !state.exists(),
+        "precondition: TEST_STATE_DIR must not exist on disk"
+    );
+
+    let fs = Arc::new(InMemoryFs::new());
+    fs.seed(&selection_path(), SELECTION_MATRIX_JSON.as_bytes().to_vec());
+    let (handle, guard) = maki_lua::test_support::spawn_host_with_fs_for_tests(
+        &["splashes", "splashes_default"],
+        Arc::clone(&fs),
+        Some(CONTRIBUTION_SOURCE),
+    );
+
+    // The seeded matrix serves the first frame, so a frame pull can be in
+    // flight when the lifecycle events arrive.
+    let frame = pull_frame(&handle, None);
+    assert!(
+        !frame.rows.is_empty(),
+        "seeded splash serves the first frame"
+    );
+
+    // Enter in the popup submits an Accept; the next keystroke re-triggers
+    // completion and submits a Highlight for the new popup session while the
+    // Accept is still in flight. The late Highlight must not coalesce the
+    // Accept away, or the selection save is silently lost.
+    handle.command_argument_lifecycle(
+        lifecycle_ctx(),
+        CommandArgumentLifecycle::Accept,
+        Some(lifecycle_item()),
+        CancelToken::none(),
+    );
+    handle.command_argument_lifecycle(
+        lifecycle_ctx(),
+        CommandArgumentLifecycle::Highlight,
+        Some(lifecycle_item()),
+        CancelToken::none(),
+    );
+
+    let content = wait_for_selection(&guard, SELECTION_VORTEX);
+    assert!(content.contains("name"), "persisted file: {content}");
+    assert!(!state.exists(), "the save must not touch the real disk");
 }
 
 #[test]

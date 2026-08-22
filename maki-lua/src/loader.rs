@@ -22,7 +22,7 @@ use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
 use crate::runtime::{
     self, ClickFallback, CommandArgumentContext, CommandArgumentLifecycle,
     CommandArgumentLifecycleRequest, CommandArgumentRequest, LuaThread, Request, RestoreItem,
-    SplashFrameRequest,
+    SplashFrameRequest, lifecycle_superseded,
 };
 use crate::splash::{SPLASH_PULL_TIMEOUT, SplashFrame, SplashPull};
 use maki_agent::prompt::ResolvedSlots;
@@ -626,10 +626,13 @@ impl EventHandle {
                 let tx = tx.clone();
                 move |work| tx.send(Request::CollectCommandArgumentItems(work)).is_ok()
             }),
-            command_argument_lifecycle: CoalescedLatest::new({
-                let tx = tx.clone();
-                move |work| tx.send(Request::CommandArgumentLifecycle(work)).is_ok()
-            }),
+            command_argument_lifecycle: CoalescedLatest::with_supersede(
+                {
+                    let tx = tx.clone();
+                    move |work| tx.send(Request::CommandArgumentLifecycle(work)).is_ok()
+                },
+                lifecycle_superseded,
+            ),
             splash_frames: CoalescedLatest::new(move |work| {
                 tx.send(Request::SplashFrame(work)).is_ok()
             }),
@@ -703,10 +706,13 @@ impl EventHandle {
                         .is_ok()
                 }
             }),
-            command_argument_lifecycle: CoalescedLatest::new({
-                let shared = shared.clone();
-                move |work| shared.send(Request::CommandArgumentLifecycle(work)).is_ok()
-            }),
+            command_argument_lifecycle: CoalescedLatest::with_supersede(
+                {
+                    let shared = shared.clone();
+                    move |work| shared.send(Request::CommandArgumentLifecycle(work)).is_ok()
+                },
+                lifecycle_superseded,
+            ),
             splash_frames: CoalescedLatest::new(move |work| {
                 shared.send(Request::SplashFrame(work)).is_ok()
             }),

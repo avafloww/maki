@@ -1,5 +1,11 @@
 use std::sync::{Arc, Mutex};
 
+/// Coalescing work channel: at most one item is in flight, and items
+/// submitted while it is still processing replace the single pending slot.
+/// The `superseded_by` predicate decides whether a pending item makes the
+/// in-flight one stale: by default any pending item does (latest wins), but
+/// callers can exempt terminal events, e.g. an Accept that a later
+/// same-family Highlight (from the next session) must not evict.
 pub(crate) struct CoalescedLatest<T> {
     inner: Arc<Inner<T>>,
 }
@@ -7,6 +13,7 @@ pub(crate) struct CoalescedLatest<T> {
 struct Inner<T> {
     state: Mutex<State<T>>,
     dispatch: Box<dyn Fn(CoalescedWork<T>) -> bool + Send + Sync>,
+    superseded_by: fn(&T, &T) -> bool,
 }
 
 struct State<T> {
@@ -22,6 +29,13 @@ pub(crate) struct CoalescedWork<T> {
 
 impl<T> CoalescedLatest<T> {
     pub(crate) fn new(dispatch: impl Fn(CoalescedWork<T>) -> bool + Send + Sync + 'static) -> Self {
+        Self::with_supersede(dispatch, |_, _| true)
+    }
+
+    pub(crate) fn with_supersede(
+        dispatch: impl Fn(CoalescedWork<T>) -> bool + Send + Sync + 'static,
+        superseded_by: fn(&T, &T) -> bool,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State {
@@ -30,6 +44,7 @@ impl<T> CoalescedLatest<T> {
                     closed: false,
                 }),
                 dispatch: Box::new(dispatch),
+                superseded_by,
             }),
         }
     }
@@ -70,8 +85,15 @@ impl<T> Clone for CoalescedLatest<T> {
 }
 
 impl<T> CoalescedWork<T> {
-    pub(crate) fn is_latest(&self) -> bool {
-        self.inner.state.lock().unwrap().pending.is_none()
+    /// True when a pending item supersedes this one: the handler should
+    /// skip it and the pending item takes over. Check before `finish`;
+    /// once finished the value is taken and this panics.
+    pub(crate) fn is_superseded(&self) -> bool {
+        let state = self.inner.state.lock().unwrap();
+        match &state.pending {
+            Some(pending) => (self.inner.superseded_by)(self.value(), pending),
+            None => false,
+        }
     }
 
     pub(crate) fn value(&self) -> &T {
@@ -139,42 +161,56 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    /// Models the runtime handler contract: run the work unless a pending
+    /// item supersedes it, then hand the pending item off via `finish`.
+    fn deliver_unless_superseded(work: CoalescedWork<u32>, delivered: &mut Vec<u32>) {
+        if !work.is_superseded() {
+            delivered.push(*work.value());
+        }
+        work.finish(drop);
+    }
+
     #[test]
-    fn terminal_value_invalidates_queued_older_work() {
+    fn superseding_pending_suppresses_active() {
         let (tx, rx) = flume::unbounded();
-        let latest = CoalescedLatest::new(move |work| tx.send(work).is_ok());
+        let latest = CoalescedLatest::with_supersede(
+            move |work| tx.send(work).is_ok(),
+            |this: &u32, pending: &u32| pending > this,
+        );
 
-        assert!(latest.submit("highlight-a"));
+        assert!(latest.submit(1));
         let first = rx.recv().unwrap();
-        assert!(latest.submit("highlight-b"));
-        assert!(latest.submit("cancel"));
-        assert!(!first.is_latest());
-        first.finish(drop);
-        let terminal = rx.recv().unwrap();
-        assert!(terminal.is_latest());
+        assert!(!first.is_superseded());
+        assert!(latest.submit(2));
+        assert!(first.is_superseded());
         let mut delivered = Vec::new();
-        terminal.finish(|value| delivered.push(value));
+        deliver_unless_superseded(first, &mut delivered);
+        let second = rx.recv().unwrap();
+        deliver_unless_superseded(second, &mut delivered);
 
-        assert_eq!(delivered, vec!["cancel"]);
+        assert_eq!(delivered, vec![2]);
         assert!(rx.try_recv().is_err());
     }
 
     #[test]
-    fn accept_invalidates_queued_highlight() {
+    fn non_superseding_pending_still_runs_in_order() {
         let (tx, rx) = flume::unbounded();
-        let latest = CoalescedLatest::new(move |work| tx.send(work).is_ok());
+        let latest = CoalescedLatest::with_supersede(
+            move |work| tx.send(work).is_ok(),
+            |this: &u32, pending: &u32| pending > this,
+        );
 
-        assert!(latest.submit("highlight-a"));
+        assert!(latest.submit(2));
         let first = rx.recv().unwrap();
-        assert!(latest.submit("highlight-b"));
-        assert!(latest.submit("accept"));
-        assert!(!first.is_latest());
-        first.finish(drop);
-        let accepted = rx.recv().unwrap();
+        assert!(!first.is_superseded());
+        assert!(latest.submit(1));
+        assert!(!first.is_superseded());
         let mut delivered = Vec::new();
-        accepted.finish(|value| delivered.push(value));
+        deliver_unless_superseded(first, &mut delivered);
+        let second = rx.recv().unwrap();
+        deliver_unless_superseded(second, &mut delivered);
 
-        assert_eq!(delivered, vec!["accept"]);
+        assert_eq!(delivered, vec![2, 1]);
         assert!(rx.try_recv().is_err());
     }
 

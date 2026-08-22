@@ -149,7 +149,7 @@ pub mod test_support {
             use crate::runtime::{CommandArgumentLifecycle, Request};
             while let Ok(req) = self.0.try_recv() {
                 if let Request::CommandArgumentLifecycle(work) = req {
-                    let latest = work.is_latest();
+                    let latest = !work.is_superseded();
                     let event = match work.value().event {
                         CommandArgumentLifecycle::Highlight => "highlight",
                         CommandArgumentLifecycle::Accept => "accept",
