@@ -91,7 +91,7 @@ Type what you want done, press Enter, watch it work. Worth knowing on day one:
 - **Permissions.** File edits inside the repo run freely. `bash` and web tools ask first: `y` allows once, `s` for the session, `a` for the project. Deny rules always win; `/yolo` skips the prompts. Details in [Permissions](/docs/permissions/).
 - **Plan mode.** `Tab` toggles it. The agent may only write the plan file until you approve, then back to build mode.
 - **Models.** `/model` switches mid-session. Type `@` in the input to reference a file, skill, subagent, or model inline; see [References](/docs/references/).
-- **Sessions.** `/new` starts a second session while the first keeps working in the background; `/sessions` jumps between them. Tomorrow, `maki --continue` resumes where you left off.
+- **Sessions.** `/new` starts a second session while the first keeps working in the background; `/sessions` jumps between them. Tomorrow, `maki -c` resumes where you left off, `maki sessions` lists stored sessions, and `maki --resume` picks one.
 - **Your shell.** Prefix input with `!` to run a command yourself (`!cargo test`). `!!` hides command and output from the agent.
 - **Escape hatch.** `Esc Esc` cancels a streaming response. When idle, it rewinds instead.
 - **Help.** `Ctrl+H` lists every keybinding, or see [Keybindings](/docs/keybindings/).
