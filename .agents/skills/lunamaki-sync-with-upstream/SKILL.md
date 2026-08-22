@@ -17,15 +17,15 @@ edges so a future iteration does not re-derive them.
 
 - Working branch is a sync branch (e.g. `luna.sync-maki-048-v2`), created on
   top of the fork's line of work.
-- `origin` is upstream `tontinton/maki`. `fork` is `lun-4/maki` (this repo).
-- `git fetch origin` first.
+- `upstream` is `tontinton/maki`. `origin` is `lun-4/maki` (this repo).
+- `git fetch upstream` first.
 
 NOTE: confirm those origins are valid before continuing, as different clones
 may have different setups.
 
 ## The principle: additive + defer to fork
 
-Classify every difference between `origin/main` and the current branch. For
+Classify every difference between `upstream/main` and the current branch. For
 each intersection, decide: keep both, keep fork, or combine. Two rules are
 absolute:
 
@@ -42,11 +42,11 @@ absolute:
 
 ## Process
 
-1. `git fetch origin && git merge-tree --write-tree --name-only HEAD origin/main`
+1. `git fetch upstream && git merge-tree --write-tree --name-only HEAD upstream/main`
    (dry-run). List the content conflicts.
-2. `git merge origin/main` (no-edit). Inspect `git status` / `git diff --name-only --diff-filter=U`.
+2. `git merge upstream/main` (no-edit). Inspect `git status` / `git diff --name-only --diff-filter=U`.
 3. Resolve each conflict by combining both sides. For code, read
-   `git show HEAD:<file>` and `git show origin/main:<file>` and merge the two
+   `git show HEAD:<file>` and `git show upstream/main:<file>` and merge the two
    semantics; do not drop fork code to make the merge easy.
 4. `git add -A`, commit the merge with a message listing notable merges.
 5. Verify identity files still point at fork.
