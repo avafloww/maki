@@ -672,6 +672,7 @@ fn image_media_type(mime: &str) -> ImageMediaType {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_event_pump(
     event_rx: Receiver<Envelope>,
     session_id: SessionRef,

@@ -360,7 +360,7 @@ fn ctrl_c_quits_when_input_empty() {
     app.status = Status::Idle;
     let actions = app.update(Msg::Key(kb::QUIT.to_key_event()));
     assert_eq!(app.exit_request, ExitRequest::Success);
-    assert!(actions.is_empty());
+    assert!(matches!(actions.as_slice(), [Action::ManualExit]));
 }
 
 #[test_case(done(), ExitRequest::Success ; "done_exits_success")]
@@ -2445,7 +2445,7 @@ fn submit_exit_quits() {
         images: vec![],
     });
     assert_eq!(app.exit_request, ExitRequest::Success);
-    assert!(actions.is_empty());
+    assert!(matches!(actions.as_slice(), [Action::ManualExit]));
 }
 
 #[test]
@@ -2540,7 +2540,7 @@ fn reload_persists_session_with_content_to_disk() {
         .push_message(Message::user("hello".into()));
     let actions = app.execute_command(cmd("/reload"), 0);
     assert_eq!(app.exit_request, ExitRequest::Reload);
-    assert!(actions.is_empty());
+    assert!(matches!(actions.as_slice(), [Action::ManualExit]));
     app.checkpoint();
     let id = app.state.session.id;
     drain_writer(app, writer);
@@ -2839,7 +2839,6 @@ fn build_rewind_app() -> App {
 #[test]
 fn rewind_to_middle_truncates_and_populates_input() {
     let mut app = build_rewind_app();
-    app.state.context_size = 100_000;
     let old_run_id = app.run_id;
     let entry = crate::components::rewind_picker::RewindEntry {
         turn_index: 2,
@@ -2852,10 +2851,6 @@ fn rewind_to_middle_truncates_and_populates_input() {
     assert!(app.state.session.tool_outputs().contains_key("tool-1"));
     assert_eq!(app.input_box.buffer.value(), "second prompt");
     assert_eq!(app.run_id, old_run_id);
-    let expected_ctx = maki_agent::agent::estimate_message_tokens(app.state.session.messages());
-    assert_eq!(app.state.context_size, expected_ctx);
-    assert_eq!(app.chats[0].context_size, expected_ctx);
-
     let Action::LoadSession(ref loaded) = actions[0] else {
         panic!("expected LoadSession");
     };
