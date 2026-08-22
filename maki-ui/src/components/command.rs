@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::iter;
 use std::mem;
 use std::sync::Arc;
 
@@ -21,11 +22,14 @@ use ratatui::widgets::{Clear, Paragraph};
 use crate::{repaint::Dirty, theme};
 
 const TICK_TIMEOUT_MS: u64 = 10;
+/// Note appended to builtin alias rows: `(Alias for /new)`.
+const ALIAS_NOTE: &str = " (Alias for ";
 
 pub struct BuiltinCommand {
     pub name: &'static str,
     pub description: &'static str,
     pub max_args: usize,
+    pub aliases: &'static [&'static str],
 }
 
 pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
@@ -33,91 +37,109 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         name: "/tasks",
         description: "Browse and search tasks",
         max_args: 0,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/compact",
         description: "Summarize and compact conversation history",
         max_args: 0,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/new",
         description: "Start a new session",
         max_args: 0,
+        aliases: &["/clear"],
     },
     BuiltinCommand {
         name: "/help",
         description: "Show keybindings",
         max_args: 0,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/usage",
         description: "Show token usage breakdown",
         max_args: 0,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/queue",
         description: "Remove items from queue",
         max_args: 0,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/model",
         description: "Switch model",
         max_args: 0,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/theme",
         description: "Switch color theme",
         max_args: 0,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/mcp",
         description: "Configure MCP servers",
         max_args: 0,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/login",
         description: "Authenticate with an LLM provider",
         max_args: 0,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/cd",
         description: "Change working directory",
         max_args: 1,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/btw",
         description: "Ask a quick question (no tools, no history pollution)",
         max_args: usize::MAX,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/yolo",
         description: "Toggle YOLO mode (skip all permission prompts)",
         max_args: 0,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/thinking",
         description: "Toggle extended thinking (off, adaptive, effort level, or budget)",
         max_args: 1,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/fast",
         description: "Toggle Anthropic fast mode (Opus only)",
         max_args: 0,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/workflow",
         description: "Toggle workflow mode (task callable inside code_execution)",
         max_args: 0,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/exit",
         description: "Exit the application",
         max_args: 0,
+        aliases: &[],
     },
     BuiltinCommand {
         name: "/reload",
         description: "Reload plugins and config",
         max_args: 0,
+        aliases: &[],
     },
 ];
 
@@ -150,6 +172,7 @@ struct CommandItem {
 }
 
 struct Match {
+    display: String,
     command_type: CommandType,
     indices: Vec<u32>,
 }
@@ -237,10 +260,14 @@ impl CommandPalette {
         mcp_prompts: &'a [McpPromptInfo],
         lua_commands: &'a [LuaCommandInfo],
     ) -> impl Iterator<Item = CommandItem> + 'a {
-        let builtins = BUILTIN_COMMANDS.iter().map(|cmd| CommandItem {
-            name: cmd.name.to_string(),
-            max_args: cmd.max_args,
-            command_type: CommandType::Builtin(cmd),
+        let builtins = BUILTIN_COMMANDS.iter().flat_map(|cmd| {
+            iter::once(cmd.name)
+                .chain(cmd.aliases.iter().copied())
+                .map(|name| CommandItem {
+                    name: name.to_string(),
+                    max_args: cmd.max_args,
+                    command_type: CommandType::Builtin(cmd),
+                })
         });
         let custom = custom_commands
             .iter()
@@ -385,7 +412,7 @@ impl CommandPalette {
                     };
                 }
                 if let Some(item) = self.filtered.get(self.selected) {
-                    let name = self.item_name(item);
+                    let name = item.display.clone();
                     let text = if self.item_has_args(item) {
                         format!("{name} ")
                     } else {
@@ -442,7 +469,7 @@ impl CommandPalette {
         let command = self
             .filtered
             .get(self.selected)
-            .map(|item| self.item_name(item));
+            .map(|item| item.display.clone());
         let lua = command
             .as_deref()
             .and_then(|command| self.find_lua_command(command))
@@ -654,6 +681,7 @@ impl CommandPalette {
             };
 
             self.filtered.push(Match {
+                display: cmd_item.name.clone(),
                 command_type: cmd_item.command_type.clone(),
                 indices,
             });
@@ -696,15 +724,6 @@ impl CommandPalette {
         };
     }
 
-    fn item_name(&self, m: &Match) -> String {
-        match &m.command_type {
-            CommandType::Builtin(cmd) => cmd.name.to_string(),
-            CommandType::Custom(i) => self.custom[*i].display_name(),
-            CommandType::McpPrompt(i) => format!("/{}", self.mcp_prompts[*i].display_name),
-            CommandType::Lua(i) => self.lua_commands[*i].name.to_string(),
-        }
-    }
-
     fn item_has_args(&self, m: &Match) -> bool {
         match &m.command_type {
             CommandType::Builtin(cmd) => cmd.max_args > 0,
@@ -719,13 +738,52 @@ impl CommandPalette {
             CommandType::Builtin(cmd) => cmd.description,
             CommandType::Custom(i) => &self.custom[*i].description,
             CommandType::McpPrompt(i) => &self.mcp_prompts[*i].description,
-            CommandType::Lua(i) => &self.lua_commands[*i].description,
+            CommandType::Lua(i) => self.lua_commands[*i].description.as_ref(),
         }
+    }
+
+    /// Canonical name an alias row points at, if the row is a builtin alias.
+    fn alias_target(&self, m: &Match) -> Option<&'static str> {
+        match &m.command_type {
+            CommandType::Builtin(cmd) if m.display != cmd.name => Some(cmd.name),
+            _ => None,
+        }
+    }
+
+    /// Description as rendered, with the alias note appended for alias rows.
+    fn rendered_description(&self, m: &Match) -> String {
+        let desc = self.item_description(m);
+        match self.alias_target(m) {
+            Some(target) => format!("{desc}{ALIAS_NOTE}{target})"),
+            None => desc.to_string(),
+        }
+    }
+
+    /// Description column spans; alias rows highlight the target name.
+    fn description_spans(&self, m: &Match, desc_style: Style) -> Vec<Span<'_>> {
+        let desc = self.item_description(m);
+        let Some(target) = self.alias_target(m) else {
+            return vec![Span::styled(desc.to_string(), desc_style)];
+        };
+        let t = theme::current();
+        let target_style = desc_style
+            .fg(t.accent.fg.unwrap_or_default())
+            .add_modifier(Modifier::BOLD);
+        vec![
+            Span::styled(desc.to_string(), desc_style),
+            Span::styled(ALIAS_NOTE, desc_style),
+            Span::styled(target, target_style),
+            Span::styled(")", desc_style),
+        ]
     }
 
     pub fn confirm(&self, input: &str) -> Option<ParsedCommand> {
         let item = self.filtered.get(self.selected)?;
-        let name = self.item_name(item);
+        // Aliases dispatch under the canonical name
+        let name = match &item.command_type {
+            CommandType::Builtin(cmd) => cmd.name.to_string(),
+            _ => item.display.clone(),
+        };
         let args = input
             .strip_prefix('/')
             .and_then(|s| s.split_once(char::is_whitespace))
@@ -780,12 +838,12 @@ impl CommandPalette {
         const GAP: usize = 2;
         let max_name = filtered
             .iter()
-            .map(|item| self.item_name(item).len())
+            .map(|item| item.display.len())
             .max()
             .unwrap_or(0);
         let max_desc = filtered
             .iter()
-            .map(|item| self.item_description(item).len())
+            .map(|item| self.rendered_description(item).len())
             .max()
             .unwrap_or(0);
         const PAD: usize = 1;
@@ -803,8 +861,7 @@ impl CommandPalette {
             .iter()
             .enumerate()
             .map(|(i, m)| {
-                let name = self.item_name(m);
-                let desc = self.item_description(m);
+                let name = m.display.clone();
                 let selected = i == self.selected;
                 let name_pad = max_name - name.len() + GAP;
 
@@ -814,7 +871,7 @@ impl CommandPalette {
                     let mut spans = vec![Span::styled(" ".repeat(PAD), s)];
                     spans.extend(highlighted_name);
                     spans.push(Span::styled(" ".repeat(name_pad), s));
-                    spans.push(Span::styled(desc, s));
+                    spans.extend(self.description_spans(m, s));
                     spans.push(Span::styled(" ".repeat(PAD), s));
                     Line::from(spans)
                 } else {
@@ -822,7 +879,7 @@ impl CommandPalette {
                     let mut spans = vec![Span::raw(" ".repeat(PAD))];
                     spans.extend(highlighted_name);
                     spans.push(Span::raw(" ".repeat(name_pad)));
-                    spans.push(Span::styled(desc, t.item_desc));
+                    spans.extend(self.description_spans(m, t.item_desc));
                     spans.push(Span::raw(" ".repeat(PAD)));
                     Line::from(spans)
                 }
@@ -1005,7 +1062,7 @@ mod tests {
         let count = p
             .filtered
             .iter()
-            .filter(|m| p.item_name(m) == "/thinking")
+            .filter(|m| m.display == "/thinking")
             .count();
         assert_eq!(
             count, 1,
@@ -1065,8 +1122,7 @@ mod tests {
         let p = synced("/cd ~/foo");
         assert!(p.is_active());
         assert_eq!(p.filtered.len(), 1);
-        let name = p.item_name(&p.filtered[0]);
-        assert_eq!(name, "/cd");
+        assert_eq!(p.filtered[0].display, "/cd");
     }
 
     #[test_case("/compact ", false ; "zero_arg_cmd_with_space")]
@@ -1106,6 +1162,47 @@ mod tests {
         let cmd = p.confirm(input).unwrap();
         assert_eq!(cmd.name, expected_name);
         assert_eq!(cmd.args, expected_args);
+    }
+
+    #[test]
+    fn builtin_alias_shows_in_palette() {
+        let p = synced("/clear");
+        assert!(p.is_active());
+        assert_eq!(p.filtered.len(), 1);
+        assert_eq!(p.filtered[0].display, "/clear");
+    }
+
+    #[test]
+    fn alias_note_appended_for_alias_rows_only() {
+        let cmd = BUILTIN_COMMANDS.iter().find(|c| c.name == "/new").unwrap();
+
+        let p = synced("/clear");
+        let m = &p.filtered[0];
+        assert_eq!(p.alias_target(m), Some("/new"));
+        assert_eq!(
+            p.rendered_description(m),
+            format!("{}{ALIAS_NOTE}/new)", cmd.description)
+        );
+
+        let p = synced("/new");
+        let m = p.filtered.iter().find(|m| m.display == "/new").unwrap();
+        assert_eq!(p.alias_target(m), None);
+        assert_eq!(p.rendered_description(m), cmd.description);
+    }
+
+    #[test]
+    fn confirm_alias_dispatches_canonical_name() {
+        let p = synced("/clear");
+        let cmd = p.confirm("/clear").unwrap();
+        assert_eq!(cmd.name, "/new");
+        assert_eq!(cmd.args, "");
+    }
+
+    #[test]
+    fn builtin_and_alias_listed_under_slash() {
+        let p = synced("/");
+        assert!(p.filtered.iter().any(|m| m.display == "/new"));
+        assert!(p.filtered.iter().any(|m| m.display == "/clear"));
     }
 
     #[test]
@@ -1273,7 +1370,7 @@ mod tests {
         let matched = p
             .filtered
             .iter()
-            .find(|m| p.item_name(m) == expected_cmd)
+            .find(|m| m.display == expected_cmd)
             .unwrap_or_else(|| panic!("Should find {} for input {}", expected_cmd, input));
         // Should have some highlight indices
         assert!(
@@ -1378,7 +1475,7 @@ mod tests {
         let found = p
             .filtered
             .iter()
-            .any(|f| matches!(f.command_type, CommandType::Lua(_)) && p.item_name(f) == "/memory");
+            .any(|f| matches!(f.command_type, CommandType::Lua(_)) && f.display == "/memory");
         assert!(found);
     }
 

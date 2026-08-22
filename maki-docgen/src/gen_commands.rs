@@ -59,6 +59,9 @@ pub fn generate() -> String {
     writeln!(out, "|---------|-------------|").unwrap();
     for cmd in BUILTIN_COMMANDS {
         write_row(&mut out, cmd.name, cmd.description);
+        for alias in cmd.aliases {
+            write_row(&mut out, alias, &format!("Alias for `{}`", cmd.name));
+        }
     }
     for cmd in &lua_util::load_builtin_plugin_commands() {
         write_row(&mut out, &cmd.name, &cmd.description);

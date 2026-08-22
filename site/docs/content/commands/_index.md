@@ -16,6 +16,7 @@ Type `/` in the input box to open the command palette.
 | `/tasks` | Browse and search tasks |
 | `/compact` | Summarize and compact conversation history |
 | `/new` | Start a new session |
+| `/clear` | Alias for `/new` |
 | `/help` | Show keybindings |
 | `/usage` | Show token usage breakdown |
 | `/queue` | Remove items from queue |
