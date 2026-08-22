@@ -289,6 +289,7 @@ fn turn_complete(usage: TokenUsage, model: &str, cost: Option<f64>) -> AgentEven
         model: model.into(),
         cost,
         context_size: None,
+        context_window: 0,
     }))
 }
 

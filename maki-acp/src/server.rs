@@ -6,17 +6,16 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol_schema::{
-    AgentNotification, AgentRequest, AgentResponse, ContentBlock, CreateElicitationResponse,
-    CurrentModeUpdate, EmbeddedResourceResource, Error as AcpError, ImageContent,
-    InitializeRequest, JsonRpcMessage, LoadSessionRequest, McpServer, NewSessionRequest,
-    Notification, PromptRequest, PromptResponse, Request, RequestId, RequestPermissionRequest,
-    RequestPermissionResponse, Response, SessionId, SessionModeId, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
-    SetSessionModeRequest, SetSessionModeResponse, StopReason, TextContent, ToolCallId,
-    ToolCallUpdate, ToolCallUpdateFields,
+    AgentNotification, AgentRequest, AgentResponse, ConfigOptionUpdate, ContentBlock,
+    CreateElicitationResponse, CurrentModeUpdate, EmbeddedResourceResource, Error as AcpError,
+    ImageContent, InitializeRequest, JsonRpcMessage, LoadSessionRequest, McpServer,
+    NewSessionRequest, Notification, PromptRequest, PromptResponse, Request, RequestId,
+    RequestPermissionRequest, RequestPermissionResponse, Response, SessionId, SessionModeId,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, StopReason,
+    TextContent, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
 };
-use color_eyre::eyre::Context;
-use flume::{Receiver, Sender};
+use flume::{Receiver, Sender, WeakSender};
 use maki_agent::headless::{self, InteractiveHandle, InteractiveParams};
 use maki_agent::mcp::config::{RawHttpFields, RawStdioFields, RawTransport};
 use maki_agent::mcp::{self, McpHandle};
@@ -24,11 +23,12 @@ use maki_agent::permissions::PermissionAnswer;
 use maki_agent::tools::QuestionMode;
 use maki_agent::types::AgentEvent;
 use maki_agent::{AgentInput, AgentMode, Envelope, ImageMediaType, ImageSource};
-use maki_config::MAX_SERVER_NAME_LEN;
-use maki_providers::Message;
+use maki_config::{MAX_SERVER_NAME_LEN, ModelPolicy};
 use maki_providers::model::Model;
-use maki_providers::provider::available_model_specs;
+use maki_providers::provider::{available_model_specs, fetch_all_models};
+use maki_providers::{Message, TokenUsage, add_cost, settle_session};
 use maki_storage::id::{MakiId, SessionRef};
+use maki_storage::sessions::StoredTokenUsage;
 use serde::Serialize;
 use serde_json::Value;
 use smol::io::AsyncBufReadExt;
@@ -37,6 +37,7 @@ use tracing::{debug, warn};
 use crate::{AcpParams, methods, permissions, translate};
 
 const FIRST_OUTGOING_REQUEST_ID: i64 = 1000;
+const RESTORED_FAST: bool = false;
 
 /// Ids come from here and are never reused, so a late answer for a closed
 /// session cannot match a request of the session that replaced it.
@@ -64,7 +65,7 @@ struct SessionState {
 struct Server {
     out_tx: Sender<Value>,
     model_specs: Vec<String>,
-    model_policy: Arc<maki_config::ModelPolicy>,
+    model_policy: Arc<ModelPolicy>,
     modes: Arc<maki_agent::ModeRegistry>,
     session: Option<SessionState>,
     /// Whether the client advertised form elicitation support at `initialize`.
@@ -100,41 +101,13 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
         elicitation: false,
     };
 
-    let stdin = smol::Unblock::new(std::io::stdin());
-    let mut reader = smol::io::BufReader::new(stdin);
-    let mut line = String::new();
-
-    loop {
-        line.clear();
-        if reader.read_line(&mut line).await.context("read stdin")? == 0 {
-            break;
-        }
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let raw: Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(error = %e, "invalid JSON on stdin");
-                server.respond(RequestId::Null, Err(AcpError::parse_error()));
-                continue;
-            }
-        };
-
-        let id = raw.get("id").map(request_id);
-
-        if raw.get("result").is_some() || raw.get("error").is_some() {
-            handle_incoming_response(&server, &raw);
-        } else if let Some(method) = raw.get("method").and_then(Value::as_str) {
-            match id {
-                Some(id) => handle_request(&mut server, method, id, &raw, &params).await,
-                None => handle_notification(&server, method),
-            }
-        } else if let Some(id) = id {
-            server.respond(id, Err(AcpError::invalid_request()));
+    let (in_tx, in_rx) = flume::unbounded::<Incoming>();
+    discover_models(Arc::clone(&params.model_policy), in_tx.downgrade());
+    let _reader_task = smol::spawn(read_stdin(in_tx));
+    while let Ok(incoming) = in_rx.recv_async().await {
+        match incoming {
+            Incoming::Line(line) => handle_line(&mut server, &line, &params).await,
+            Incoming::Models(batch) => refresh_models(&mut server, batch),
         }
     }
 
@@ -142,6 +115,85 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
     writer_task.await;
 
     Ok(())
+}
+
+enum Incoming {
+    Line(String),
+    Models(Vec<String>),
+}
+
+async fn read_stdin(tx: Sender<Incoming>) -> std::io::Result<()> {
+    let mut reader = smol::io::BufReader::new(smol::Unblock::new(std::io::stdin()));
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).await? == 0 {
+            return Ok(());
+        }
+        if tx.send_async(Incoming::Line(line)).await.is_err() {
+            return Ok(());
+        }
+    }
+}
+
+fn discover_models(policy: Arc<ModelPolicy>, tx: WeakSender<Incoming>) {
+    smol::spawn(async move {
+        fetch_all_models(
+            &policy,
+            |batch| {
+                if let Some(tx) = tx.upgrade() {
+                    let _ = tx.send(Incoming::Models(batch.models));
+                }
+            },
+            None,
+        )
+        .await;
+    })
+    .detach();
+}
+
+fn refresh_models(srv: &mut Server, batch: Vec<String>) {
+    let old_len = srv.model_specs.len();
+    for spec in batch {
+        if !srv.model_specs.contains(&spec) {
+            srv.model_specs.push(spec);
+        }
+    }
+    if srv.model_specs.len() == old_len {
+        return;
+    }
+    let Some(session) = &srv.session else { return };
+    let option = methods::model_config_option(&session.current_model, &srv.model_specs);
+    session_update(
+        &srv.out_tx,
+        &SessionId::from(session.handle.session_id.to_string()),
+        SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(vec![option])),
+    );
+}
+
+async fn handle_line(server: &mut Server, line: &str, params: &AcpParams) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let raw: Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "invalid JSON on stdin");
+            server.respond(RequestId::Null, Err(AcpError::parse_error()));
+            return;
+        }
+    };
+    let id = raw.get("id").map(request_id);
+    if raw.get("result").is_some() || raw.get("error").is_some() {
+        handle_incoming_response(server, &raw);
+    } else if let Some(method) = raw.get("method").and_then(Value::as_str) {
+        match id {
+            Some(id) => handle_request(server, method, id, &raw, params).await,
+            None => handle_notification(server, method),
+        }
+    } else if let Some(id) = id {
+        server.respond(id, Err(AcpError::invalid_request()));
+    }
 }
 
 fn request_id(v: &Value) -> RequestId {
@@ -187,6 +239,7 @@ async fn new_session(
 ) -> Result<AgentResponse, AcpError> {
     let req: NewSessionRequest = parse_params(raw)?;
     close_session(srv).await;
+    let cwd = req.cwd.clone();
     let mcp = start_mcp(&req.cwd, &req.mcp_servers).await;
     let handle = spawn_session(
         params,
@@ -199,7 +252,7 @@ async fn new_session(
     let spec = params.model.spec();
     let resp = methods::new_session_response(handle.session_id.as_str(), &srv.modes)
         .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
-    install_session(srv, handle, mcp, spec);
+    install_session(srv, handle, mcp, spec, None, cwd);
     Ok(AgentResponse::NewSessionResponse(resp))
 }
 
@@ -214,25 +267,35 @@ async fn load_session(
         .0
         .parse()
         .map_err(|_| AcpError::resource_not_found(Some(req.session_id.0.to_string())))?;
-    let history = load_history(session_ref.id())?;
+    let mut restored = load_history(session_ref.id())?;
     close_session(srv).await;
     let mcp = start_mcp(&req.cwd, &req.mcp_servers).await;
     let sid = SessionId::from(session_ref.to_string());
-    for update in translate::replay_history(&history) {
+    let home = maki_storage::paths::home();
+    let replay_cwd = restored.cwd.as_deref().unwrap_or(&req.cwd);
+    for update in translate::replay_history(&restored.history, replay_cwd, home.as_deref()) {
         session_update(&srv.out_tx, &sid, update);
     }
+    let session_cwd = req.cwd.clone();
     let handle = spawn_session(
         params,
         req.cwd,
         Some(session_ref),
-        history,
+        restored.history,
         mcp.clone(),
         srv.elicitation,
     );
     let spec = params.model.spec();
     let resp = methods::load_session_response(&srv.modes)
         .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
-    install_session(srv, handle, mcp, spec);
+    let recorded_model = Model::from_spec(&restored.model).unwrap_or_else(|_| params.model.clone());
+    let restored_cost = settle_session(
+        &restored.usage,
+        &mut restored.by_model,
+        &recorded_model,
+        RESTORED_FAST,
+    );
+    install_session(srv, handle, mcp, spec, restored_cost, session_cwd);
     Ok(AgentResponse::LoadSessionResponse(resp))
 }
 
@@ -267,6 +330,7 @@ fn spawn_session(
             QuestionMode::Headless
         },
         plugin_rules: Arc::clone(&params.plugin_rules),
+        local_tools: Default::default(),
     })
 }
 
@@ -356,6 +420,8 @@ fn install_session(
     handle: InteractiveHandle,
     mcp: Option<McpHandle>,
     current_model: String,
+    initial_cost: Option<f64>,
+    cwd: PathBuf,
 ) {
     let pending = PendingState::default();
     start_event_pump(
@@ -365,6 +431,9 @@ fn install_session(
         Arc::clone(&pending),
         srv.elicitation,
         handle.answer_tx.clone(),
+        cwd,
+        maki_storage::paths::home(),
+        initial_cost,
     );
     srv.session = Some(SessionState {
         handle,
@@ -375,7 +444,16 @@ fn install_session(
     });
 }
 
-fn load_history(session_id: MakiId) -> Result<Vec<Message>, AcpError> {
+#[derive(Debug)]
+struct Restored {
+    history: Vec<Message>,
+    cwd: Option<PathBuf>,
+    usage: TokenUsage,
+    by_model: HashMap<String, StoredTokenUsage>,
+    model: String,
+}
+
+fn load_history(session_id: MakiId) -> Result<Restored, AcpError> {
     let storage = maki_storage::StateDir::resolve()
         .map_err(|e| AcpError::internal_error().data(json_str(&e)))?;
     load_history_from(&storage, session_id)
@@ -384,7 +462,7 @@ fn load_history(session_id: MakiId) -> Result<Vec<Message>, AcpError> {
 fn load_history_from(
     storage: &maki_storage::StateDir,
     session_id: MakiId,
-) -> Result<Vec<Message>, AcpError> {
+) -> Result<Restored, AcpError> {
     let session: maki_storage::sessions::Session<
         Message,
         maki_providers::TokenUsage,
@@ -392,7 +470,20 @@ fn load_history_from(
     > = maki_storage::sessions::Session::load(session_id, storage).map_err(|e| {
         AcpError::resource_not_found(Some(format!("session/{session_id}"))).data(json_str(&e))
     })?;
-    Ok(session.take_messages())
+    let cwd = Path::new(&session.cwd)
+        .is_absolute()
+        .then(|| PathBuf::from(&session.cwd));
+    let model = session.model.clone();
+    let usage = session.token_usage;
+    let by_model = session.usage_by_model().clone();
+    let history = session.take_messages();
+    Ok(Restored {
+        history,
+        cwd,
+        usage,
+        by_model,
+        model,
+    })
 }
 
 fn handle_prompt(srv: &mut Server, raw: &Value, id: &RequestId) -> Result<(), AcpError> {
@@ -588,14 +679,21 @@ fn start_event_pump(
     pending: PendingState,
     elicitation: bool,
     answer_tx: Sender<String>,
+    cwd: PathBuf,
+    home: Option<PathBuf>,
+    initial_cost: Option<f64>,
 ) {
     smol::spawn(async move {
         let sid = SessionId::from(session_id.to_string());
+        let mut cost_total = initial_cost;
 
         while let Ok(Envelope {
             event, subagent, ..
         }) = event_rx.recv_async().await
         {
+            if let AgentEvent::TurnComplete(tc) = &event {
+                add_cost(&mut cost_total, tc.cost);
+            }
             if subagent.is_some() {
                 continue;
             }
@@ -604,9 +702,12 @@ fn start_event_pump(
                 AgentEvent::TextDelta { text } => translate::text_delta(&text),
                 AgentEvent::ThinkingDelta { text } => translate::thinking_delta(&text),
                 AgentEvent::ToolPending { id, name } => translate::tool_pending(&id, &name),
-                AgentEvent::ToolStart(event) => translate::tool_start(&event),
+                AgentEvent::ToolStart(event) => {
+                    translate::tool_start(&event, &cwd, home.as_deref())
+                }
                 AgentEvent::ToolOutput { id, content } => translate::tool_output(&id, &content),
-                AgentEvent::ToolDone(event) => translate::tool_done(&event),
+                AgentEvent::ToolDone(event) => translate::tool_done(&event, &cwd, home.as_deref()),
+                AgentEvent::TurnComplete(event) => translate::usage_update(&event, cost_total),
                 AgentEvent::PermissionRequest { id, tool, scopes } => {
                     let fields =
                         ToolCallUpdateFields::new().title(format!("{tool}: {}", scopes.join(", ")));
@@ -722,6 +823,8 @@ mod tests {
 
     const ANSWERED_ID: i64 = 1001;
     const UNKNOWN_ID: i64 = 1002;
+    const DISCOVERED_SPEC: &str = "openrouter/discovered-model";
+    const OFFLINE_SPEC: &str = "openai/gpt-5";
 
     fn allow_once(id: i64) -> Value {
         serde_json::json!({
@@ -738,8 +841,9 @@ mod tests {
         assert_eq!(permission_answer(&raw), expected);
     }
 
-    fn server_awaiting_answer() -> (Server, Receiver<String>) {
+    fn server_awaiting_answer() -> (Server, Receiver<String>, Receiver<Value>) {
         let (answer_tx, answer_rx) = flume::unbounded();
+        let (out_tx, out_rx) = flume::unbounded();
         let handle = InteractiveHandle {
             event_rx: flume::unbounded().1,
             tool_names: Vec::new(),
@@ -756,7 +860,7 @@ mod tests {
             task: smol::spawn(async {}),
         };
         let server = Server {
-            out_tx: flume::unbounded().0,
+            out_tx,
             modes: Arc::new(maki_agent::ModeRegistry::builtin()),
             model_specs: Vec::new(),
             model_policy: Arc::new(maki_config::ModelPolicy::default()),
@@ -772,12 +876,12 @@ mod tests {
             }),
             elicitation: false,
         };
-        (server, answer_rx)
+        (server, answer_rx, out_rx)
     }
 
     #[test]
     fn only_the_outstanding_request_id_is_answered() {
-        let (srv, answer_rx) = server_awaiting_answer();
+        let (srv, answer_rx, _) = server_awaiting_answer();
 
         handle_incoming_response(&srv, &allow_once(UNKNOWN_ID));
         assert!(answer_rx.is_empty(), "an unknown id is dropped");
@@ -797,7 +901,7 @@ mod tests {
 
     #[test]
     fn cancel_drops_the_outstanding_permission_request() {
-        let (srv, answer_rx) = server_awaiting_answer();
+        let (srv, answer_rx, _) = server_awaiting_answer();
         handle_notification(&srv, "session/cancel");
 
         handle_incoming_response(&srv, &allow_once(ANSWERED_ID));
@@ -806,7 +910,7 @@ mod tests {
 
     #[test]
     fn elicitation_answer_is_routed_by_id_and_decoded() {
-        let (srv, answer_rx) = server_awaiting_answer();
+        let (srv, answer_rx, _) = server_awaiting_answer();
         {
             let mut pending = srv.session.as_ref().unwrap().pending.lock().unwrap();
             pending.permission = None;
@@ -837,7 +941,7 @@ mod tests {
 
     #[test]
     fn unparsable_elicitation_result_dismisses_instead_of_hanging() {
-        let (srv, answer_rx) = server_awaiting_answer();
+        let (srv, answer_rx, _) = server_awaiting_answer();
         srv.session
             .as_ref()
             .unwrap()
@@ -872,6 +976,9 @@ mod tests {
             Arc::clone(&pending),
             true,
             answer_tx,
+            PathBuf::from("."),
+            maki_storage::paths::home(),
+            None,
         );
 
         event_tx
@@ -909,6 +1016,25 @@ mod tests {
     }
 
     #[test]
+    fn discovered_models_are_pushed_to_the_client() {
+        let (mut srv, .., out_rx) = server_awaiting_answer();
+        srv.model_specs = vec![OFFLINE_SPEC.to_owned()];
+        refresh_models(&mut srv, vec![DISCOVERED_SPEC.to_owned()]);
+        let update = out_rx.try_recv().expect("the fuller list is announced");
+        let options = &update["params"]["update"]["configOptions"][0]["options"];
+        let selectable: Vec<&str> = options
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["value"].as_str())
+            .collect();
+        assert!(selectable.contains(&OFFLINE_SPEC));
+        assert!(selectable.contains(&DISCOVERED_SPEC));
+        refresh_models(&mut srv, vec![DISCOVERED_SPEC.to_owned()]);
+        assert!(out_rx.is_empty());
+    }
+
+    #[test]
     fn load_history_round_trips_stored_messages() {
         let tmp = TempDir::new().unwrap();
         let dir = StateDir::from_path(tmp.path().to_path_buf());
@@ -931,7 +1057,7 @@ mod tests {
         let id: MakiId = session.id;
         let history = load_history_from(&dir, id).unwrap();
         assert_eq!(
-            serde_json::to_value(&history).unwrap(),
+            serde_json::to_value(&history.history).unwrap(),
             serde_json::to_value(&messages).unwrap()
         );
     }

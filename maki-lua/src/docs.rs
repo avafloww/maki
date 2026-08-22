@@ -35,6 +35,7 @@ pub struct FnDoc {
     pub returns: &'static str,
     /// Lua snippet rendered as a fenced code block, or "" when absent.
     pub example: &'static str,
+    pub guard: Option<&'static str>,
 }
 
 pub struct ParamDoc {

@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use crate::components::Overlay;
+use crate::components::input::Placeholder;
 #[cfg(test)]
 use crate::components::keybindings::KeybindContext;
 use crate::components::queue_panel;
@@ -199,7 +200,7 @@ impl App {
                 self.input_box.view(
                     frame,
                     layout.input_area,
-                    false,
+                    Placeholder::Blank,
                     self.separator_style(),
                     !self.any_overlay_open(),
                     subagent_input_hint(true),
@@ -215,6 +216,13 @@ impl App {
                 self.float_mgr.view_panel(frame, idx, rect);
             }
             let streaming = self.status == Status::Streaming;
+            let placeholder = if streaming {
+                Placeholder::Queue
+            } else if self.state.session.messages().is_empty() {
+                Placeholder::Suggestion
+            } else {
+                Placeholder::Blank
+            };
             let panel_hint = (self.state.mode == Mode::Plan)
                 .then(|| self.plan_form.hint_line())
                 .flatten()
@@ -222,7 +230,7 @@ impl App {
             self.input_box.view(
                 frame,
                 layout.input_area,
-                streaming,
+                placeholder,
                 self.separator_style(),
                 !self.any_overlay_open(),
                 panel_hint,
@@ -293,6 +301,7 @@ impl App {
         if self.usage_modal.is_open() {
             let ctx = UsageModalContext {
                 total: &self.state.token_usage,
+                total_cost: self.state.cost,
                 by_model: self.state.session.usage_by_model(),
                 model: &self.state.model,
                 fast: self.state.fast,
@@ -323,10 +332,9 @@ impl App {
                 .as_deref()
                 .unwrap_or(&self.state.session.model),
             stats: UsageStats {
-                global_usage: &self.state.token_usage,
+                global_cost: self.state.cost,
                 context_size: chat.context_size,
                 cost: chat.cost,
-                pricing: &self.state.model.pricing,
                 context_window: self.state.model.context_window,
                 show_global: self.chats.len() > 1,
             },

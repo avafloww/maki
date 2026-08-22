@@ -535,8 +535,10 @@ async fn session(
             let weak = lua.weak();
             local_map.insert(
                 name,
-                Arc::new(move |input: &JsonValue| call_local_tool(&weak, &handler, input))
-                    as LocalToolFn,
+                maki_agent::tools::local_tool(move |input, _ctx| {
+                    let result = call_local_tool(&weak, &handler, &input);
+                    Box::pin(async move { result })
+                }),
             );
         }
     }
@@ -1286,6 +1288,7 @@ mod tests {
             model: "test-model".into(),
             cost: Some(cost),
             context_size: None,
+            context_window: 0,
         }))
     }
 
