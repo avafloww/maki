@@ -34,8 +34,8 @@ absolute:
    `--append-system-prompt` in TUI, openai-codex `/login`, bundled-plugins-at-
    will, OpenRouter inventory, warm model catalog always.
 2. **Always defer to fork on identity:**
-   - `Cargo.toml` `[workspace.package] version` stays `0.4.7-luna` (upstream is
-     `0.4.8`). Sub-crates use `version.workspace = true`.
+   - `Cargo.toml` `[workspace.package] version` matches the upstream version with
+     a `-luna` suffix. Sub-crates use `version.workspace = true`.
    - `install.sh` and `install.ps1`: `REPO="lun-4/maki"`.
    - `maki-storage/src/version.rs`: `RELEASES_URL` points at `lun-4`.
    - `README.md`, `banner.png`, `splash.rs` branding (`LOGO="luna-maki"`).

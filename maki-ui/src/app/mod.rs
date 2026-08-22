@@ -97,6 +97,7 @@ const FLASH_NO_PLAN_BODY: &str = "Plan file is empty or unreadable";
 const PLAN_SUBMIT_TOOL: &str = "plan_submit";
 const SESSIONS_COMMAND: &str = "/sessions";
 const FAST_UNSUPPORTED_MSG: &str = "Fast mode requires an Anthropic Opus 4.6+ model (API only)";
+const THINKING_UNSUPPORTED_MSG: &str = "Thinking requires a model that supports it";
 const FAST_ON_MSG: &str = "Fast mode: on";
 const FAST_OFF_MSG: &str = "Fast mode: off";
 const WORKFLOW_ON_MSG: &str = "Workflow mode: on";
@@ -118,6 +119,69 @@ const SNIPPET_CHARS: usize = 64;
 /// error instead of ping-ponging with the Lua thread forever.
 pub(crate) const MAX_COMMAND_DEPTH: u8 = 8;
 pub(crate) const COMMAND_DEPTH_MSG: &str = "slash command nested too deeply (alias cycle?)";
+const NOTIFICATION_PREVIEW_CHARS: usize = 120;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Notification {
+    TurnComplete { response: Option<String> },
+    PermissionRequested { tool: Option<String> },
+    AuthenticationRequired,
+    QuestionRequested,
+    PlanReady,
+}
+
+impl Notification {
+    pub(crate) fn is_urgent(&self) -> bool {
+        !matches!(self, Self::TurnComplete { .. })
+    }
+
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::TurnComplete { response } => response
+                .clone()
+                .unwrap_or_else(|| "Agent turn complete".into()),
+            Self::PermissionRequested { tool: Some(tool) } => {
+                format!("Permission requested: {tool}")
+            }
+            Self::PermissionRequested { tool: None } => "Permission requested".into(),
+            Self::AuthenticationRequired => "Authentication required".into(),
+            Self::QuestionRequested => "Question requested".into(),
+            Self::PlanReady => "Plan ready".into(),
+        }
+    }
+
+    pub(crate) fn error_completion() -> Self {
+        Self::TurnComplete {
+            response: Some("Agent stopped with an error".into()),
+        }
+    }
+}
+
+fn notification_preview(text: &str) -> Option<String> {
+    let preview: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!preview.is_empty()).then(|| preview.chars().take(NOTIFICATION_PREVIEW_CHARS).collect())
+}
+
+fn normalize_preview(text: &str) -> Option<String> {
+    notification_preview(text)
+}
+
+pub(crate) fn turn_response(message: &Message) -> Option<String> {
+    if message.has_tool_calls() {
+        return None;
+    }
+    notification_preview(
+        &message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
 
 #[derive(Clone)]
 pub(super) struct TaskEntry {
@@ -397,6 +461,50 @@ impl App {
             );
         }
         self.lua_event_handle.fire_autocmd(event, data);
+    }
+
+    pub(crate) fn set_thinking(&mut self, input: &str) -> Result<ThinkingConfig, String> {
+        if !self.state.model.supports_thinking() {
+            return Err(THINKING_UNSUPPORTED_MSG.into());
+        }
+        self.state.thinking =
+            ThinkingConfig::parse(input.trim(), self.state.thinking).map_err(str::to_owned)?;
+        Ok(self.state.thinking)
+    }
+
+    pub(crate) fn set_fast(&mut self, fast: bool) -> Result<(), String> {
+        if fast && !self.state.model.supports_fast() {
+            return Err(FAST_UNSUPPORTED_MSG.into());
+        }
+        self.state.fast = fast;
+        Ok(())
+    }
+
+    pub(crate) fn model_state(&self) -> serde_json::Value {
+        let model = &self.state.model;
+        serde_json::json!({
+            "spec": model.spec(), "id": model.id, "provider": model.provider.to_string(),
+            "thinking": self.state.thinking.to_string(), "fast": self.state.fast,
+            "supports_thinking": model.supports_thinking(), "supports_fast": model.supports_fast(),
+        })
+    }
+
+    pub(crate) fn attention(&self) -> Option<Notification> {
+        if let Some(tool) = self.permission_prompt.tool() {
+            let tool = (!matches!(tool, maki_config::ToolKey::Wildcard))
+                .then(|| normalize_preview(&tool.to_string()))
+                .flatten();
+            return Some(Notification::PermissionRequested { tool });
+        }
+        if matches!(self.pending_input, PendingInput::AuthRetry { .. }) {
+            return Some(Notification::AuthenticationRequired);
+        }
+        if self.status != Status::Streaming && self.plan_form_active() {
+            return Some(Notification::PlanReady);
+        }
+        self.float_mgr
+            .needs_input()
+            .then_some(Notification::QuestionRequested)
     }
 
     pub fn tick_error_expiry(&mut self) -> Dirty {
@@ -1235,7 +1343,11 @@ impl App {
     fn quit_with(&mut self, req: ExitRequest) -> Vec<Action> {
         self.save_input_history();
         self.exit_request = req;
-        vec![]
+        vec![Action::ManualExit]
+    }
+
+    pub(crate) fn clear_exit_request(&mut self) {
+        self.exit_request = ExitRequest::None;
     }
 
     pub(crate) fn handle_submit(&mut self, sub: Submission) -> Vec<Action> {
@@ -1462,7 +1574,7 @@ impl App {
             add_cost(&mut self.chats[chat_idx].cost, tc.cost);
             self.state
                 .session_mut()
-                .add_model_usage(&tc.model, tc.usage.into());
+                .add_model_usage(&tc.model, tc.usage.billed(tc.cost));
             let ctx_size = tc.context_size.unwrap_or_else(|| tc.usage.context_tokens());
             self.chats[chat_idx].context_size = ctx_size;
             if chat_idx == 0 {

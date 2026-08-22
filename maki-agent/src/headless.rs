@@ -20,7 +20,9 @@ use crate::cancel::{CancelMap, CancelToken};
 use crate::permissions::{PermissionManager, PluginRuleStore};
 use crate::prompt::ResolvedSlots;
 use crate::template;
-use crate::tools::{DescriptionContext, FileReadTracker, ToolAudience, ToolFilter, ToolRegistry};
+use crate::tools::{
+    DescriptionContext, FileReadTracker, LocalTools, ToolAudience, ToolFilter, ToolRegistry,
+};
 use crate::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, Envelope,
     EventSender, ImageSource, McpHandle, McpSession, PermissionsConfig, SessionMailbox, ToolOutput,
@@ -303,6 +305,9 @@ pub struct InteractiveParams {
     pub modes: Arc<crate::ModeRegistry>,
     pub question_mode: crate::tools::QuestionMode,
     pub plugin_rules: Arc<PluginRuleStore>,
+    /// Host-side overrides that shadow a registered tool's execution while
+    /// keeping its advertised schema (e.g. ACP answers `question` via elicitation).
+    pub local_tools: LocalTools,
 }
 
 pub struct InteractiveHandle {
@@ -482,6 +487,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 .with_loaded_instructions(instructions.loaded.clone())
                 .with_user_response_rx(Arc::clone(&answer_rx))
                 .with_cancel(cancel)
+                .with_local_tools(Arc::clone(&params.local_tools))
                 .with_mcp(mcp.clone());
 
                 let result = agent.run(input).await;

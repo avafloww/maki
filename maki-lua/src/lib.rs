@@ -13,8 +13,9 @@ pub use api::keymap::{KeymapEntry, KeymapReader, KeymapSnapshot};
 pub use api::options::{OptionSpec, OptionType, PluginOptionSpecs};
 pub use api::util::command::{
     Anchor, Axis, Border, BuiltinAction, CommandArgumentItem, Dimension, Edge, FloatConfig,
-    FloatConfigPatch, HintReader, HintSnapshot, LuaCommandInfo, LuaCommandReader, SessionReply,
-    SessionRequest, Split, TitlePos, UiAction, WinCommand, WinEvent, WinView,
+    FloatConfigPatch, HintReader, HintSnapshot, LuaCommandInfo, LuaCommandReader, ModelRequest,
+    SessionReply, SessionRequest, Split, TitlePos, UiAction, UiReply, WinCommand, WinEvent,
+    WinView,
 };
 pub use api::util::picker::{PickerConfig, PickerEvent, PickerItemSpec, PickerResult};
 pub use docs::{DocKind, FnDoc, ModuleDoc, ParamDoc, api_docs};
