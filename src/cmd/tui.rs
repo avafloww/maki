@@ -6,7 +6,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use color_eyre::Result;
-use color_eyre::eyre::Context;
+use color_eyre::eyre::{Context, bail};
 
 use maki_agent::command::{self, CustomCommand};
 use maki_agent::tools::ToolRegistry;
@@ -191,7 +191,7 @@ fn build_stack(
 }
 
 fn resolve_session(
-    continue_session: bool,
+    continue_last: bool,
     session_id: Option<&str>,
     model: &str,
     cwd: &str,
@@ -203,7 +203,7 @@ fn resolve_session(
             .map_err(|e| color_eyre::eyre::eyre!("invalid session id {raw:?}: {e}"))?;
         return AppSession::load(id, storage).map_err(|e| color_eyre::eyre::eyre!("{e}"));
     }
-    if continue_session {
+    if continue_last {
         match AppSession::latest(cwd, storage) {
             Ok(Some(session)) => return Ok(session),
             Ok(None) => {
@@ -229,7 +229,18 @@ fn read_initial_prompt(cli_prompt: Option<String>) -> Result<Option<String>> {
     }
 }
 
+/// A bare `--resume` (no ID) asks for the session picker; a valued flag
+/// resumes by ID and an absent flag starts fresh.
+fn session_picker_requested(cli: &Cli) -> bool {
+    matches!(cli.resume, Some(None))
+}
+
 pub fn run(mut cli: Cli) -> Result<()> {
+    if cli.print && session_picker_requested(&cli) {
+        bail!(
+            "resuming without a session ID opens the session picker, which needs the TUI; run `maki sessions` to list session IDs"
+        );
+    }
     let storage = StateDir::resolve().context("resolve data directory")?;
     maki_providers::model_registry::load_from_storage(&storage);
 
@@ -288,9 +299,11 @@ pub fn run(mut cli: Cli) -> Result<()> {
     }
 
     let cwd_str = cwd.to_string_lossy().into_owned();
+    let session_id = cli.resume.as_ref().and_then(|o| o.as_deref());
+    let mut session_picker = session_picker_requested(&cli);
     let mut tabs = vec![resolve_session(
-        cli.continue_session,
-        cli.session.as_deref(),
+        cli.continue_last && !session_picker,
+        session_id,
         &stack.model.spec(),
         &cwd_str,
         &storage,
@@ -345,6 +358,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
                 )),
                 timeouts: stack.timeouts(),
                 exit_on_done: cli.exit_on_done,
+                session_picker,
                 lua_command_reader: stack.plugin_host.command_reader(),
                 keymap_reader: stack.plugin_host.keymap_reader(),
                 hint_reader: stack.plugin_host.hint_reader(),
@@ -381,6 +395,9 @@ pub fn run(mut cli: Cli) -> Result<()> {
                 tabs: reloaded,
                 focused: f,
             } => {
+                // The picker is a one-shot startup request; a later
+                // `/reload` must reopen a fresh tab instead of re-prompting.
+                session_picker = false;
                 let started = Instant::now();
                 let last_good = (stack.config.clone(), stack.model.clone());
                 // Shut the old host down first so nothing can repopulate
@@ -559,6 +576,21 @@ mod tests {
             .expect("builtins load on the live host under --no-plugins");
 
         plugin_host.begin_shutdown();
+    }
+
+    /// Bare `--resume` (no ID) is the only shape that opens the picker;
+    /// an absent flag must never trip it.
+    #[test]
+    fn session_picker_requested_requires_bare_resume() {
+        use clap::Parser;
+
+        assert!(!session_picker_requested(&Cli::parse_from(["maki"])));
+        assert!(session_picker_requested(&Cli::parse_from([
+            "maki", "--resume"
+        ])));
+        assert!(!session_picker_requested(&Cli::parse_from([
+            "maki", "--resume", "abc"
+        ])));
     }
 
     /// Negative control for the test above: without `--no-plugins`, the

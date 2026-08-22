@@ -23,6 +23,23 @@ use maki_storage::auth::{
     delete_provider_credentials, load_provider_credentials, load_tokens, save_provider_credentials,
 };
 use maki_storage::model::persist_model;
+use maki_storage::now_epoch;
+use maki_storage::sessions::SessionSummary;
+use maki_ui::AppSession;
+
+const SESSIONS_EMPTY_MSG: &str = "No sessions yet. Run maki to start one.";
+const SESSIONS_TITLE_MAX: usize = 60;
+const JUST_NOW: &str = "just now";
+/// Mirrors the sessions plugin's age units, so `maki sessions` and
+/// `/sessions` read the same.
+const AGE_UNITS: &[(u64, &str)] = &[
+    (31_536_000, "y"),
+    (2_592_000, "mo"),
+    (604_800, "w"),
+    (86_400, "d"),
+    (3_600, "h"),
+    (60, "m"),
+];
 
 pub fn auth_login(provider: Option<&str>, storage: &StateDir) -> Result<()> {
     match provider {
@@ -568,6 +585,58 @@ fn load_effective_config(host: &PluginHost, no_plugins: bool, cwd: &Path) -> Res
         .context("invalid config")
 }
 
+pub fn sessions(storage: &StateDir, json: bool) -> Result<()> {
+    let list = AppSession::list_all(storage).context("list sessions")?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+    } else {
+        println!("{}", sessions_text(&list, now_epoch()));
+    }
+    Ok(())
+}
+
+fn sessions_text(list: &[SessionSummary], now: u64) -> String {
+    if list.is_empty() {
+        return SESSIONS_EMPTY_MSG.to_string();
+    }
+    let id_width = list
+        .iter()
+        .map(|s| s.id.to_string().len())
+        .max()
+        .unwrap_or(0);
+    list.iter()
+        .map(|s| {
+            format!(
+                "{:<id_width$}  {}  {}  {}",
+                s.id,
+                truncate(&s.title, SESSIONS_TITLE_MAX),
+                age(now, s.updated_at),
+                s.cwd
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn age(now: u64, then: u64) -> String {
+    let secs = now.saturating_sub(then);
+    for (unit_secs, unit) in AGE_UNITS {
+        if secs >= *unit_secs {
+            return format!("{}{unit} ago", secs / unit_secs);
+        }
+    }
+    JUST_NOW.to_string()
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max - 1).collect();
+    out.push('…');
+    out
+}
+
 pub fn index(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
@@ -730,4 +799,91 @@ pub fn prompt(
 
     print!("{output}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use maki_storage::id::MakiId;
+    use std::collections::BTreeSet;
+    use test_case::test_case;
+
+    const NOW: u64 = 1_700_000_000;
+    const SESSION_ID_A: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const SESSION_ID_B: &str = "550e8400-e29b-41d4-a716-446655440001";
+
+    fn summary(id: &str, title: &str, updated_at: u64, cwd: &str) -> SessionSummary {
+        SessionSummary {
+            id: id.parse().unwrap(),
+            title: title.into(),
+            updated_at,
+            cwd: cwd.into(),
+        }
+    }
+
+    #[test_case(NOW, NOW, "just now"; "same_second")]
+    #[test_case(NOW, NOW - 59, "just now"; "under_a_minute")]
+    #[test_case(NOW, NOW - 60, "1m ago"; "one_minute")]
+    #[test_case(NOW, NOW - 3 * 3600, "3h ago"; "hours")]
+    #[test_case(NOW, NOW - 2 * 2_592_000, "2mo ago"; "months")]
+    #[test_case(NOW, NOW + 600, "just now"; "future_timestamp")]
+    fn age_buckets(now: u64, then: u64, expected: &str) {
+        assert_eq!(age(now, then), expected);
+    }
+
+    #[test]
+    fn sessions_text_empty_list_prints_the_note() {
+        assert_eq!(sessions_text(&[], NOW), SESSIONS_EMPTY_MSG);
+    }
+
+    #[test]
+    fn sessions_text_rows_carry_id_title_age_and_cwd_in_order() {
+        let id_a: MakiId = SESSION_ID_A.parse().unwrap();
+        let id_b: MakiId = SESSION_ID_B.parse().unwrap();
+        let list = vec![
+            summary(SESSION_ID_A, "older title", NOW - 100, "/project-a"),
+            summary(SESSION_ID_B, "newer title", NOW - 50, "/project-b"),
+        ];
+        let text = sessions_text(&list, NOW);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with(&id_a.to_string()));
+        assert!(lines[0].contains("older title"));
+        assert!(lines[0].contains("1m ago"));
+        assert!(lines[0].ends_with("/project-a"));
+        assert!(lines[1].starts_with(&id_b.to_string()));
+        assert!(lines[1].contains("newer title"));
+        assert!(lines[1].ends_with("/project-b"));
+        assert_eq!(lines[0].find("  "), lines[1].find("  "));
+    }
+
+    #[test]
+    fn sessions_text_truncates_long_titles() {
+        let long_title = "a".repeat(SESSIONS_TITLE_MAX + 10);
+        let list = vec![summary(SESSION_ID_A, &long_title, NOW - 30, "/project-a")];
+        let text = sessions_text(&list, NOW);
+        assert!(text.contains(&format!("{}…", "a".repeat(SESSIONS_TITLE_MAX - 1))));
+        assert!(!text.contains(&"a".repeat(SESSIONS_TITLE_MAX)));
+    }
+
+    #[test]
+    fn sessions_json_pins_the_serialized_fields() {
+        let list = vec![
+            summary(SESSION_ID_A, "title a", 100, "/a"),
+            summary(SESSION_ID_B, "title b", 200, "/b"),
+        ];
+        let value = serde_json::to_value(&list).unwrap();
+        let arr = value.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        for entry in arr {
+            let obj = entry.as_object().unwrap();
+            let keys: BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+            let expected: BTreeSet<_> = ["cwd", "id", "title", "updated_at"].into_iter().collect();
+            assert_eq!(keys, expected);
+            assert!(obj["id"].is_string());
+            assert!(obj["title"].is_string());
+            assert!(obj["updated_at"].is_u64());
+            assert!(obj["cwd"].is_string());
+        }
+    }
 }

@@ -84,6 +84,8 @@ pub struct EventLoopParams {
     pub permissions: Arc<PermissionManager>,
     pub timeouts: Timeouts,
     pub exit_on_done: bool,
+    /// One-shot startup request to open the session picker (bare `--resume`).
+    pub session_picker: bool,
     pub lua_command_reader: LuaCommandReader,
     pub keymap_reader: KeymapReader,
     pub hint_reader: HintReader,
@@ -377,6 +379,7 @@ pub(crate) struct EventLoop<'t> {
     terminal: &'t mut ratatui::DefaultTerminal,
     sessions: Vec<SessionRuntime>,
     focused: usize,
+    session_picker: bool,
     last_focused: Option<MakiId>,
     terminal_focused: bool,
     notifier: Option<terminal::TerminalNotifier>,
@@ -493,6 +496,7 @@ impl<'t> EventLoop<'t> {
             permissions,
             timeouts,
             exit_on_done,
+            session_picker,
             lua_command_reader,
             keymap_reader,
             hint_reader,
@@ -597,6 +601,7 @@ impl<'t> EventLoop<'t> {
             terminal,
             sessions: runtimes,
             focused,
+            session_picker,
             last_focused: None,
             terminal_focused: false,
             notifier,
@@ -621,6 +626,8 @@ impl<'t> EventLoop<'t> {
             };
             let actions = self.focused_app().handle_submit(sub);
             self.dispatch(self.focused, actions);
+        } else if self.session_picker {
+            self.focused_app().open_session_picker();
         }
         // The first frame always paints. After that only a poller, an event or
         // an animation tick owes another.
@@ -1001,9 +1008,9 @@ impl<'t> EventLoop<'t> {
         dirty
     }
 
-    /// `List` replies from a background task (the scan can be slow); every
-    /// other request is answered synchronously by the event loop, which owns
-    /// the live runtimes.
+    /// `List` and `ListAll` reply from a background task (the scan can be
+    /// slow); every other request is answered synchronously by the event
+    /// loop, which owns the live runtimes.
     fn handle_session_request(&mut self, req: SessionRequest, reply_tx: flume::Sender<UiReply>) {
         match req {
             SessionRequest::List => {
@@ -1011,6 +1018,16 @@ impl<'t> EventLoop<'t> {
                 smol::unblock(move || {
                     let cwd = std::env::current_dir().unwrap_or_default();
                     let reply = AppSession::list(&cwd.to_string_lossy(), &storage)
+                        .map_err(|e| e.to_string())
+                        .and_then(|list| serde_json::to_value(list).map_err(|e| e.to_string()));
+                    let _ = reply_tx.send(reply);
+                })
+                .detach();
+            }
+            SessionRequest::ListAll => {
+                let storage = self.ctx.storage.clone();
+                smol::unblock(move || {
+                    let reply = AppSession::list_all(&storage)
                         .map_err(|e| e.to_string())
                         .and_then(|list| serde_json::to_value(list).map_err(|e| e.to_string()));
                     let _ = reply_tx.send(reply);

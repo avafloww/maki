@@ -3190,6 +3190,26 @@ local stored, err = maki.session.list()
 
 ---
 
+### `maki.session.list_all()` {#maki-session-list_all}
+
+```lua
+maki.session.list_all()
+```
+
+Lists stored sessions across every project directory, most recently
+updated first. Answered from a background scan, so a slow disk never
+blocks the UI.
+
+**Returns:** (`table|nil`, `string|nil`) Array of `{id, title, updated_at, cwd}`, or nil and an error.
+
+**Example:**
+
+```lua
+local stored, err = maki.session.list_all()
+```
+
+---
+
 ### `maki.session.live()` {#maki-session-live}
 
 ```lua

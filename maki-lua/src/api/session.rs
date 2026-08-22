@@ -36,6 +36,18 @@ async fn list(lua: Lua, #[ctx] tx: Option<flume::Sender<UiAction>>) -> LuaResult
     roundtrip(lua, tx, SessionRequest::List).await
 }
 
+/// Lists stored sessions across every project directory, most recently
+/// updated first. Answered from a background scan, so a slow disk never
+/// blocks the UI.
+///
+/// @return (table|nil, string|nil) Array of `{id, title, updated_at, cwd}`, or nil and an error.
+/// @example
+/// local stored, err = maki.session.list_all()
+#[lua_fn]
+async fn list_all(lua: Lua, #[ctx] tx: Option<flume::Sender<UiAction>>) -> LuaResult<Pair<Value>> {
+    roundtrip(lua, tx, SessionRequest::ListAll).await
+}
+
 /// Lists the sessions currently running in this UI. Status is "working",
 /// "needs_input", or "idle". A mailbox follow-up stays "working" without an
 /// intermediate "idle" status.
@@ -227,7 +239,7 @@ lua_table! {
     /// attached"` without a UI. `notify` instead targets a live agent mailbox
     /// directly, so it also works under ACP and SDK frontends.
     "maki.session" => pub(crate) fn create_session_table(tx: Option<flume::Sender<UiAction>>),
-    DOCS [list(tx), live(tx), current(tx), focus(tx), delete(tx), new(tx), prompt(tx), notify(), set_title(tx), thinking(tx), set_thinking(tx)]
+    DOCS [list(tx), list_all(tx), live(tx), current(tx), focus(tx), delete(tx), new(tx), prompt(tx), notify(), set_title(tx), thinking(tx), set_thinking(tx)]
 }
 
 #[cfg(test)]

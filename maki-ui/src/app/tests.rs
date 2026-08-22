@@ -2797,6 +2797,33 @@ fn run_cmdline_forwards_depth_to_lua_command() {
     );
 }
 
+/// The bare `--resume` startup path must reach the picker with the `all`
+/// arg, so every directory's sessions show up, not just this one's.
+#[test]
+fn open_session_picker_sends_all_arg_to_lua() {
+    let dir = StateDir::from_path(env::temp_dir());
+    let mut app = build_app_with_lua(
+        dir.clone(),
+        Arc::new(test_writer(dir)),
+        LuaCommandReader::from_commands(vec![LuaCommandInfo {
+            name: "/sessions".into(),
+            description: "Browse sessions".into(),
+            plugin: "sessions".into(),
+            max_args: 1,
+            has_argument_completion: false,
+        }]),
+    );
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    app.lua_event_handle = handle;
+
+    app.open_session_picker();
+
+    assert_eq!(
+        probe.try_recv_command(),
+        Some(("/sessions".to_string(), "all".to_string(), 0))
+    );
+}
+
 #[test]
 fn slash_noncommand_sends_as_prompt() {
     let mut app = test_app();
