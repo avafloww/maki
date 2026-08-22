@@ -1385,7 +1385,7 @@ fn watched_fifo_evicts_oldest_which_stops_polling_and_restores_with_recorded_cli
     let area = Rect::new(0, 0, 80, 24);
     assert!(panel.handle_click(area.y, area));
     assert_eq!(panel.lua_clicks.get("t0").map(Vec::len), Some(1));
-    assert_eq!(probe.try_recv(), Some(("restore", vec![])));
+    assert_eq!(probe.try_recv(), Some(("click_fallback", vec![0])));
 
     for i in 1..=WARM_TOOL_CAP {
         finish_with_live_buf(&mut panel, &format!("t{i}"), "body", false);
