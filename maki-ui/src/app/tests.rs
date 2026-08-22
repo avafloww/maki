@@ -941,6 +941,44 @@ fn argument_completion_enter_fills_then_next_enter_executes() {
 }
 
 #[test]
+fn argument_completion_enter_on_exact_match_executes_immediately() {
+    let dir = StateDir::from_path(env::temp_dir());
+    let mut app = build_app_with_lua(
+        dir.clone(),
+        Arc::new(test_writer(dir)),
+        LuaCommandReader::from_commands(vec![LuaCommandInfo {
+            name: "/rename".into(),
+            description: "Rename".into(),
+            plugin: "sessions".into(),
+            max_args: usize::MAX,
+            has_argument_completion: true,
+        }]),
+    );
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    app.lua_event_handle = handle;
+    app.input_box.set_input("/rename final".into());
+    app.command_palette.sync("/rename final");
+    app.command_palette.set_argument_completion(
+        (8, 13),
+        CommandArgumentItem {
+            label: "final".into(),
+            insertion: "final".into(),
+            description: None,
+        },
+    );
+
+    let actions = app.update(Msg::Key(key(KeyCode::Enter)));
+
+    assert!(actions.is_empty());
+    assert!(app.input_box.buffer.value().is_empty());
+    assert!(!app.command_palette.is_active());
+    assert_eq!(
+        probe.try_recv_command(),
+        Some(("/rename".into(), "final".into(), 0))
+    );
+}
+
+#[test]
 fn tab_in_palette_completes_command() {
     let mut app = test_app();
     type_slash(&mut app);

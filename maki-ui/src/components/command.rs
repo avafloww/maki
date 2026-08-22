@@ -332,13 +332,7 @@ impl CommandPalette {
     ) -> CommandAction {
         if self.accepted_argument_input.as_deref() == Some(input) {
             return if key.code == KeyCode::Enter {
-                match self.confirm(input) {
-                    Some(cmd) => {
-                        self.close(handle);
-                        CommandAction::Execute(cmd)
-                    }
-                    None => CommandAction::Consumed,
-                }
+                self.confirm_close(input, handle)
             } else {
                 CommandAction::Passthrough
             };
@@ -379,24 +373,26 @@ impl CommandPalette {
                     let insertion = &item.item.insertion;
                     let text = self.replace_argument(input, insertion);
                     let cursor = range.0 + insertion.len();
+                    // The token already is the selected item, so accepting it
+                    // would change nothing: run the command instead of
+                    // spending an Enter on a no-op accept.
+                    let exact = input.get(range.0..range.1) == Some(insertion.as_str());
                     self.notify_lifecycle(handle, CommandArgumentLifecycle::Accept);
                     self.argument_context = None;
                     self.lifecycle_cancel = None;
                     self.argument_items.clear();
                     self.argument_range = None;
                     self.pending_arguments = None;
-                    self.accepted_argument_input = Some(text.clone());
-                    CommandAction::AcceptArgument { text, cursor }
+                    if exact {
+                        self.confirm_close(input, handle)
+                    } else {
+                        self.accepted_argument_input = Some(text.clone());
+                        CommandAction::AcceptArgument { text, cursor }
+                    }
                 } else {
                     // Not settled: no items, or stale ones still on screen
                     // while the current query is in flight.
-                    match self.confirm(input) {
-                        Some(cmd) => {
-                            self.close(handle);
-                            CommandAction::Execute(cmd)
-                        }
-                        None => CommandAction::Consumed,
-                    }
+                    self.confirm_close(input, handle)
                 }
             }
             KeyCode::Tab => {
@@ -798,6 +794,18 @@ impl CommandPalette {
             name,
             args: args.to_string(),
         })
+    }
+
+    /// Confirm the input as a command and close the palette; consume the key
+    /// when the input no longer confirms (the command list went stale).
+    fn confirm_close(&mut self, input: &str, handle: &EventHandle) -> CommandAction {
+        match self.confirm(input) {
+            Some(cmd) => {
+                self.close(handle);
+                CommandAction::Execute(cmd)
+            }
+            None => CommandAction::Consumed,
+        }
     }
 
     /// Name lookup for `maki.api.run_command`, returning the registered
@@ -1605,6 +1613,66 @@ mod tests {
             CommandAction::Execute(ParsedCommand { name, args })
                 if name == "/rename" && args == "final"
         ));
+    }
+
+    #[test]
+    fn enter_on_exact_argument_match_executes_directly() {
+        let mut palette = synced_with_nargs("/rename final", usize::MAX);
+        palette.set_argument_completion(
+            (8, 13),
+            CommandArgumentItem {
+                label: "final".into(),
+                insertion: "final".into(),
+                description: None,
+            },
+        );
+
+        let handle = EventHandle::disconnected_for_test();
+        assert!(matches!(
+            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename final", &handle),
+            CommandAction::Execute(ParsedCommand { name, args })
+                if name == "/rename" && args == "final"
+        ));
+        assert!(!palette.is_active());
+    }
+
+    #[test]
+    fn enter_on_exact_argument_match_notifies_accept() {
+        let lua = LuaCommandReader::from_commands(vec![LuaCommandInfo {
+            name: Arc::from("/rename"),
+            description: Arc::from("Rename the current session"),
+            plugin: Arc::from("sessions"),
+            max_args: usize::MAX,
+            has_argument_completion: true,
+        }]);
+        let mut palette = CommandPalette::new(Arc::from([]), empty_snapshot(), lua);
+        let (handle, probe) = maki_lua::test_support::probed_event_handle();
+        let items = vec![CommandArgumentItem {
+            label: "final".into(),
+            insertion: "final".into(),
+            description: None,
+        }];
+
+        palette.sync("/rename final");
+        palette.sync_arguments("/rename final", 13, &handle, "build");
+        probe.try_finish_command_arguments(items.clone()).unwrap();
+        let _ = palette.poll_arguments(&handle);
+        assert_eq!(
+            probe.try_finish_command_argument_lifecycle(),
+            Some(("highlight", Some("final".into()), true))
+        );
+
+        assert!(matches!(
+            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename final", &handle),
+            CommandAction::Execute(ParsedCommand { name, args })
+                if name == "/rename" && args == "final"
+        ));
+        // The accept fires (plugins commit on it) and no cancel follows.
+        assert_eq!(
+            probe.try_finish_command_argument_lifecycle(),
+            Some(("accept", Some("final".into()), true))
+        );
+        assert!(probe.try_finish_command_argument_lifecycle().is_none());
     }
 
     fn settled_rename_palette() -> (
