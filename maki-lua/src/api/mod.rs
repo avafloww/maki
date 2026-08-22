@@ -11,13 +11,16 @@ pub(crate) mod interpreter;
 pub(crate) mod json;
 pub(crate) mod keymap;
 pub(crate) mod log;
+pub(crate) mod r#match;
 pub(crate) mod mode;
 pub(crate) mod net;
 pub(crate) mod options;
 pub(crate) mod session;
 pub(crate) mod slot;
 pub(crate) mod split;
+pub(crate) mod store;
 pub(crate) mod text;
+pub(crate) mod timer;
 pub(crate) mod tool;
 pub(crate) mod treesitter;
 pub(crate) mod ui;
@@ -69,6 +72,11 @@ pub(crate) fn create_maki_global(
     maki.set("yaml", yaml::create_yaml_table(lua)?)?;
     maki.set("net", net::create_net_table(lua, permissions)?)?;
     maki.set("text", text::create_text_table(lua)?)?;
+    maki.set("match", r#match::create_match_table(lua)?)?;
+    maki.set(
+        "store",
+        store::create_store_table(lua, Arc::clone(&plugin))?,
+    )?;
     maki.set(
         "session",
         session::create_session_table(lua, ui_action_tx.clone())?,
@@ -91,6 +99,10 @@ pub(crate) fn create_maki_global(
     maki.set(
         "keymap",
         keymap::create_keymap_table(lua, Arc::clone(&plugin))?,
+    )?;
+    maki.set(
+        "timer",
+        timer::create_timer_table(lua, Arc::clone(&plugin))?,
     )?;
     crate::splash::register_version_api(lua, &maki)?;
 

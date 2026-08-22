@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::mem;
 
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config, Matcher};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crate::animation::{animation_elapsed_ms, spinner_str};
 use crate::components::Overlay;
@@ -38,6 +39,9 @@ pub trait PickerItem {
     fn section(&self) -> Option<&str> {
         None
     }
+    fn section_detail(&self) -> Option<&str> {
+        None
+    }
     fn is_spinning(&self) -> bool {
         false
     }
@@ -56,20 +60,32 @@ pub enum PickerAction<T> {
     Consumed,
     Select(T),
     Toggle(usize, bool),
+    Delete(usize),
     Close,
+}
+
+enum Footer {
+    Builder(fn() -> Line<'static>),
+    Static(Line<'static>),
 }
 
 pub struct ListPicker<T> {
     state: Option<State<T>>,
     title: String,
     max_visible: Option<u16>,
-    footer: Option<fn() -> Line<'static>>,
+    footer: Option<Footer>,
     error_text: Option<String>,
+    submit_keys: Vec<KeyEvent>,
+    delete_key: Option<KeyEvent>,
+    confirming_delete: Option<usize>,
 }
 
 struct State<T> {
     items: Vec<T>,
     filtered: Vec<usize>,
+    /// Per-`filtered`-entry label match codepoint indices; `None` when no
+    /// query is active, `Some(empty)` when a word matched only the section.
+    match_indices: Vec<Option<Vec<u32>>>,
     selected: usize,
     search: TextBuffer,
     scroll_offset: usize,
@@ -81,10 +97,12 @@ struct State<T> {
 
 impl<T: PickerItem> State<T> {
     fn new(items: Vec<T>) -> Self {
-        let filtered = (0..items.len()).collect();
+        let filtered: Vec<usize> = (0..items.len()).collect();
+        let match_indices: Vec<Option<Vec<u32>>> = vec![None; filtered.len()];
         Self {
             items,
             filtered,
+            match_indices,
             selected: 0,
             search: TextBuffer::new(String::new()),
             scroll_offset: 0,
@@ -103,33 +121,108 @@ impl<T: PickerItem> State<T> {
 
     fn rebuild_filter(&mut self) {
         let query = self.search.value();
-        if query.is_empty() {
+        let words: Vec<&str> = query.split_whitespace().collect();
+        if words.is_empty() {
             self.filtered = (0..self.items.len()).collect();
-        } else {
-            let pattern = Pattern::new(
-                &query,
-                CaseMatching::Smart,
-                Normalization::Smart,
-                AtomKind::Fuzzy,
-            );
-            // Create labels with their original indices
-            let labeled: Vec<(usize, &str)> = self
-                .items
-                .iter()
-                .enumerate()
-                .map(|(idx, item)| (idx, item.label()))
-                .collect();
-            let matches: HashSet<&str> = pattern
-                .match_list(labeled.iter().map(|(_, label)| *label), &mut self.matcher)
-                .into_iter()
-                .map(|(matched_str, _score)| matched_str)
-                .collect();
-            // Find back all indices that have matching labels
-            self.filtered = labeled
-                .into_iter()
-                .filter(|(_, label)| matches.contains(label))
-                .map(|(idx, _)| idx)
-                .collect();
+            self.match_indices = vec![None; self.filtered.len()];
+            return;
+        }
+        let patterns: Vec<Pattern> = words
+            .iter()
+            .map(|word| {
+                Pattern::new(
+                    word,
+                    CaseMatching::Smart,
+                    Normalization::Smart,
+                    AtomKind::Fuzzy,
+                )
+            })
+            .collect();
+
+        // Kept items with their nucleo score and label-only highlight
+        // indices (a word matched only the section keeps the item but no
+        // label highlight).
+        let mut kept: Vec<(usize, u32, Vec<u32>)> = Vec::new();
+        for (idx, item) in self.items.iter().enumerate() {
+            let label = item.label();
+            let section = item.section();
+            let mut label_chars = Vec::new();
+            // Codepoint haystack (not Utf32Str::new's grapheme segmentation)
+            // so highlight indices stay codepoint offsets, matching
+            // maki.match.fuzzy.
+            let label_hay = if label.is_ascii() {
+                Utf32Str::Ascii(label.as_bytes())
+            } else {
+                label_chars.extend(label.chars());
+                Utf32Str::Unicode(&label_chars)
+            };
+            let mut section_chars = Vec::new();
+            let section_hay = section.map(|sec| {
+                if sec.is_ascii() {
+                    Utf32Str::Ascii(sec.as_bytes())
+                } else {
+                    section_chars.extend(sec.chars());
+                    Utf32Str::Unicode(&section_chars)
+                }
+            });
+
+            let mut score = 0u32;
+            let mut indices = Vec::new();
+            let mut matched = true;
+            for pattern in &patterns {
+                let mut label_idx = Vec::new();
+                let label_score = pattern.indices(label_hay, &mut self.matcher, &mut label_idx);
+                let mut section_idx = Vec::new();
+                let section_score = section_hay
+                    .as_ref()
+                    .and_then(|hay| pattern.indices(*hay, &mut self.matcher, &mut section_idx));
+                let word_score = match (label_score, section_score) {
+                    (None, None) => {
+                        matched = false;
+                        break;
+                    }
+                    (Some(label), Some(section)) => label.min(section),
+                    (Some(label), None) => label,
+                    (None, Some(section)) => section,
+                };
+                if label_score.is_some() {
+                    indices.extend(label_idx);
+                }
+                score = score.saturating_add(word_score);
+            }
+            if matched {
+                indices.sort_unstable();
+                indices.dedup();
+                kept.push((idx, score, indices));
+            }
+        }
+
+        // Run-based ordering, a port of the old Lua filter_items: one group
+        // per contiguous section (a None<->Some change starts a new group,
+        // so the login "Custom provider..." tail stays at the bottom),
+        // stable-sorted within a group by score descending (higher is
+        // better in nucleo; ties keep source order).
+        let mut runs: Vec<Vec<(usize, u32, Vec<u32>)>> = Vec::new();
+        let mut last: Option<Option<&str>> = None;
+        let kept_len = kept.len();
+        for (idx, score, indices) in kept {
+            let section = self.items[idx].section();
+            if last == Some(section) {
+                if let Some(run) = runs.last_mut() {
+                    run.push((idx, score, indices));
+                }
+            } else {
+                last = Some(section);
+                runs.push(vec![(idx, score, indices)]);
+            }
+        }
+        self.filtered = Vec::with_capacity(kept_len);
+        self.match_indices = Vec::with_capacity(kept_len);
+        for mut run in runs {
+            run.sort_by_key(|x| Reverse(x.1));
+            self.filtered.extend(run.iter().map(|&(idx, _, _)| idx));
+            self.match_indices
+                .extend(run.into_iter().map(|(_, _, indices)| Some(indices)));
         }
     }
 
@@ -233,6 +326,9 @@ impl<T: PickerItem> ListPicker<T> {
             max_visible: None,
             footer: None,
             error_text: None,
+            submit_keys: Vec::new(),
+            delete_key: None,
+            confirming_delete: None,
         }
     }
 
@@ -242,8 +338,32 @@ impl<T: PickerItem> ListPicker<T> {
     }
 
     pub fn with_footer_builder(mut self, builder: fn() -> Line<'static>) -> Self {
-        self.footer = Some(builder);
+        self.footer = Some(Footer::Builder(builder));
         self
+    }
+
+    pub fn with_footer_line(mut self, line: Line<'static>) -> Self {
+        self.footer = Some(Footer::Static(line));
+        self
+    }
+
+    pub fn with_submit_keys(mut self, keys: Vec<KeyEvent>) -> Self {
+        self.submit_keys = keys;
+        self
+    }
+
+    pub fn with_delete_key(mut self, key: KeyEvent) -> Self {
+        self.delete_key = Some(key);
+        self
+    }
+
+    /// True while a delete key press awaits its confirming second press.
+    pub fn delete_confirming(&self) -> bool {
+        self.confirming_delete.is_some()
+    }
+
+    pub fn delete_key(&self) -> Option<&KeyEvent> {
+        self.delete_key.as_ref()
     }
 
     pub fn open_toggleable(&mut self, items: Vec<T>, enabled: Vec<bool>, title: impl Into<String>) {
@@ -343,6 +463,22 @@ impl<T: PickerItem> ListPicker<T> {
             self.state = None;
             return PickerAction::Close;
         }
+        if self
+            .delete_key
+            .as_ref()
+            .is_some_and(|k| key_matches(key, k))
+        {
+            if let Some(sel) = s.selected_item_index() {
+                if self.confirming_delete == Some(sel) {
+                    self.confirming_delete = None;
+                    return PickerAction::Delete(sel);
+                }
+                self.confirming_delete = Some(sel);
+            }
+            return PickerAction::Consumed;
+        }
+        // Any other key clears a pending delete confirm.
+        self.confirming_delete = None;
         if key::DELETE_WORD.matches(key) {
             s.search.remove_word_before_cursor();
             s.update_search_and_clamp();
@@ -355,6 +491,16 @@ impl<T: PickerItem> ListPicker<T> {
         if key::SCROLL_HALF_DOWN.matches(key) {
             s.page_down();
             return PickerAction::Consumed;
+        }
+        if self.submit_keys.iter().any(|k| key_matches(key, k)) {
+            let idx = s.selected_item_index();
+            return match idx {
+                Some(idx) => {
+                    let mut state = self.state.take().unwrap();
+                    PickerAction::Select(state.items.swap_remove(idx))
+                }
+                None => PickerAction::Consumed,
+            };
         }
         if is_ctrl(&key) {
             return PickerAction::Consumed;
@@ -444,6 +590,9 @@ impl<T: PickerItem> ListPicker<T> {
         let Some(s) = self.state.as_mut() else {
             return false;
         };
+        // Paste is user input like any other key: a pending delete confirm
+        // must not survive it.
+        self.confirming_delete = None;
         s.search.insert_text(text);
         s.update_search_and_clamp();
         true
@@ -467,7 +616,10 @@ impl<T: PickerItem> ListPicker<T> {
     }
 
     pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
-        let footer = self.footer;
+        let footer = self.footer.as_ref().map(|f| match f {
+            Footer::Builder(build) => build(),
+            Footer::Static(line) => line.clone(),
+        });
         match self.state.as_mut() {
             None => Rect::default(),
             Some(s) => render_ready(
@@ -497,13 +649,17 @@ impl<T: PickerItem> Overlay for ListPicker<T> {
     }
 }
 
+fn key_matches(key: KeyEvent, other: &KeyEvent) -> bool {
+    key.code == other.code && key.modifiers == other.modifiers
+}
+
 fn render_ready<T: PickerItem>(
     frame: &mut Frame,
     area: Rect,
     s: &mut State<T>,
     title: &str,
     max_visible: Option<u16>,
-    footer: Option<fn() -> Line<'static>>,
+    footer: Option<Line<'static>>,
     error_text: Option<&str>,
 ) -> Rect {
     let footer_rows = if footer.is_some() { 1u16 } else { 0 };
@@ -567,6 +723,7 @@ fn render_ready<T: PickerItem>(
         list_area,
         &s.filtered,
         &s.items,
+        &s.match_indices,
         s.selected,
         s.scroll_offset,
         s.viewport_height,
@@ -574,8 +731,8 @@ fn render_ready<T: PickerItem>(
     );
     render_search(frame, search_area, &s.search);
 
-    if let Some(build) = footer {
-        frame.render_widget(Paragraph::new(build()), areas[area_idx]);
+    if let Some(line) = footer {
+        frame.render_widget(Paragraph::new(line), areas[area_idx]);
     }
 
     let total_visual = visual_rows_in_range(&s.filtered, &s.items, 0, s.filtered.len());
@@ -662,12 +819,50 @@ fn truncate_label(label: &str, max_width: usize) -> String {
     result
 }
 
+/// Label row spans: "  " prefix plus the label truncated to `max_width`,
+/// with run-merged match codepoints in `match_style` and the rest in
+/// `base`. Returns the spans and their total display width.
+fn label_spans(
+    label: &str,
+    indices: Option<&[u32]>,
+    base: Style,
+    match_style: Style,
+    max_width: usize,
+) -> (Vec<Span<'static>>, usize) {
+    let truncated = truncate_label(label, max_width);
+    let Some(indices) = indices.filter(|i| !i.is_empty()) else {
+        return (
+            vec![Span::styled(format!("  {truncated}"), base)],
+            2 + truncated.width(),
+        );
+    };
+    let mut spans: Vec<Span<'static>> = vec![Span::styled("  ", base)];
+    let mut run = String::new();
+    let mut in_match = false;
+    for (pos, ch) in truncated.chars().enumerate() {
+        let is_match = indices.binary_search(&(pos as u32)).is_ok();
+        if is_match != in_match && !run.is_empty() {
+            spans.push(Span::styled(
+                mem::take(&mut run),
+                if in_match { match_style } else { base },
+            ));
+        }
+        in_match = is_match;
+        run.push(ch);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, if in_match { match_style } else { base }));
+    }
+    (spans, 2 + truncated.width())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_list<T: PickerItem>(
     frame: &mut Frame,
     area: Rect,
     filtered: &[usize],
     items: &[T],
+    match_indices: &[Option<Vec<u32>>],
     selected: usize,
     scroll_offset: usize,
     viewport_height: usize,
@@ -702,10 +897,17 @@ fn render_list<T: PickerItem>(
                 lines.push(Line::raw(""));
             }
             if lines.len() < viewport_height {
-                lines.push(Line::from(Span::styled(
+                let mut header = vec![Span::styled(
                     format!("  {sec}"),
                     theme::current().keybind_section,
-                )));
+                )];
+                if let Some(detail) = item.section_detail() {
+                    header.push(Span::styled(
+                        format!(" {detail}"),
+                        theme::current().item_desc,
+                    ));
+                }
+                lines.push(Line::from(header));
             }
             last_section = Some(sec);
         }
@@ -736,7 +938,6 @@ fn render_list<T: PickerItem>(
             };
             Span::styled(sym, sty)
         });
-        let label = format!("  {}", item.label());
         let suffix = item.suffix();
         let detail: Option<&str> = if item.is_spinning() {
             Some(spinner_str(animation_elapsed_ms()))
@@ -746,20 +947,32 @@ fn render_list<T: PickerItem>(
         let suffix_gap = 2usize;
         let suffix_w = suffix.map(|s| s.width()).unwrap_or(0);
         let trailing_gap = suffix_w + if suffix_w > 0 { suffix_gap } else { 0 };
+        let label_indices = match_indices.get(i).and_then(|v| v.as_deref());
+        let match_style = if i == selected {
+            t.item_match_selected
+        } else {
+            t.item_match
+        };
         let line = match detail {
             Some(detail) => {
                 let max_label = area.width.saturating_sub(
                     detail.width() as u16 + trailing_gap as u16 + 1 + DETAIL_RIGHT_PAD,
                 ) as usize;
-                let label = truncate_label(&label, max_label);
-                let pad = (area.width as usize).saturating_sub(
-                    label.width() + trailing_gap + detail.width() + DETAIL_RIGHT_PAD as usize + 1,
+                let (label_spans, label_w) = label_spans(
+                    item.label(),
+                    label_indices,
+                    style,
+                    match_style,
+                    max_label.saturating_sub(2),
                 );
-                let mut spans = Vec::with_capacity(7);
+                let pad = (area.width as usize).saturating_sub(
+                    label_w + trailing_gap + detail.width() + DETAIL_RIGHT_PAD as usize + 1,
+                );
+                let mut spans = Vec::with_capacity(8);
                 if let Some(cb) = checkbox {
                     spans.push(cb);
                 }
-                spans.push(Span::styled(label, style));
+                spans.extend(label_spans);
                 if let Some(s) = suffix {
                     spans.push(Span::styled(" ".repeat(suffix_gap), style));
                     spans.push(Span::styled(s.to_string(), theme::dim_style(style, 0.4)));
@@ -770,11 +983,13 @@ fn render_list<T: PickerItem>(
                 Line::from(spans)
             }
             None => {
-                let mut spans: Vec<Span> = Vec::with_capacity(4);
+                let (label_spans, _) =
+                    label_spans(item.label(), label_indices, style, match_style, usize::MAX);
+                let mut spans: Vec<Span> = Vec::with_capacity(5);
                 if let Some(cb) = checkbox {
                     spans.push(cb);
                 }
-                spans.push(Span::styled(label, style));
+                spans.extend(label_spans);
                 if let Some(s) = suffix {
                     spans.push(Span::styled(" ".repeat(suffix_gap), style));
                     spans.push(Span::styled(s.to_string(), theme::dim_style(style, 0.4)));
@@ -812,7 +1027,9 @@ mod tests {
     use super::*;
     use crate::components::key;
     use crate::components::keybindings::key as kb;
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use test_case::test_case;
 
     fn ready_state<T>(p: &ListPicker<T>) -> &State<T> {
@@ -983,6 +1200,237 @@ mod tests {
         p.handle_key(key(KeyCode::Char('u')));
         let filtered = ready_state(&p).filtered.clone();
         assert_eq!(filtered, vec![0]); // only claude-sonnet should match
+    }
+
+    fn set_query<T: PickerItem>(p: &mut ListPicker<T>, query: &str) {
+        ready_state_mut(p).search.insert_text(query);
+        ready_state_mut(p).update_search_and_clamp();
+    }
+
+    #[test]
+    fn filter_ranks_by_score_not_source_order() {
+        let mut p = ListPicker::new();
+        p.open(entries(&["axxapp", "apple"]), " Test ");
+        set_query(&mut p, "app");
+        assert_eq!(ready_state(&p).filtered, vec![1, 0]);
+    }
+
+    #[test]
+    fn filter_ties_keep_source_order() {
+        let mut p = ListPicker::new();
+        p.open(entries(&["bapp", "capp", "dapp"]), " Test ");
+        set_query(&mut p, "app");
+        assert_eq!(ready_state(&p).filtered, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn filter_duplicate_labels_all_kept_in_order() {
+        let mut p = ListPicker::new();
+        p.open(entries(&["app", "app", "bax"]), " Test ");
+        set_query(&mut p, "app");
+        assert_eq!(ready_state(&p).filtered, vec![0, 1]);
+    }
+
+    #[test]
+    fn filter_whitespace_query_returns_all_items_unindexed() {
+        let mut p = ListPicker::new();
+        p.open(entries(&["Alpha", "Beta", "Gamma"]), " Test ");
+        set_query(&mut p, "  ");
+        let s = ready_state(&p);
+        assert_eq!(s.filtered, vec![0, 1, 2]);
+        assert_eq!(s.match_indices, vec![None, None, None]);
+    }
+
+    #[test]
+    fn filter_section_word_matches_section_only_keeps_item_unhighlighted() {
+        let mut p = ListPicker::new();
+        p.open(
+            vec![
+                SectionEntry {
+                    label: "foo".into(),
+                    section: "Anthropic",
+                },
+                SectionEntry {
+                    label: "bar".into(),
+                    section: "Gemini",
+                },
+            ],
+            " Test ",
+        );
+        set_query(&mut p, "gemini");
+        let s = ready_state(&p);
+        assert_eq!(s.filtered, vec![1]);
+        assert_eq!(s.match_indices, vec![Some(Vec::new())]);
+    }
+
+    #[test]
+    fn filter_section_groups_stay_contiguous() {
+        let mut p = ListPicker::new();
+        p.open(
+            vec![
+                SectionEntry {
+                    label: "zzapp".into(),
+                    section: "A",
+                },
+                SectionEntry {
+                    label: "app".into(),
+                    section: "B",
+                },
+                SectionEntry {
+                    label: "zapp".into(),
+                    section: "B",
+                },
+            ],
+            " Test ",
+        );
+        set_query(&mut p, "app");
+        // The group-A item keeps its position even though its score is the
+        // lowest; a global score sort would reorder to [1, 2, 0].
+        assert_eq!(ready_state(&p).filtered, vec![0, 1, 2]);
+    }
+
+    struct OptSection {
+        label: String,
+        section: Option<&'static str>,
+    }
+
+    impl PickerItem for OptSection {
+        fn label(&self) -> &str {
+            &self.label
+        }
+        fn section(&self) -> Option<&str> {
+            self.section
+        }
+    }
+
+    #[test]
+    fn filter_grouping_is_run_based_not_first_appearance() {
+        let mut p = ListPicker::new();
+        p.open(
+            vec![
+                OptSection {
+                    label: "app".into(),
+                    section: Some("A"),
+                },
+                OptSection {
+                    label: "app".into(),
+                    section: None,
+                },
+                OptSection {
+                    label: "app".into(),
+                    section: Some("A"),
+                },
+            ],
+            " Test ",
+        );
+        set_query(&mut p, "app");
+        // First-appearance grouping would hoist the second "A" item into the
+        // first group and reorder to [0, 2, 1]; run-based keeps the tail
+        // un-sectioned run in place (the login "Custom provider..." layout).
+        assert_eq!(ready_state(&p).filtered, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn filter_mixed_label_and_section_query_keeps_item_with_label_indices() {
+        let mut p = ListPicker::new();
+        p.open(
+            vec![
+                SectionEntry {
+                    label: "claude-opus".into(),
+                    section: "Anthropic",
+                },
+                SectionEntry {
+                    label: "gpt".into(),
+                    section: "OpenAI",
+                },
+            ],
+            " Test ",
+        );
+        set_query(&mut p, "claude anthropic");
+        // "claude" hits the label, "anthropic" only the section: the item is
+        // kept with label-only indices.
+        let s = ready_state(&p);
+        assert_eq!(s.filtered, vec![0]);
+        assert_eq!(s.match_indices, vec![Some(vec![0, 1, 2, 3, 4, 5])]);
+    }
+
+    #[test]
+    fn filter_match_indices_are_codepoints_not_graphemes() {
+        // \U0001F1FA\U0001F1FC (a flag) is one grapheme of two codepoints, so a
+        // grapheme haystack (Utf32Str::new) would index "cd" at [3, 4]; the
+        // codepoint haystack indexes it at [4, 5], matching maki.match.fuzzy.
+        let mut p = ListPicker::new();
+        p.open(vec![Entry::new("ab\u{1F1FA}\u{1F1FC}cd")], " Test ");
+        set_query(&mut p, "cd");
+        let s = ready_state(&p);
+        assert_eq!(s.filtered, vec![0]);
+        assert_eq!(s.match_indices, vec![Some(vec![4, 5])]);
+    }
+
+    #[test]
+    fn render_highlights_matched_chars_selected_and_unselected() {
+        let mut p = ListPicker::new();
+        p.open(entries(&["apple", "apricot"]), " Test ");
+        p.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(ready_state(&p).filtered, vec![0, 1]);
+
+        let area = Rect::new(0, 0, 80, 40);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                p.view(frame, area);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let t = theme::current();
+
+        let line_at = |y: u16| -> String {
+            (0..area.width)
+                .map(|x| {
+                    buffer
+                        .cell(Position::new(x, y))
+                        .map(|c| c.symbol())
+                        .unwrap_or(" ")
+                })
+                .collect()
+        };
+        let item_rows: Vec<u16> = (0..area.height)
+            .filter(|y| {
+                let line = line_at(*y);
+                line.contains("apple") || line.contains("apricot")
+            })
+            .collect();
+        assert_eq!(item_rows.len(), 2, "both items must be visible");
+        // str::find returns byte offsets but buffer columns count
+        // characters (cells); the modal's multi-byte border chars would
+        // skew a byte offset, so count chars up to the label.
+        let label_col = |y: u16| -> u16 {
+            let line = line_at(y);
+            line.char_indices()
+                .position(|(b, _)| {
+                    line[b..].starts_with("apple") || line[b..].starts_with("apricot")
+                })
+                .unwrap() as u16
+        };
+        // The first item row is the selected one (selection starts at 0).
+        let (sel_row, unsel_row) = (item_rows[0], item_rows[1]);
+        let sel_cell = buffer
+            .cell(Position::new(label_col(sel_row), sel_row))
+            .unwrap();
+        assert_eq!(
+            Some(sel_cell.fg),
+            t.item_match_selected.fg,
+            "selected row match char uses the stronger match style"
+        );
+        let unsel_cell = buffer
+            .cell(Position::new(label_col(unsel_row), unsel_row))
+            .unwrap();
+        assert_eq!(
+            Some(unsel_cell.fg),
+            t.item_match.fg,
+            "unselected row match char uses the plain match style"
+        );
     }
 
     #[test]
@@ -1162,5 +1610,218 @@ mod tests {
         let sfx = "Anthropic".width();
         assert_eq!(end_col(&long, sfx), end_col("  hi", sfx));
         assert!(end_col(&long, sfx) <= width as usize);
+    }
+
+    fn ctrl_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    fn buffer_lines(terminal: &Terminal<TestBackend>, area: Rect) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| {
+                        buffer
+                            .cell(Position::new(x, y))
+                            .map(|c| c.symbol())
+                            .unwrap_or(" ")
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn custom_submit_keys_select_like_enter() {
+        let mut p = ListPicker::new().with_submit_keys(vec![ctrl_key(KeyCode::Char('s'))]);
+        p.open(entries(&["A", "B", "C"]), " Test ");
+        p.handle_key(key(KeyCode::Down));
+
+        let action = p.handle_key(ctrl_key(KeyCode::Char('s')));
+        assert!(matches!(action, PickerAction::Select(ref e) if e.label == "B"));
+        assert!(!p.is_open());
+    }
+
+    #[test]
+    fn submit_key_on_empty_results_consumed() {
+        let mut p = ListPicker::new().with_submit_keys(vec![ctrl_key(KeyCode::Char('s'))]);
+        p.open(entries(&["A"]), " Test ");
+        p.handle_key(key(KeyCode::Char('z')));
+
+        let action = p.handle_key(ctrl_key(KeyCode::Char('s')));
+        assert!(matches!(action, PickerAction::Consumed));
+        assert!(p.is_open());
+    }
+
+    fn with_delete_key() -> ListPicker<Entry> {
+        ListPicker::new().with_delete_key(ctrl_key(KeyCode::Char('d')))
+    }
+
+    #[test]
+    fn delete_key_arms_then_deletes_selected() {
+        let mut p = with_delete_key();
+        p.open(entries(&["A", "B", "C"]), " Test ");
+        p.handle_key(key(KeyCode::Down));
+
+        assert!(matches!(
+            p.handle_key(ctrl_key(KeyCode::Char('d'))),
+            PickerAction::Consumed
+        ));
+        assert!(p.delete_confirming());
+
+        assert!(matches!(
+            p.handle_key(ctrl_key(KeyCode::Char('d'))),
+            PickerAction::Delete(1)
+        ));
+        assert!(!p.delete_confirming());
+        assert!(p.is_open(), "the host decides what a delete closes");
+    }
+
+    #[test]
+    fn other_key_clears_pending_delete() {
+        let mut p = with_delete_key();
+        p.open(entries(&["A", "B"]), " Test ");
+
+        p.handle_key(ctrl_key(KeyCode::Char('d')));
+        assert!(p.delete_confirming());
+
+        p.handle_key(key(KeyCode::Down));
+        assert!(!p.delete_confirming());
+
+        // A fresh arm needs two presses and now targets the new selection.
+        p.handle_key(ctrl_key(KeyCode::Char('d')));
+        assert!(p.delete_confirming());
+        assert!(matches!(
+            p.handle_key(ctrl_key(KeyCode::Char('d'))),
+            PickerAction::Delete(1)
+        ));
+    }
+
+    #[test]
+    fn delete_key_without_selection_is_consumed() {
+        let mut p = with_delete_key();
+        p.open(entries(&["A"]), " Test ");
+        p.handle_key(key(KeyCode::Char('z')));
+
+        assert!(matches!(
+            p.handle_key(ctrl_key(KeyCode::Char('d'))),
+            PickerAction::Consumed
+        ));
+        assert!(!p.delete_confirming());
+    }
+
+    #[test]
+    fn delete_key_precedes_ctrl_d_page_down() {
+        let items: Vec<Entry> = (0..50).map(|i| Entry::new(&format!("Item {i}"))).collect();
+        let mut p = with_delete_key();
+        p.open(items, " Test ");
+
+        assert!(matches!(
+            p.handle_key(ctrl_key(KeyCode::Char('d'))),
+            PickerAction::Consumed
+        ));
+        assert!(p.delete_confirming());
+        assert_eq!(
+            ready_state(&p).selected,
+            0,
+            "no page-down while delete is armed"
+        );
+    }
+
+    #[test]
+    fn paste_clears_pending_delete() {
+        let mut p = with_delete_key();
+        p.open(entries(&["A", "B"]), " Test ");
+
+        p.handle_key(ctrl_key(KeyCode::Char('d')));
+        assert!(p.delete_confirming());
+
+        p.handle_paste("A");
+        assert!(!p.delete_confirming());
+    }
+
+    #[test]
+    fn enter_under_active_filter_selects_original_index() {
+        let mut p = ListPicker::new();
+        p.open(entries(&["Alpha", "Beta", "Alpine"]), " Test ");
+        p.handle_key(key(KeyCode::Char('a')));
+        p.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(ready_state(&p).filtered, vec![0, 2]);
+
+        p.handle_key(key(KeyCode::Down));
+        let action = p.handle_key(key(KeyCode::Enter));
+        // "Alpine" is filtered row 1 but original index 2.
+        assert!(matches!(action, PickerAction::Select(ref e) if e.label == "Alpine"));
+        assert!(!p.is_open());
+    }
+
+    #[test]
+    fn static_footer_line_renders_below_list_and_search() {
+        let mut p = ListPicker::new().with_footer_line(Line::from("ctrl+d delete"));
+        p.open(entries(&["alpha", "beta"]), " Test ");
+
+        let area = Rect::new(0, 0, 80, 40);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                p.view(frame, area);
+            })
+            .unwrap();
+        let lines = buffer_lines(&terminal, area);
+
+        let item_y = lines
+            .iter()
+            .position(|l| l.contains("alpha"))
+            .expect("items must be drawn");
+        let footer_y = lines
+            .iter()
+            .position(|l| l.contains("ctrl+d delete"))
+            .expect("footer must be drawn");
+        assert!(
+            footer_y > item_y + 1,
+            "footer sits below the list and search rows"
+        );
+    }
+
+    struct DetailSectionEntry {
+        label: String,
+        section: &'static str,
+        detail: &'static str,
+    }
+
+    impl PickerItem for DetailSectionEntry {
+        fn label(&self) -> &str {
+            &self.label
+        }
+        fn section(&self) -> Option<&str> {
+            Some(self.section)
+        }
+        fn section_detail(&self) -> Option<&str> {
+            Some(self.detail)
+        }
+    }
+
+    #[test]
+    fn section_detail_renders_next_to_header() {
+        let mut p = ListPicker::new();
+        p.open(
+            vec![DetailSectionEntry {
+                label: "first".into(),
+                section: "Anthropic",
+                detail: "2 models",
+            }],
+            " Test ",
+        );
+
+        let area = Rect::new(0, 0, 80, 40);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                p.view(frame, area);
+            })
+            .unwrap();
+        let lines = buffer_lines(&terminal, area);
+        assert!(lines.iter().any(|l| l.contains("Anthropic 2 models")));
     }
 }

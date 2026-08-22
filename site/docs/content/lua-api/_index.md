@@ -56,6 +56,7 @@ a string belongs.
 | --- | --- |
 | [`maki`](#maki) | The global entry point. |
 | [`maki.api`](#maki-api) | Plugin registration. |
+| [`maki.store`](#maki-store) | Shared key-value store for plugin contributions. |
 | [`maki.agent`](#maki-agent) | Subagent primitives for plugins that need to talk to an LLM. |
 | [`maki.agent.Session`](#maki-agent-Session) | A subagent session with its own conversation history. |
 | [`maki.async`](#maki-async) | Tools for running things concurrently in Lua plugins. |
@@ -72,10 +73,12 @@ a string belongs.
 | [`maki.json.SchemaValidator`](#maki-json-SchemaValidator) | A compiled JSON Schema validator. |
 | [`maki.keymap`](#maki-keymap) | Key mappings, modeled after `vim.keymap`. |
 | [`maki.log`](#maki-log) | Structured logging for plugins. |
+| [`maki.match`](#maki-match) | Fuzzy matching via nucleo, the same matcher maki's built-in pickers use. |
 | [`maki.api.mode`](#maki-api-mode) | `maki.api.mode`: define, override, list, and switch agent modes. |
 | [`maki.net`](#maki-net) | HTTP client for fetching web content. |
 | [`maki.session`](#maki-session) | Host session primitives. |
 | [`maki.text`](#maki-text) | Text transformation utilities. |
+| [`maki.timer`](#maki-timer) | Recurring callbacks on the runtime's timer pump. |
 | [`maki.treesitter`](#maki-treesitter) | Tree-sitter parsing and query API. |
 | [`maki.treesitter.language`](#maki-treesitter-language) | Language registry for tree-sitter grammars. |
 | [`maki.treesitter.query`](#maki-treesitter-query) | Query compilation and lookup. |
@@ -327,6 +330,28 @@ browsing memory files or toggling settings.
     with one opts table: `opts.args` is the raw
     argument string (whitespace kept, may be empty)
     and `opts.fargs` is the same split into words.
+  - `completion` (`table`) Optional. Argument completion specification. Use
+    `items = {...}` for a static list or `get_items =
+    function(ctx) -> {...}` for dynamic candidates.
+    Each candidate has `label` (match/display text),
+    `insertion` (replacement text), and optional
+    `description`. The callback context has `command`
+    (registered slash name), `args` (raw argument string,
+    never the full slash input), `arg` (argument under
+    the cursor), `index` (zero-based argument index),
+    `mode` (active mode id), `session` (stable for one
+    popup session), and `generation` (increases for
+    each request in that session). Optional lifecycle
+    callbacks `on_highlight(ctx, item)`,
+    `on_accept(ctx, item)`, and `on_cancel(ctx)` run in
+    request order. The first result highlights its
+    selected candidate. A later highlight cancels a
+    running highlight callback. Accept runs after its
+    highlight and ends the session without on_cancel.
+    Dismissal, an empty result, or a new completion
+    session calls on_cancel once. `Tab` accepts and
+    keeps editing. `Enter` accepts; press `Enter` again
+    to execute the command.
 
 **Example:**
 
@@ -334,8 +359,14 @@ browsing memory files or toggling settings.
 maki.api.register_command({
   name = "/hello",
   description = "Say hello",
-  handler = function()
-    maki.ui.flash("Hello from my plugin!")
+  nargs = 1,
+  completion = {
+    get_items = function(ctx)
+      return { { label = "world", insertion = "world", description = ctx.mode } }
+    end,
+  },
+  handler = function(opts)
+    maki.ui.flash("Hello " .. opts.args)
   end,
 })
 ```
@@ -617,14 +648,17 @@ Listen for one or more events. Returns an id you can pass to
 
 Built-in events fired by the host: `"TurnStart"`, `"TurnEnd"`,
 `"TurnError"`, `"ToolStart"`, `"ToolDone"`, `"SessionReset"`,
-`"SessionFocusChanged"`, `"SplashShown"`, and `"SplashHidden"`. Plugins can
+`"SessionFocusChanged"`, `"SplashShown"`, `"SplashHidden"`, and
+`"StoreChanged"`. Plugins can
 also fire their own events with `exec_autocmds`.
 
-Each host event carries `data.session_id`. For `"SessionReset"` that
+Except `"StoreChanged"`, each host event carries `data.session_id`. For
+`"SessionReset"` that
 is the session being left behind; the other events name the session now
 running or focused. Tool events also carry `data.tool_id` and `data.tool`.
 `"SessionFocusChanged"` also carries `data.previous_session_id` except on
-initial startup.
+initial startup. `"StoreChanged"` carries `data.registry` and, for
+registrations, `data.key`.
 
 **Parameters:**
 
@@ -774,6 +808,62 @@ for name, info in pairs(maki.api.get_slots()) do
   print(name, info.owner, info.declared)
 end
 ```
+
+
+## maki.store {#maki-store}
+
+Shared key-value store for plugin contributions. A plugin registers
+values under a (registry, key) pair: the same plugin may replace its
+own value, a different plugin cannot claim an existing key, and
+entries are removed automatically when their owning plugin unloads or
+reloads.
+
+Every change fires the `StoreChanged` autocmd event: `data =
+{ registry, key }` on register, `data = { registry }` when an owner
+unloads (one event per touched registry, no ordering guarantee).
+Gather the initial state at load time and keep it fresh from events;
+do not poll.
+
+---
+
+### `maki.store.register()` {#maki-store-register}
+
+```lua
+maki.store.register({registry}, {key}, {value})
+```
+
+Register a value in a store registry under a stable key. The same plugin
+may replace its own value; a different plugin cannot claim an existing
+key. Entries are removed automatically when their plugin unloads or
+reloads.
+
+The change fires the `StoreChanged` autocmd event with
+`data = { registry, key }`, so consumers collect the initial state at
+load time and then stay fresh from events instead of polling.
+
+**Parameters:**
+
+- `{registry}` (`string`) Registry name, e.g. `"splash"`.
+- `{key}` (`string`) Stable entry identifier.
+- `{value}` (`any`) Value exposed to registry consumers; tables may contain functions.
+
+---
+
+### `maki.store.collect()` {#maki-store-collect}
+
+```lua
+maki.store.collect({registry})
+```
+
+Collect the current entries of a store registry. Returns a fresh table
+keyed by each entry's stable identifier; an unknown registry yields an
+empty table.
+
+**Parameters:**
+
+- `{registry}` (`string`) Registry name.
+
+**Returns:** table Map of entry key to registered value.
 
 
 ## maki.agent {#maki-agent}
@@ -2710,6 +2800,49 @@ maki.log.error("failed to connect to API")
 ```
 
 
+## maki.match {#maki-match}
+
+Fuzzy matching via nucleo, the same matcher maki's built-in pickers use.
+
+Use it for type-ahead search over a plugin's own item list.
+
+```lua
+local m = maki.match.fuzzy("gh pr", "gh pr 441 review")
+if m then
+  print(m.score) -- matched codepoint offsets in m.indices
+end
+```
+
+---
+
+### `maki.match.fuzzy()` {#maki-match-fuzzy}
+
+```lua
+maki.match.fuzzy({query}, {text})
+```
+
+Fuzzy match {query} against {text} with nucleo, the same matcher maki's
+built-in pickers use. Every whitespace-separated word in {query} must
+match somewhere in {text}; word order does not matter. An empty or
+whitespace-only query matches everything.
+
+**Parameters:**
+
+- `{query}` (`string`) Search words, whitespace separated.
+- `{text}` (`string`) Text to search in.
+
+**Returns:** (`table|nil`) nil when no word matches. On a match: {score = number, indices = {…}} where indices are the 1-based codepoint offsets of the matched characters, ascending.
+
+**Example:**
+
+```lua
+local m = maki.match.fuzzy("gh pr", "gh pr 441 review")
+if m then
+  print(m.score) -- matched codepoint offsets in m.indices
+end
+```
+
+
 ## maki.api.mode {#maki-api-mode}
 
 `maki.api.mode`: define, override, list, and switch agent modes.
@@ -3167,6 +3300,89 @@ Useful for cleaning up web content fetched with `maki.webfetch`.
 local md, err = maki.text.html_to_markdown("<h1>Hello</h1><p>world</p>")
 if err then return end
 print(md) -- "# Hello\n\nworld"
+```
+
+
+## maki.timer {#maki-timer}
+
+Recurring callbacks on the runtime's timer pump.
+
+Use `set` for anything that must happen every N seconds: demo loops,
+periodic refreshes, watchdogs. Each fire runs as a fresh task, so
+callbacks may sleep or do I/O, and fires land exactly on schedule
+instead of being polled each frame. Timers registered by a plugin are
+dropped when the plugin is unloaded.
+
+```lua
+local id = maki.timer.set(5, function()
+  print("five seconds gone")
+end)
+```
+
+---
+
+### `maki.timer.set()` {#maki-timer-set}
+
+```lua
+maki.timer.set({seconds}, {callback})
+```
+
+Schedule {callback} to run every {seconds} on the runtime's timer pump.
+
+Each fire runs as a fresh task, so the callback may be async (`sleep`,
+fs, ...) and fires exactly when due: no per-frame polling. The callback
+receives the timer's id as its first argument - use it with
+`maki.timer.del` to stop the timer. Do not capture the returned id in the
+callback instead: `local id = maki.timer.set(5, function()
+maki.timer.del(id) end)` captures nil (a Luau value-capture quirk), which
+is why the id is passed as an argument. A fire still running when the
+next deadline arrives runs alongside it; every fire task carries the
+standard 60s async deadline. Deadlines missed while the runtime was busy
+coalesce into a single fire.
+
+Registration is synchronous - nothing runs until the first deadline - so
+calling this from `init.lua` or a command is safe.
+
+**Parameters:**
+
+- `{seconds}` (`number`) Interval between fires, in seconds. Must be a finite number > 0 and < 1e9.
+- `{callback}` (`function`) Called on each fire with the timer id. May be async.
+
+**Returns:** integer Id. Pass to `maki.timer.del` to stop the timer.
+
+**Example:**
+
+```lua
+local runs = 0
+maki.timer.set(1, function(id)
+  runs = runs + 1
+  if runs == 10 then
+    maki.timer.del(id)
+  end
+end)
+```
+
+---
+
+### `maki.timer.del()` {#maki-timer-del}
+
+```lua
+maki.timer.del({id})
+```
+
+Stop the timer {id}. Does nothing for an unknown id. A fire that already
+started keeps running out.
+
+**Parameters:**
+
+- `{id}` (`integer`) Id returned by `maki.timer.set`.
+
+**Example:**
+
+```lua
+local id = maki.timer.set(5, on_tick)
+-- later
+maki.timer.del(id)
 ```
 
 
@@ -4615,6 +4831,43 @@ end
 
 ---
 
+### `maki.ui.open_list_picker()` {#maki-ui-open_list_picker}
+
+```lua
+maki.ui.open_list_picker({items}, {opts?})
+```
+
+Opens a fuzzy-filtering list picker dialog and blocks until the user
+decides. Items are ranked by match score with matched characters
+highlighted, exactly like the built-in pickers. Filter edits keep the
+current row instead of jumping to the best match.
+
+**Parameters:**
+
+- `{items}` (`table`) List of items: plain strings, or `{ label, detail?, section?, section_detail? }` tables.
+- `{opts?}` (`table?`) Options:
+  - `title` (`string`) dialog title.
+  - `footer` (`table`) key-hint pairs for the footer border. Each entry is `{key, label}`.
+  - `cursor` (`integer`) initial 1-based item index. Default 1.
+  - `submit_keys` (`table`) extra key names that confirm the selection, in the "ctrl+o" notation; enter always confirms.
+  - `notify_initial` (`boolean`) fire `on_change` for the initial item. Default false.
+  - `timeout_ms` (`integer`) idle window; when it elapses `on_timeout` fires, and keeps firing while the dialog stays idle. Zero or omitted disables the window.
+  - `on_change` (`function`) `on_change(item, index)` with the original item and its 1-based index, fired when the selection moves.
+  - `on_timeout` (`function`) `on_timeout()` when the idle window elapses.
+
+**Returns:** (`table`) `{ type = "choice", index = n }` with the 1-based index of the chosen item, `{ type = "delete", index = n }` when the user presses Ctrl+D twice on an item (the first press flashes "Press Ctrl+D again to delete"), or `{ type = "close" }` when dismissed with Esc or Ctrl+C, or when the UI channel drops mid-pick.
+
+**Example:**
+
+```lua
+local result = maki.ui.open_list_picker({ "alpha", "beta" }, { title = "Pick" })
+if result.type == "choice" then
+  maki.ui.flash("Picked " .. result.index)
+end
+```
+
+---
+
 ### `maki.ui.open_win()` {#maki-ui-open_win}
 
 ```lua
@@ -5295,20 +5548,6 @@ M.EMPTY_OLD_STRING = "old_string must not be empty"
 function M.replace(content, old_string, new_string, replace_all)
 ```
 
-### `require("maki.list_picker")`
-
-```lua
--- Open a fuzzy-filter picker in a floating window and block until the user
--- decides. {items} is a list of strings or { label, detail? } tables. {opts}:
--- title, footer, cursor (initial index), submit_keys (extra submit keys
--- besides enter). Returns { type = "choice"|"delete", index } or
--- { type = "close" }.
-function ListPicker.open(items, opts)
-ListPicker.split_words = split_words
-ListPicker.matches = matches
-ListPicker.highlight_spans = highlight_spans
-```
-
 ### `require("maki.output_limits")`
 
 ```lua
@@ -5412,6 +5651,21 @@ local function shorten_path(path)
 end
 
 return shorten_path
+```
+
+### `require("maki.spans")`
+
+```lua
+-- Spans: styled slices of a label for fuzzy-match highlighting.
+--
+-- `match_spans` takes 1-based CODEPOINT indices (as returned by
+-- `maki.match.fuzzy`) and slices the label by bytes, so multi-byte titles
+-- (CJK, emoji) get whole-codepoint spans. Adjacent indices merge into one
+-- span.
+
+-- indices: 1-based codepoint offsets, ascending. No indices yields a single
+-- {text, base_style} span.
+function Spans.match_spans(text, indices, base_style, match_style)
 ```
 
 ### `require("maki.test_helpers")`

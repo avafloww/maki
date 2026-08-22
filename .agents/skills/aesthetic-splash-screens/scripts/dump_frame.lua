@@ -3,12 +3,12 @@
 -- without starting maki. Colors are invisible here; for background-color
 -- effects (fire) this looks blank by design.
 --
--- Usage: lua5.1 dump_frame.lua <skin.lua|name> [w] [h] [t] [fade]
+-- Usage: lua5.1 dump_frame.lua <splash.lua|name> [w] [h] [t] [fade]
 --   name (no .lua suffix) is resolved in ~/.config/maki/lua.
 
 local target = arg[1]
 if not target then
-  io.stderr:write("usage: lua5.1 dump_frame.lua <skin.lua|name> [w] [h] [t] [fade]\n")
+  io.stderr:write("usage: lua5.1 dump_frame.lua <splash.lua|name> [w] [h] [t] [fade]\n")
   os.exit(2)
 end
 local w = tonumber(arg[2]) or 80

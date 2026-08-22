@@ -129,14 +129,17 @@ fn parse_string_or_seq(value: Value, what: &str) -> LuaResult<Vec<String>> {
 ///
 /// Built-in events fired by the host: `"TurnStart"`, `"TurnEnd"`,
 /// `"TurnError"`, `"ToolStart"`, `"ToolDone"`, `"SessionReset"`,
-/// `"SessionFocusChanged"`, `"SplashShown"`, and `"SplashHidden"`. Plugins can
+/// `"SessionFocusChanged"`, `"SplashShown"`, `"SplashHidden"`, and
+/// `"StoreChanged"`. Plugins can
 /// also fire their own events with `exec_autocmds`.
 ///
-/// Each host event carries `data.session_id`. For `"SessionReset"` that
+/// Except `"StoreChanged"`, each host event carries `data.session_id`. For
+/// `"SessionReset"` that
 /// is the session being left behind; the other events name the session now
 /// running or focused. Tool events also carry `data.tool_id` and `data.tool`.
 /// `"SessionFocusChanged"` also carries `data.previous_session_id` except on
-/// initial startup.
+/// initial startup. `"StoreChanged"` carries `data.registry` and, for
+/// registrations, `data.key`.
 ///
 /// @param event string|string[] Event name or list of names.
 /// @param opts table Options:

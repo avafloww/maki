@@ -1,14 +1,12 @@
--- Bundled splash-gallery skin, part of the maki distribution.
--- Activate from init.lua with:   require("splash.voronoi")
--- Requiring self-activates it via maki.api.set_slot("splash.render", ...);
--- the module also returns M with M.render(w, h, t, fade) for custom cyclers.
+-- Bundled splash, part of the maki distribution.
+-- Require from init.lua with:   local splash = require("splash.metaballs")
+-- The module returns M with M.description and M.render(w, h, t, fade) and does not activate itself.
 --
--- Voronoi cells splash. Software port of the WGSL "Voronoi Cells" shader
+-- Metaballs splash. Software port of the WGSL "Metaballs" shader from
 
-local TAU = 2.0 * math.pi
-local SCALE = 6.0
 local RAMP = " .:-=+*#%@"
 local M = {}
+M.description = "Glowing metaballs that merge and flow together."
 
 local function theme_or(name, fallback)
   local c = maki.ui.theme_color(name)
@@ -147,51 +145,39 @@ local function ramp_glyph(lum)
   return string.sub(RAMP, gi, gi)
 end
 
-local function h22(px, py)
-  local s1 = math.sin(px * 127.1 + py * 311.7) * 43758.5453
-  local s2 = math.sin(px * 269.5 + py * 183.3) * 43758.5453
-  return s1 - math.floor(s1), s2 - math.floor(s2)
+local function fract(x)
+  return x - math.floor(x)
 end
 
--- Fragment shade for pattern coords (ux, uy); returns r, g, b in [0, 1].
-function M.shade(ux, uy, t)
-  local ipx = math.floor(ux)
-  local ipy = math.floor(uy)
-  local fpx = ux - ipx
-  local fpy = uy - ipy
-  local f1 = 8.0
-  local f2 = 8.0
-  local idx, idy = 0.0, 0.0
-  for gy = -1, 1 do
-    for gx = -1, 1 do
-      local ox, oy = h22(ipx + gx, ipy + gy)
-      local ptx = 0.5 + 0.5 * math.sin(t + TAU * ox)
-      local pty = 0.5 + 0.5 * math.sin(t + TAU * oy)
-      local dx = gx + ptx - fpx
-      local dy = gy + pty - fpy
-      local d = math.sqrt(dx * dx + dy * dy)
-      if d < f1 then
-        f2 = f1
-        f1 = d
-        idx = ipx + gx
-        idy = ipy + gy
-      elseif d < f2 then
-        f2 = d
-      end
-    end
-  end
-  local edge = f2 - f1
-  local rnd = h22(idx, idy)
-  local ph = rnd * TAU + t * 0.5
-  local cr = 0.5 + 0.5 * math.cos(ph + 0.0)
-  local cg = 0.5 + 0.5 * math.cos(ph + 2.0)
-  local cb = 0.5 + 0.5 * math.cos(ph + 4.0)
-  local lines = smoothstep(0.0, 0.08, edge)
-  local bright = 0.4 + 0.6 * f1
-  local rr = (1.0 + (cr * cr - 1.0) * lines) * bright
-  local gg = (0.95 + (cg * cg - 0.95) * lines) * bright
-  local bb = (0.7 + (cb * cb - 0.7) * lines) * bright
-  return rr, gg, bb
+local function ball(ux, uy, bx, by, k)
+  local dx = ux - bx
+  local dy = uy - by
+  return k / math.sqrt(dx * dx + dy * dy + 1e-4)
+end
+
+-- Fragment shade for isotropic coords (nx, ny); returns r, g, b in [0, 1].
+function M.shade(nx, ny, t)
+  local v = 0.0
+  v = v + ball(nx, ny, math.sin(t * 0.7) * 0.7, math.cos(t * 0.9) * 0.7, 0.35)
+  v = v + ball(nx, ny, math.cos(t * 1.1) * 0.8, math.sin(t * 0.6) * 0.8, 0.30)
+  v = v + ball(nx, ny, math.sin(t * 0.5 + 2.0) * 0.5, math.cos(t * 0.8 + 1.0) * 0.5, 0.25)
+  v = v + ball(nx, ny, math.sin(t * 0.33 + 4.0) * 0.9, math.cos(t * 0.41 + 2.0) * 0.6, 0.22)
+  local edge = smoothstep(1.15, 1.25, v)
+  local core = smoothstep(1.25, 2.4, v)
+  local r = 0.03 + (0.1 - 0.03) * edge
+  local g = 0.02 + (0.4 - 0.02) * edge
+  local b = 0.06 + (0.9 - 0.06) * edge
+  r = r + (0.6 - r) * core
+  g = g + (0.9 - g) * core
+  b = b + (1.0 - b) * core
+  local glow = math.exp(-math.abs(v - 1.2) * 3.0) * 0.8
+  r = r + 0.3 * glow
+  g = g + 0.7 * glow
+  b = b + 1.0 * glow
+  local gx = math.abs(fract(nx * 8.0) - 0.5)
+  local gy = math.abs(fract(ny * 8.0) - 0.5)
+  local gridline = 0.02 * smoothstep(0.48, 0.5, gx > gy and gx or gy)
+  return r + gridline, g + gridline, b + gridline
 end
 
 function M.render(w, h, t, fade)
@@ -204,17 +190,16 @@ function M.render(w, h, t, fade)
   local grid = new_grid()
   for y = 1, h do
     local row = grid[y]
-    local uy = ((y - 0.5) / h) * SCALE + t * 0.1
+    local ny = (2 * (y - 0.5) - h) / h
     for x = 1, w do
-      local ux = ((x - 0.5) / (2 * h)) * SCALE + t * 0.2
-      local r, g, b = M.shade(ux, uy, t)
+      local nx = ((x - 0.5) - w / 2) / h
+      local r, g, b = M.shade(nx, ny, t)
       row[x] = {
         glyph = ramp_glyph(0.2126 * r * f + 0.7152 * g * f + 0.0722 * b * f),
         style = shade_style(r, g, b, f),
       }
     end
   end
-  place_text(grid, H - 1, math.floor((W - 7) / 2) + 1, "voronoi", color(rgb_to_hex(FG, 0.5 * f)))
   place_text(
     grid,
     1,
@@ -224,9 +209,5 @@ function M.render(w, h, t, fade)
   )
   return build_rows(grid)
 end
-
-maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
-  return M.render(w, h, t, fade)
-end)
 
 return M

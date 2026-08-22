@@ -2589,6 +2589,161 @@ fn register_command_happy_path() {
     assert_eq!(snap.commands[0].plugin.as_ref(), "cmd_plugin");
 }
 
+#[test]
+fn command_completion_static_dynamic_and_lifecycle_hooks() {
+    let host = PluginHost::new(fresh_registry()).unwrap();
+    host.load_source(
+        "completion_plugin",
+        r#"
+        maki.api.register_command({
+            name = "/deploy",
+            nargs = 1,
+            completion = {
+                get_items = function(ctx)
+                    return {{ label = ctx.arg .. ":dynamic", insertion = "staging" }}
+                end,
+                on_highlight = function(ctx, item)
+                    maki.ui.flash("highlight:" .. ctx.session .. ":" .. ctx.generation .. ":" .. item.insertion)
+                end,
+                on_accept = function(_, item) maki.ui.flash("accept:" .. item.insertion) end,
+                on_cancel = function(ctx) maki.ui.flash("cancel:" .. ctx.command) end,
+            },
+            handler = function() end,
+        })
+        maki.api.register_command({
+            name = "/static",
+            nargs = 1,
+            completion = { items = {{ label = "prod", insertion = "production" }} },
+            handler = function() end,
+        })
+        "#,
+    )
+    .unwrap();
+    let handle = host.event_handle();
+    let context = maki_lua::CommandArgumentContext {
+        command: Arc::from("/deploy"),
+        plugin: Arc::from("completion_plugin"),
+        args: "sta".into(),
+        arg: "sta".into(),
+        index: 0,
+        mode: "build".into(),
+        session: 4,
+        generation: 6,
+    };
+    let items = handle
+        .collect_command_argument_items(context.clone(), maki_agent::CancelToken::none())
+        .unwrap()
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(items[0].insertion, "staging");
+
+    let item = items[0].clone();
+    let flashes = host.ui_action_rx();
+    let mut messages = Vec::new();
+    for (event, item) in [
+        (
+            maki_lua::CommandArgumentLifecycle::Highlight,
+            Some(item.clone()),
+        ),
+        (maki_lua::CommandArgumentLifecycle::Accept, Some(item)),
+        (maki_lua::CommandArgumentLifecycle::Cancel, None),
+    ] {
+        handle.command_argument_lifecycle(
+            context.clone(),
+            event,
+            item,
+            maki_agent::CancelToken::none(),
+        );
+        match flashes.recv_timeout(Duration::from_secs(5)).unwrap() {
+            maki_lua::UiAction::Flash(message) => messages.push(message),
+            _ => panic!("expected flash"),
+        }
+    }
+    assert_eq!(
+        messages,
+        ["highlight:4:6:staging", "accept:staging", "cancel:/deploy"]
+    );
+
+    let static_items = handle
+        .collect_command_argument_items(
+            maki_lua::CommandArgumentContext {
+                command: Arc::from("/static"),
+                plugin: Arc::from("completion_plugin"),
+                args: String::new(),
+                arg: String::new(),
+                index: 0,
+                mode: "build".into(),
+                session: 8,
+                generation: 1,
+            },
+            maki_agent::CancelToken::none(),
+        )
+        .unwrap()
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(static_items[0].insertion, "production");
+}
+
+#[test]
+fn command_completion_timeout_returns_empty_and_keeps_host_live() {
+    let host = PluginHost::new(fresh_registry()).unwrap();
+    host.load_source(
+        "slow_completion",
+        r#"
+        maki.api.register_command({
+            name = "/slow",
+            nargs = 1,
+            completion = {
+                get_items = function()
+                    while true do end
+                end,
+            },
+            handler = function() maki.ui.flash("recovered") end,
+        })
+        "#,
+    )
+    .unwrap();
+    let handle = host.event_handle();
+    let started = std::time::Instant::now();
+    let items = handle
+        .collect_command_argument_items(
+            maki_lua::CommandArgumentContext {
+                command: Arc::from("/slow"),
+                plugin: Arc::from("slow_completion"),
+                args: String::new(),
+                arg: String::new(),
+                index: 0,
+                mode: "build".into(),
+                session: 1,
+                generation: 1,
+            },
+            maki_agent::CancelToken::none(),
+        )
+        .unwrap()
+        .recv_timeout(Duration::from_secs(4))
+        .expect("completion timeout did not reply");
+    assert!(items.is_empty());
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "completion exceeded its bounded deadline"
+    );
+
+    let flashes = host.ui_action_rx();
+    handle
+        .run_command_for_test(
+            Arc::from("slow_completion"),
+            Arc::from("/slow"),
+            String::new(),
+            0,
+        )
+        .recv_timeout(Duration::from_secs(5))
+        .expect("timed-out completion stopped the Lua host");
+    assert!(matches!(
+        flashes.recv_timeout(Duration::from_secs(5)),
+        Ok(maki_lua::UiAction::Flash(message)) if message == "recovered"
+    ));
+}
+
 #[test_case::test_case("" => 0 ; "default_zero")]
 #[test_case::test_case("nargs = 0," => 0 ; "zero")]
 #[test_case::test_case("nargs = 1," => 1 ; "one")]
@@ -4043,6 +4198,176 @@ fn job_callbacks_fire_while_command_handler_parked() {
     assert!(matches!(action, maki_lua::UiAction::Flash(msg) if msg == "job:hi"));
 }
 
+/// `maki.ui.open_list_picker` blocks the command handler until the host
+/// dialog replies; `on_change`/`on_timeout` fire from picker events sent by
+/// id, and the reply carries the 1-based original index.
+#[test]
+fn host_list_picker_roundtrip() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use maki_lua::{PickerEvent, PickerResult, UiAction};
+
+    const PICKER_TIMEOUT_MS: i64 = 5000;
+    let host = PluginHost::new(fresh_registry()).unwrap();
+    host.load_source(
+        "p",
+        r#"
+        maki.api.register_command({
+            name = "/pick",
+            description = "host list picker roundtrip",
+            handler = function()
+                local result = maki.ui.open_list_picker(
+                    { "alpha", { label = "beta", detail = "b-d", section = "s" } },
+                    {
+                        title = "Pick",
+                        cursor = 2,
+                        submit_keys = { "ctrl+o" },
+                        timeout_ms = 5000,
+                        footer = { { "Enter", "open" }, { "Ctrl+O", "edit" } },
+                        on_change = function(item, index)
+                            maki.ui.flash("change:" .. tostring(item.label or item) .. ":" .. index)
+                        end,
+                        on_timeout = function() maki.ui.flash("timeout") end,
+                    }
+                )
+                maki.ui.flash("result:" .. result.type .. ":" .. tostring(result.index))
+            end,
+        })
+        "#,
+    )
+    .unwrap();
+    let rx = host.ui_action_rx();
+    let handle = host.event_handle();
+    let completion =
+        handle.run_command_for_test(Arc::from("p"), Arc::from("/pick"), String::new(), 0);
+
+    let UiAction::OpenListPicker {
+        id,
+        items,
+        config,
+        reply_tx,
+    } = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("OpenListPicker action never arrived")
+    else {
+        panic!("expected an OpenListPicker action");
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].label, "alpha");
+    assert_eq!(items[1].label, "beta");
+    assert_eq!(items[1].detail.as_deref(), Some("b-d"));
+    assert_eq!(items[1].section.as_deref(), Some("s"));
+    assert_eq!(config.title.as_deref(), Some("Pick"));
+    assert_eq!(
+        config.cursor,
+        Some(1),
+        "1-based Lua cursor decodes to 0-based"
+    );
+    assert_eq!(
+        config.submit_keys,
+        vec![KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)]
+    );
+    assert_eq!(
+        config.timeout,
+        Some(Duration::from_millis(PICKER_TIMEOUT_MS as u64))
+    );
+    assert_eq!(
+        config.footer,
+        Some(vec![
+            ("Enter".to_string(), "open".to_string()),
+            ("Ctrl+O".to_string(), "edit".to_string())
+        ])
+    );
+
+    handle.picker_event(id, PickerEvent::Change { index: 0 });
+    let UiAction::Flash(msg) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("expected a Flash action from on_change");
+    };
+    assert_eq!(
+        msg, "change:alpha:1",
+        "on_change must get the original item and 1-based index"
+    );
+
+    handle.picker_event(id, PickerEvent::Timeout);
+    let UiAction::Flash(msg) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("expected a Flash action from on_timeout");
+    };
+    assert_eq!(msg, "timeout");
+
+    reply_tx
+        .send(PickerResult::Choice(1))
+        .expect("reply channel closed while the handler was still parked");
+    completion
+        .recv_timeout(Duration::from_secs(5))
+        .expect("picker reply must complete the command");
+    let UiAction::Flash(msg) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("expected a Flash action for the picker result");
+    };
+    assert_eq!(
+        msg, "result:choice:2",
+        "choice must map to the 1-based original index"
+    );
+
+    handle.picker_event(id, PickerEvent::Done);
+}
+
+/// A dead UI process (reply sender dropped, `Done` never sent) unblocks the
+/// parked call with `close` and drains the callback entry: a late
+/// `Change` must not fire `on_change`.
+#[test]
+fn host_list_picker_ui_drop_drains_callbacks() {
+    use maki_lua::{PickerEvent, UiAction};
+
+    const QUIET: Duration = Duration::from_millis(200);
+    let host = PluginHost::new(fresh_registry()).unwrap();
+    host.load_source(
+        "p",
+        r#"
+        maki.api.register_command({
+            name = "/pick",
+            description = "host list picker drop path",
+            handler = function()
+                local result = maki.ui.open_list_picker({ "alpha" }, {
+                    on_change = function(item, index)
+                        maki.ui.flash("change:" .. index)
+                    end,
+                })
+                maki.ui.flash("result:" .. result.type)
+            end,
+        })
+        "#,
+    )
+    .unwrap();
+    let rx = host.ui_action_rx();
+    let handle = host.event_handle();
+    let completion =
+        handle.run_command_for_test(Arc::from("p"), Arc::from("/pick"), String::new(), 0);
+
+    let UiAction::OpenListPicker { id, reply_tx, .. } = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("OpenListPicker action never arrived")
+    else {
+        panic!("expected an OpenListPicker action");
+    };
+
+    drop(reply_tx);
+    completion
+        .recv_timeout(Duration::from_secs(5))
+        .expect("dropped reply must unblock the handler");
+    let UiAction::Flash(msg) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("expected a Flash action for the picker result");
+    };
+    assert_eq!(
+        msg, "result:close",
+        "a dropped UI must report a clean dismiss"
+    );
+
+    handle.picker_event(id, PickerEvent::Change { index: 0 });
+    assert!(
+        rx.recv_timeout(QUIET).is_err(),
+        "drained entry must not fire on_change"
+    );
+}
+
 /// read tool requires offset and limit; missing fields should fail schema validation.
 mod read_tool_required_params {
     use super::*;
@@ -4219,7 +4544,7 @@ mod read_tool_required_params {
     }
 }
 
-// ---- splash plugin (home-screen) ----
+// ---- splashes_default plugin (home-screen) ----
 
 fn wait_for_splash_text(handle: &maki_lua::EventHandle, needle: &str) -> maki_lua::SplashFrame {
     // Each timed-out pull leaves a render queued on the host, so a tight loop
@@ -4253,7 +4578,7 @@ fn frame_has_text(frame: &maki_lua::SplashFrame, needle: &str) -> bool {
 
 #[test]
 fn test_splash_host_boots_and_serves_frames() {
-    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     let frame = wait_for_splash_text(&handle, "luna-maki");
     assert_eq!(frame.width, 80);
     assert_eq!(frame.height, 20);
@@ -4262,7 +4587,7 @@ fn test_splash_host_boots_and_serves_frames() {
 
 #[test]
 fn test_splash_slot_default() {
-    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     handle.set_version("0.4.8-luna", None);
     let frame = wait_for_splash_text(&handle, "luna-maki");
     assert!(frame_has_text(&frame, "luna-maki"), "{frame:?}");
@@ -4286,7 +4611,7 @@ fn test_splash_slot_default() {
 
 #[test]
 fn test_splash_slot_override() {
-    let (handle, guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     guard
         .host()
         .load_source(
@@ -4326,7 +4651,7 @@ end)
 
 #[test]
 fn test_splash_renderer_error_suppresses() {
-    let (handle, guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     guard
         .host()
         .load_source(

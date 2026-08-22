@@ -243,7 +243,7 @@ impl ModelPicker {
                 PickerAction::Consumed => ModelPickerAction::Consumed,
                 PickerAction::Select(entry) => ModelPickerAction::Select(entry.spec),
                 PickerAction::Close => ModelPickerAction::Close,
-                PickerAction::Toggle(..) => ModelPickerAction::Consumed,
+                PickerAction::Toggle(..) | PickerAction::Delete(..) => ModelPickerAction::Consumed,
             }
         }
     }

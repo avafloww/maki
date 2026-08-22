@@ -4,7 +4,7 @@
 -- while background agents keep working.
 
 local TextInput = require("maki.text_input")
-local ListPicker = require("maki.list_picker")
+local Spans = require("maki.spans")
 
 local FILTER_PREFIX = "❯ "
 local RENAME_PREFIX = "Rename: "
@@ -95,10 +95,6 @@ local function update_footer()
   board.win:set_config({ footer = footer })
 end
 
-local function filter_words()
-  return ListPicker.split_words(board.input:value())
-end
-
 local function sel_index()
   for i, s in ipairs(board.items) do
     if s.id == board.sel_id then
@@ -119,10 +115,13 @@ end
 
 local function apply_filter()
   local prev_pos = sel_index() or 1
-  local words = filter_words()
+  -- Rows keep their frozen order, so the score is ignored: match/no-match
+  -- plus the indices are what the board needs.
+  local query = board.input:value()
   board.items = {}
   for _, s in ipairs(board.all) do
-    if ListPicker.matches(s.title, words) then
+    s._match = maki.match.fuzzy(query, s.title)
+    if s._match then
       board.items[#board.items + 1] = s
     end
   end
@@ -167,7 +166,6 @@ local function render()
     board.win:set_config({ reserved_top = board.reserved })
   end
   local cursor_line = board.reserved
-  local words = filter_words()
   for i, s in ipairs(board.items) do
     local selected = s.id == board.sel_id
     local icon, icon_style, spinning = icon_of(s)
@@ -183,7 +181,11 @@ local function render()
       icon_style = "spinner:" .. icon_style
     end
     local line = { { "  ", base }, { icon, icon_style } }
-    for _, sp in ipairs(ListPicker.highlight_spans(s.title, words, base, selected and "match_selected" or "match")) do
+    for _, sp in
+      ipairs(
+        Spans.match_spans(s.title, s._match and s._match.indices or {}, base, selected and "match_selected" or "match")
+      )
+    do
       line[#line + 1] = sp
     end
     local used = 2 + dispw(icon) + dispw(s.title)

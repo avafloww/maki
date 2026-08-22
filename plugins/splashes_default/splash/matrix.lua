@@ -1,7 +1,6 @@
--- Bundled splash-gallery skin, part of the maki distribution.
--- Activate from init.lua with:   require("splash.matrix")
--- Requiring self-activates it via maki.api.set_slot("splash.render", ...);
--- the module also returns M with M.render(w, h, t, fade) for custom cyclers.
+-- Bundled splash, part of the maki distribution.
+-- Require from init.lua with:   local splash = require("splash.matrix")
+-- The module returns M with M.description and M.render(w, h, t, fade) and does not activate itself.
 --
 -- Matrix rain splash. Green falling code with per-column state stepped by
 -- frame dt; resets when the home screen shows again (SplashShown). The
@@ -10,8 +9,8 @@
 
 local GLYPHS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 local TRAIL = 6
-local LABEL = "matrix"
 local M = {}
+M.description = "Green falling-code rain with persistent animated trails."
 
 local state = { cols = {}, last_t = nil }
 
@@ -93,16 +92,9 @@ function M.render(w, h, t, fade)
     end
   end
 
-  -- furniture: label bottom-center, version top-right
-  local lx = math.floor((w - #LABEL) / 2) + 1
-  if h >= 2 and lx >= 1 then
-    for i = 1, #LABEL do
-      grid[h - 1][lx + i - 1] = { ch = string.sub(LABEL, i, i), fg = shade("#c8ffd0", fade * 0.55) }
-    end
-  end
   local ver = "v" .. maki.version().current
   if h >= 1 and w - #ver >= 1 then
-    local vx = w - #ver
+    local vx = w - #ver + 1
     for i = 1, #ver do
       grid[1][vx + i - 1] = { ch = string.sub(ver, i, i), fg = shade("#00ff41", fade) }
     end
@@ -133,9 +125,5 @@ function M.render(w, h, t, fade)
   end
   return rows
 end
-
-maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
-  return M.render(w, h, t, fade)
-end)
 
 return M

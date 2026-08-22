@@ -11,12 +11,20 @@ use strum::{EnumString, VariantNames};
 pub(crate) const NO_UI_ERR: &str = "no interactive UI attached";
 const UI_DROPPED_ERR: &str = "ui event loop dropped the request";
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CommandArgumentItem {
+    pub label: String,
+    pub insertion: String,
+    pub description: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct LuaCommandInfo {
     pub name: Arc<str>,
     pub description: Arc<str>,
     pub plugin: Arc<str>,
     pub max_args: usize,
+    pub has_argument_completion: bool,
 }
 
 #[derive(Clone, Default)]
@@ -127,6 +135,10 @@ pub(crate) struct CommandEntry {
     pub handler: RegistryKey,
     pub description: Arc<str>,
     pub max_args: usize,
+    pub argument_completion: Option<RegistryKey>,
+    pub completion_on_highlight: Option<RegistryKey>,
+    pub completion_on_accept: Option<RegistryKey>,
+    pub completion_on_cancel: Option<RegistryKey>,
 }
 
 pub(crate) type CommandHandlerMap = HashMap<Arc<str>, HashMap<Arc<str>, CommandEntry>>;
@@ -140,6 +152,7 @@ pub(crate) fn publish_command_snapshot(map: &CommandHandlerMap, writer: &LuaComm
                 description: Arc::clone(&entry.description),
                 plugin: Arc::clone(plugin),
                 max_args: entry.max_args,
+                has_argument_completion: entry.argument_completion.is_some(),
             })
         })
         .collect();
@@ -459,6 +472,15 @@ pub enum UiAction {
         event_tx: flume::Sender<WinEvent>,
         cmd_rx: flume::Receiver<WinCommand>,
     },
+    /// A plugin's list-picker dialog. `id` keys the callback store in Lua
+    /// app-data: mlua `Function`s cannot cross this channel, so the host
+    /// reports dialog events by id instead.
+    OpenListPicker {
+        id: u64,
+        items: Vec<crate::api::util::picker::PickerItemSpec>,
+        config: crate::api::util::picker::PickerConfig,
+        reply_tx: flume::Sender<crate::api::util::picker::PickerResult>,
+    },
     Flash(String),
     OpenEditor {
         path: PathBuf,
@@ -519,6 +541,10 @@ mod tests {
             handler: key,
             description: Arc::from(desc),
             max_args: 0,
+            argument_completion: None,
+            completion_on_highlight: None,
+            completion_on_accept: None,
+            completion_on_cancel: None,
         }
     }
 

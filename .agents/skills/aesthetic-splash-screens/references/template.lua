@@ -1,11 +1,11 @@
--- Splash skin template. Copy this file to your new skin name, set LABEL,
--- implement M.shade (full-cell skins) or draw into the grid (sparse skins),
+-- Splash template. Copy this file to your new splash name, set LABEL,
+-- implement M.shade (full-cell splashes) or draw into the grid (sparse splashes),
 -- and adjust the tiny-area guard. Delete the helpers you don't use (this
 -- file ships the full toolbox: atan2, smoothstep, hash01, ...). Conventions
 -- live in .agents/skills/aesthetic-splash-screens/SKILL.md; scene composition
 -- building blocks live in references/recipes.md.
 
-local LABEL = "myskin"
+local LABEL = "mysplash"
 local RAMP = " .:-=+*#%@"
 local M = {}
 
@@ -176,8 +176,8 @@ local function hash01(i, salt)
   return ((i * 2654435761 + salt * 40503) % 4294967296) / 4294967296
 end
 
--- Full-cell skins: return r, g, b in [0, 1] for isotropic coords (nx, ny).
--- Sparse skins: skip this and draw into the grid directly in M.render.
+-- Full-cell splashes: return r, g, b in [0, 1] for isotropic coords (nx, ny).
+-- Sparse splashes: skip this and draw into the grid directly in M.render.
 function M.shade(nx, ny, t)
   local r = math.sqrt(nx * nx + ny * ny)
   local v = 0.5 + 0.5 * math.sin(r * 12.0 - t * 2.0)

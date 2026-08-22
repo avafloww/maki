@@ -38,6 +38,7 @@ use crate::components::keybindings::key;
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
 use crate::components::login_picker::{LoginPicker, LoginPickerAction};
 use crate::components::lua_float::FloatManager;
+use crate::components::lua_picker::{LuaPicker, LuaPickerAction};
 use crate::components::mcp_picker::{McpPicker, McpPickerAction};
 use crate::components::model_picker::{ModelPicker, ModelPickerAction};
 use crate::components::permission_prompt::PermissionPrompt;
@@ -199,6 +200,7 @@ pub struct App {
     pub(super) command_palette: CommandPalette,
     pub(super) task_picker: ListPicker<TaskEntry>,
     pub(super) task_picker_original: Option<usize>,
+    pub(super) lua_picker: LuaPicker,
     pub(super) theme_picker: ThemePicker,
     pub(super) model_picker: ModelPicker,
     pub(super) login_picker: LoginPicker,
@@ -298,6 +300,7 @@ impl App {
             ),
             task_picker: ListPicker::new(),
             task_picker_original: None,
+            lua_picker: LuaPicker::new(lua_event_handle.clone()),
             theme_picker: ThemePicker::new(),
             model_picker: ModelPicker::new(Arc::clone(&available_models)),
             login_picker: LoginPicker::new(),
@@ -579,7 +582,7 @@ impl App {
             return None;
         }
         if key::QUIT.matches(key) {
-            self.command_palette.close();
+            self.command_palette.close(&self.lua_event_handle);
             return Some(if !self.is_main_chat() || self.input_box.is_empty() {
                 if self.status == Status::Streaming {
                     return Some(self.handle_cancel());
@@ -658,6 +661,19 @@ impl App {
             return Some(vec![]);
         }
 
+        if self.lua_picker.is_open() {
+            return Some(match self.lua_picker.handle_key(key) {
+                LuaPickerAction::Confirming(msg) => {
+                    self.flash(msg);
+                    vec![]
+                }
+                LuaPickerAction::Consumed
+                | LuaPickerAction::Choice(..)
+                | LuaPickerAction::Delete(..)
+                | LuaPickerAction::Close => vec![],
+            });
+        }
+
         if self.float_mgr.handle_key(key) {
             return Some(vec![]);
         }
@@ -700,6 +716,12 @@ impl App {
                         self.input_box.handle_paste_with_spaces(&path)
                     {
                         self.command_palette.sync(&val);
+                        self.command_palette.sync_arguments(
+                            &val,
+                            self.input_box.buffer.cursor_byte_offset(),
+                            &self.lua_event_handle,
+                            &self.state.mode.id_key(),
+                        );
                         self.sync_file_completion();
                     }
                     vec![]
@@ -734,7 +756,9 @@ impl App {
                 return Some(vec![]);
             }
             return Some(match self.task_picker.handle_key(key) {
-                PickerAction::Consumed | PickerAction::Toggle(..) => vec![],
+                PickerAction::Consumed | PickerAction::Toggle(..) | PickerAction::Delete(..) => {
+                    vec![]
+                }
                 PickerAction::Select(entry) => {
                     self.task_picker_original = None;
                     self.active_chat = entry.chat_index;
@@ -970,26 +994,56 @@ impl App {
                 self.start_image_paste();
             } else if let InputAction::PaletteSync(val) = self.input_box.handle_key(key) {
                 self.command_palette.sync(&val);
+                self.command_palette.sync_arguments(
+                    &val,
+                    self.input_box.buffer.cursor_byte_offset(),
+                    &self.lua_event_handle,
+                    &self.state.mode.id_key(),
+                );
                 self.sync_file_completion();
             }
             return vec![];
         }
 
-        match self
-            .command_palette
-            .handle_key(key, &self.input_box.buffer.value())
-        {
+        match self.command_palette.handle_key(
+            key,
+            &self.input_box.buffer.value(),
+            &self.lua_event_handle,
+        ) {
             CommandAction::Consumed => return vec![],
+            CommandAction::SelectionChanged => {
+                let input = self.input_box.buffer.value();
+                self.command_palette.sync_arguments(
+                    &input,
+                    self.input_box.buffer.cursor_byte_offset(),
+                    &self.lua_event_handle,
+                    &self.state.mode.id_key(),
+                );
+                return vec![];
+            }
             CommandAction::Execute(cmd) => {
                 self.input_box.discard();
                 self.file_completion.close();
                 return self.execute_command(cmd, 0);
             }
-            CommandAction::Complete(text) => {
+            CommandAction::AcceptArgument { text, cursor } => {
                 self.command_palette.sync(&text);
                 self.refresh_at_ref_labels(&text);
-                self.input_box.set_input(text);
-                self.input_box.buffer.move_to_end();
+                self.input_box.set_input(text.clone());
+                self.input_box.buffer.set_cursor_byte_offset(cursor);
+                return vec![];
+            }
+            CommandAction::Complete { text, cursor } => {
+                self.command_palette.sync(&text);
+                self.refresh_at_ref_labels(&text);
+                self.input_box.set_input(text.clone());
+                self.input_box.buffer.set_cursor_byte_offset(cursor);
+                self.command_palette.sync_arguments(
+                    &text,
+                    cursor,
+                    &self.lua_event_handle,
+                    &self.state.mode.id_key(),
+                );
                 return vec![];
             }
             CommandAction::Passthrough => {}
@@ -1018,6 +1072,12 @@ impl App {
             }
             InputAction::PaletteSync(val) => {
                 self.command_palette.sync(&val);
+                self.command_palette.sync_arguments(
+                    &val,
+                    self.input_box.buffer.cursor_byte_offset(),
+                    &self.lua_event_handle,
+                    &self.state.mode.id_key(),
+                );
                 self.sync_file_completion();
                 vec![]
             }
@@ -1150,6 +1210,12 @@ impl App {
             .replace_range_on_current_line(start, end, &replacement);
         let val = self.input_box.buffer.value();
         self.command_palette.sync(&val);
+        self.command_palette.sync_arguments(
+            &val,
+            self.input_box.buffer.cursor_byte_offset(),
+            &self.lua_event_handle,
+            &self.state.mode.id_key(),
+        );
     }
 
     /// Typing path for a focused subagent tab: characters go into the shared
@@ -1804,7 +1870,7 @@ impl App {
         vec![]
     }
 
-    fn overlays(&self) -> [&dyn Overlay; 13] {
+    fn overlays(&self) -> [&dyn Overlay; 14] {
         [
             &self.help_modal,
             &self.usage_modal,
@@ -1813,6 +1879,7 @@ impl App {
             &self.search_modal,
             &self.file_picker,
             &self.task_picker,
+            &self.lua_picker,
             &self.rewind_picker,
             &self.theme_picker,
             &self.model_picker,
@@ -1822,7 +1889,7 @@ impl App {
         ]
     }
 
-    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 13] {
+    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 14] {
         [
             &mut self.help_modal,
             &mut self.usage_modal,
@@ -1831,6 +1898,7 @@ impl App {
             &mut self.search_modal,
             &mut self.file_picker,
             &mut self.task_picker,
+            &mut self.lua_picker,
             &mut self.rewind_picker,
             &mut self.theme_picker,
             &mut self.model_picker,
@@ -1867,6 +1935,7 @@ impl App {
     }
 
     pub fn close_all_overlays(&mut self) {
+        self.command_palette.close(&self.lua_event_handle);
         self.overlays_mut().iter_mut().for_each(|o| o.close());
     }
 
@@ -1875,6 +1944,7 @@ impl App {
     pub fn tick(&mut self) -> Dirty {
         // `|` never short-circuits: every poller must run on every tick.
         let mut dirty = self.float_mgr.tick()
+            | self.lua_picker.tick()
             | self.tick_edge_scroll()
             | self.tick_error_expiry()
             | self.poll_image_paste()
@@ -1886,7 +1956,8 @@ impl App {
             | self.usage_modal.poll(&self.usage_slot)
             | self.hints.poll(self.hint_reader.load_full())
             | self.tick_file_picker()
-            | self.tick_file_completion();
+            | self.tick_file_completion()
+            | self.command_palette.poll_arguments(&self.lua_event_handle);
         dirty |= self.tick_chats();
         while let Some(shown) = self.chats[0].take_splash_event() {
             // The autocmd is fire-and-forget; repainting is the frame pull's
@@ -1982,6 +2053,9 @@ impl App {
         if self.permission_prompt.handle_paste(text) {
             return;
         }
+        if self.lua_picker.handle_paste(text) {
+            return;
+        }
         if self.float_mgr.handle_paste(text) {
             return;
         }
@@ -2012,6 +2086,12 @@ impl App {
         }
         if let InputAction::PaletteSync(val) = self.input_box.handle_paste(text) {
             self.command_palette.sync(&val);
+            self.command_palette.sync_arguments(
+                &val,
+                self.input_box.buffer.cursor_byte_offset(),
+                &self.lua_event_handle,
+                &self.state.mode.id_key(),
+            );
             self.sync_file_completion();
         }
     }

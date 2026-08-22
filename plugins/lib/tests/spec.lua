@@ -61,6 +61,85 @@ case("truncate_trailing_newlines_counted", function()
   assert(result:find("%[truncated"), "trailing newlines should count as lines")
 end)
 
+-- maki.match.fuzzy tests (mirror of the maki-lua unit tests)
+
+case("match_fuzzy_empty_query_matches_all", function()
+  local m = maki.match.fuzzy("", "hello world")
+  assert(m, "empty query must match")
+  eq(m.score, 0)
+  eq(#m.indices, 0)
+  local w = maki.match.fuzzy("   ", "hello world")
+  assert(w, "whitespace query must match")
+  eq(w.score, 0)
+  eq(#w.indices, 0)
+end)
+
+case("match_fuzzy_no_match_returns_nil", function()
+  eq(maki.match.fuzzy("xyz", "hello world"), nil)
+  eq(maki.match.fuzzy("hello xyz", "hello world"), nil)
+end)
+
+case("match_fuzzy_returns_1based_codepoint_indices", function()
+  local m = maki.match.fuzzy("ap", "apple")
+  assert(m, "expected match")
+  eq(#m.indices, 2)
+  eq(m.indices[1], 1)
+  eq(m.indices[2], 2)
+end)
+
+case("match_fuzzy_multi_term_order_independent", function()
+  assert(maki.match.fuzzy("441 review", "review gh pr 441"), "order must not matter")
+end)
+
+case("match_fuzzy_smart_case", function()
+  eq(maki.match.fuzzy("APPLE", "apple pie"), nil)
+  assert(maki.match.fuzzy("apple", "Apple pie"), "lowercase query is case-insensitive")
+end)
+
+case("match_fuzzy_cjk_codepoint_indices", function()
+  local m = maki.match.fuzzy("好世", "你好世界")
+  assert(m, "expected CJK match")
+  eq(#m.indices, 2)
+  eq(m.indices[1], 2)
+  eq(m.indices[2], 3)
+end)
+
+case("match_fuzzy_indices_are_codepoints_not_graphemes", function()
+  local m = maki.match.fuzzy("a", "👍🏽abc")
+  assert(m, "expected match")
+  eq(#m.indices, 1)
+  eq(m.indices[1], 3, "codepoint position, not grapheme position")
+end)
+
+case("match_fuzzy_contiguous_beats_scattered", function()
+  local tight = maki.match.fuzzy("app", "apple")
+  local loose = maki.match.fuzzy("app", "axpyp")
+  assert(tight and loose, "both must match")
+  assert(tight.score > loose.score, "contiguous should score higher")
+end)
+
+case("match_fuzzy_repeated_terms_dedup_indices", function()
+  local m = maki.match.fuzzy("a a", "banana")
+  assert(m, "expected match")
+  eq(#m.indices, 1)
+  eq(m.indices[1], 2)
+end)
+
+case("match_fuzzy_non_string_args_error", function()
+  local ok, err = pcall(maki.match.fuzzy, 123, "hello")
+  assert(not ok, "number query should error")
+  assert(
+    tostring(err):find("match.fuzzy: query: expected string, got integer", 1, true),
+    "error names the query arg: " .. tostring(err)
+  )
+  local ok2, err2 = pcall(maki.match.fuzzy, "hello", {})
+  assert(not ok2, "table text should error")
+  assert(
+    tostring(err2):find("match.fuzzy: text: expected string, got table", 1, true),
+    "error names the text arg: " .. tostring(err2)
+  )
+end)
+
 -- ToolView tests
 
 case("tool_view_tail_keeps_last_n", function()
@@ -1137,8 +1216,6 @@ case("text_input_trace_cases", function()
   end
 end)
 
-local ListPicker = require("maki.list_picker")
-
 case("set_highlight_number_width_scales", function()
   local buf = mock_buf()
   local view = ToolView.new(buf, { max_lines = 200 })
@@ -1182,186 +1259,43 @@ case("set_highlight_toggle_keeps_lines_and_collapses_back", function()
   eq(buf.lines[4][1][1], "... (2 lines) (click to expand)")
 end)
 
-local render_lines = ListPicker._render_lines
+local Spans = require("maki.spans")
 
-case("render_lines_string_items_basic", function()
-  local lines = render_lines({ "alpha", "beta" }, 1, 40)
-  eq(#lines, 2)
-  eq(lines[1][1][1], "  alpha")
-  eq(lines[1][1][2], "selected")
-  eq(lines[2][1][2], "item")
-end)
-
-case("render_lines_table_items_with_detail", function()
-  local items = {
-    { label = "foo", detail = "(3 bytes)" },
-    { label = "bar", detail = "(10 bytes)" },
-  }
-  local lines = render_lines(items, 2, 60)
-  eq(lines[1][1][2], "item", "unselected label style")
-  eq(lines[1][3][2], "dim", "unselected detail style")
-  eq(lines[2][1][2], "selected", "selected label style")
-  eq(lines[2][3][2], "selected", "selected detail uses selected")
-end)
-
-case("render_lines_detail_padding_never_zero", function()
-  local label = string.rep("x", 50)
-  local detail = string.rep("y", 50)
-  local items = { { label = label, detail = detail } }
-  local lines = render_lines(items, 1, 20)
-  local pad_span = lines[1][2][1]
-  assert(#pad_span >= 1, "padding must be at least 1 space even when overflowing")
-end)
-
-case("render_lines_no_detail_fills_trailing", function()
-  local lines = render_lines({ "ab" }, 1, 10)
-  eq(#lines[1], 2, "label + trailing pad")
-  local trail = lines[1][2][1]
-  eq(#trail, 10 - 2 - 2, "trail = width - indent(2) - label_len(2)")
-end)
-
-case("render_lines_selected_index_out_of_range", function()
-  local lines = render_lines({ "a", "b" }, 99, 40)
-  eq(lines[1][1][2], "item")
-  eq(lines[2][1][2], "item")
-end)
-
-case("render_lines_empty_items", function()
-  local lines = render_lines({}, 1, 40)
-  eq(#lines, 0)
-end)
-
-case("render_lines_default_width_used", function()
-  local items = { "test" }
-  local lines_default = render_lines(items, 1)
-  local lines_explicit = render_lines(items, 1, 80)
-  eq(#lines_default[1], #lines_explicit[1], "default width should be 80")
-  eq(lines_default[1][2][1], lines_explicit[1][2][1])
-end)
-
-case("render_lines_mixed_string_and_table", function()
-  local items = { "plain", { label = "rich", detail = "info" } }
-  local lines = render_lines(items, 1, 40)
-  eq(lines[1][1][1], "  plain")
-  eq(#lines[1], 2, "string item: label + trailing")
-  eq(lines[2][1][1], "  rich")
-  eq(#lines[2], 4, "table item with detail: label + pad + detail + right_pad")
-end)
-
-case("render_lines_trailing_omitted_when_label_fills_width", function()
-  local label = string.rep("z", 10)
-  local lines = render_lines({ label }, 1, 12)
-  eq(#lines[1], 1, "no trailing span when width - indent - label <= 0")
-end)
-
-case("render_lines_match_highlight_selected", function()
-  local lines = render_lines({ "alpha", "beta" }, 1, 40, "lph")
-  eq(lines[1][1][1], "  a")
-  eq(lines[1][1][2], "selected")
-  eq(lines[1][2][1], "lph")
-  eq(lines[1][2][2], "match_selected")
-  eq(lines[1][3][1], "a")
-  eq(lines[1][3][2], "selected")
-end)
-
-case("render_lines_match_highlight_not_selected", function()
-  local lines = render_lines({ "beta", "alpha" }, 2, 40, "et")
-  eq(lines[1][1][1], "  b")
-  eq(lines[1][1][2], "item")
-  eq(lines[1][2][1], "et")
-  eq(lines[1][2][2], "match")
-  eq(lines[1][3][1], "a")
-  eq(lines[1][3][2], "item")
-end)
-
-case("render_lines_detail_right_pad_always_present", function()
-  local items = { { label = "x", detail = "d" } }
-  local lines = render_lines(items, 1, 50)
-  local right_pad = lines[1][4][1]
-  eq(#right_pad, 2, "DETAIL_RIGHT_PAD = 2")
-end)
-
-local filter_items = ListPicker._filter_items
-
-case("filter_items_empty_query_returns_all", function()
-  local items = { "alpha", "beta", "gamma" }
-  local filtered, indices = filter_items(items, "")
-  eq(#filtered, 3)
-  eq(indices[1], 1)
-  eq(indices[2], 2)
-  eq(indices[3], 3)
-end)
-
-case("filter_items_case_insensitive", function()
-  local items = { "Alpha", "BETA", "gamma" }
-  local filtered, indices = filter_items(items, "al")
-  eq(#filtered, 1)
-  eq(filtered[1], "Alpha")
-  eq(indices[1], 1)
-end)
-
-case("filter_items_no_matches", function()
-  local items = { "apple", "banana" }
-  local filtered, indices = filter_items(items, "xyz")
-  eq(#filtered, 0)
-  eq(#indices, 0)
-end)
-
-case("filter_items_table_items_uses_label", function()
-  local items = {
-    { label = "Foo", detail = "d1" },
-    { label = "Bar", detail = "d2" },
-    { label = "Foobar", detail = "d3" },
-  }
-  local filtered, indices = filter_items(items, "foo")
-  eq(#filtered, 2)
-  eq(filtered[1].label, "Foo")
-  eq(filtered[2].label, "Foobar")
-  eq(indices[1], 1)
-  eq(indices[2], 3)
-end)
-
-case("filter_items_every_word_must_match", function()
-  local items = { "review gh pr 441", "review gh pr 461", "new session" }
-  local filtered = filter_items(items, "441 review")
-  eq(#filtered, 1)
-  eq(filtered[1], "review gh pr 441")
-end)
-
-case("filter_items_matches_section", function()
-  local items = {
-    { label = "a.md", section = "auth (2)" },
-    { label = "b.md", section = "auth (2)" },
-    { label = "c.md", section = "storage (1)" },
-  }
-  local filtered, indices = filter_items(items, "auth")
-  eq(#filtered, 2, "typing a section name keeps its items")
-  eq(filtered[1].label, "a.md")
-  eq(filtered[2].label, "b.md")
-  eq(indices[2], 2)
-end)
-
-case("filter_items_words_split_across_label_and_section", function()
-  local items = {
-    { label = "gotchas.md", section = "auth (2)" },
-    { label = "notes.md", section = "auth (2)" },
-  }
-  local filtered = filter_items(items, "auth gotchas")
-  eq(#filtered, 1)
-  eq(filtered[1].label, "gotchas.md")
-end)
-
-case("highlight_spans_overlapping_words_merge", function()
-  local spans = ListPicker.highlight_spans("alphabet", { "alpha", "phab" }, "item", "match")
-  eq(#spans, 2)
-  eq(spans[1][1], "alphab", "alpha(1-5) + phab(3-6) merge into one span")
+case("match_spans_ascii", function()
+  local spans = Spans.match_spans("alphabet", { 1, 4, 8 }, "item", "match")
+  eq(#spans, 5)
+  eq(spans[1][1], "a")
   eq(spans[1][2], "match")
-  eq(spans[2][1], "et")
+  eq(spans[2][1], "lp")
   eq(spans[2][2], "item")
+  eq(spans[3][1], "h")
+  eq(spans[3][2], "match")
+  eq(spans[4][1], "abe")
+  eq(spans[4][2], "item")
+  eq(spans[5][1], "t")
+  eq(spans[5][2], "match")
 end)
 
-case("highlight_spans_multi_word", function()
-  local spans = ListPicker.highlight_spans("review pr 441", { "pr", "441" }, "item", "match")
+case("match_spans_cjk", function()
+  local spans = Spans.match_spans("你好世界", { 2, 3 }, "item", "match")
+  eq(#spans, 3, "adjacent CJK codepoints merge, bytes line up")
+  eq(spans[1][1], "你")
+  eq(spans[1][2], "item")
+  eq(spans[2][1], "好世")
+  eq(spans[2][2], "match")
+  eq(spans[3][1], "界")
+  eq(spans[3][2], "item")
+end)
+
+case("match_spans_no_indices_single_span", function()
+  local spans = Spans.match_spans("hello", {}, "item", "match")
+  eq(#spans, 1)
+  eq(spans[1][1], "hello")
+  eq(spans[1][2], "item")
+end)
+
+case("match_spans_adjacent", function()
+  local spans = Spans.match_spans("review pr 441", { 8, 9, 11, 12, 13 }, "item", "match")
   eq(#spans, 4)
   eq(spans[1][1], "review ")
   eq(spans[1][2], "item")
@@ -1371,65 +1305,6 @@ case("highlight_spans_multi_word", function()
   eq(spans[3][2], "item")
   eq(spans[4][1], "441")
   eq(spans[4][2], "match")
-end)
-
-case("render_lines_match_at_start_keeps_indent", function()
-  local lines = render_lines({ "alpha" }, 1, 40, "al")
-  eq(lines[1][1][1], "  ")
-  eq(lines[1][1][2], "selected")
-  eq(lines[1][2][1], "al")
-  eq(lines[1][2][2], "match_selected")
-end)
-
-case("render_lines_sections_headers_and_item_lines", function()
-  local items = {
-    { label = "a", section = "auth", section_detail = "(2)" },
-    { label = "b", section = "auth", section_detail = "(2)" },
-    { label = "c", section = "storage" },
-  }
-  local lines, item_lines = render_lines(items, 1, 40)
-  eq(#lines, 6, "two headers + blank gap + three items, header never repeats within a section")
-  eq(lines[1][1][1], "  auth")
-  eq(lines[1][1][2], "keybind_section")
-  eq(lines[1][2][1], " (2)", "section detail rendered after the header")
-  eq(lines[1][2][2], "dim")
-  eq(lines[2][1][1], "  a")
-  eq(lines[3][1][1], "  b")
-  eq(#lines[4], 0, "blank line between sections")
-  eq(lines[5][1][1], "  storage")
-  eq(#lines[5], 1, "no detail span without section_detail")
-  eq(lines[6][1][1], "  c")
-  eq(item_lines[1], 2, "cursor mapping skips the header")
-  eq(item_lines[2], 3)
-  eq(item_lines[3], 6)
-end)
-
-case("render_lines_item_lines_identity_without_sections", function()
-  local lines, item_lines = render_lines({ "a", "b", "c" }, 1, 40)
-  eq(#lines, 3)
-  for i = 1, 3 do
-    eq(item_lines[i], i, "plain list maps item " .. i .. " straight to its line")
-  end
-end)
-
-case("section_rows_counts_headers_and_gaps", function()
-  local section_rows = ListPicker._section_rows
-  eq(section_rows({ "a", "b" }), 0)
-  eq(section_rows({ { label = "a", section = "s" }, "b" }), 1, "header on line one needs no gap")
-  eq(section_rows({ "a", { label = "b", section = "s" } }), 2, "gap precedes a header that follows items")
-  eq(section_rows({ { label = "a", section = "s" }, { label = "b", section = "t" } }), 3)
-end)
-
-case("render_lines_nil_sections_mix_with_grouped", function()
-  local lines = render_lines({ "plain", { label = "x", section = "grp" } }, 1, 40)
-  eq(lines[1][1][1], "  plain", "no header for a nil-section first item")
-  eq(#lines[2], 0, "blank line before a header that follows items")
-  eq(lines[3][1][1], "  grp")
-  eq(lines[4][1][1], "  x")
-
-  local _, item_lines = render_lines({ { label = "a", section = "grp" }, "b" }, 1, 40)
-  eq(item_lines[1], 2, "grouped item sits under its header")
-  eq(item_lines[2], 3, "nil-section item follows without a new header")
 end)
 
 local SPEC_HEADINGS = {

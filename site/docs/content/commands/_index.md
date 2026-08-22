@@ -37,6 +37,7 @@ Type `/` in the input box to open the command palette.
 | `/plan` | Switch to plan mode (analyse and write only the plan file) |
 | `/rename` | Rename the current session |
 | `/sessions` | Browse and switch sessions |
+| `/splash` | Preview and select a splash renderer |
 | `/thinking` | Set thinking effort (bare opens a selector) |
 
 ## Sessions

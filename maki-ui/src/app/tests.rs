@@ -17,7 +17,9 @@ use maki_agent::{
 };
 use maki_config::{PermissionsConfig, UiConfig};
 use maki_lua::test_support::{HintWriterHandle, hint_writer_pair};
-use maki_lua::{BuiltinAction, HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader};
+use maki_lua::{
+    BuiltinAction, CommandArgumentItem, HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader,
+};
 use maki_providers::{ContentBlock, Effort, Message, Role, TokenUsage};
 use maki_storage::sessions::{StoredMode, StoredThinking};
 use ratatui::layout::Rect;
@@ -455,6 +457,27 @@ fn paste_works_regardless_of_status(status: Status) {
     assert_eq!(app.input_box.buffer.value(), "pasted");
 }
 
+#[test]
+fn ordinary_paste_synchronizes_argument_completion() {
+    let dir = StateDir::from_path(env::temp_dir());
+    let mut app = build_app_with_lua(
+        dir.clone(),
+        Arc::new(test_writer(dir)),
+        LuaCommandReader::from_commands(vec![LuaCommandInfo {
+            name: "/deploy".into(),
+            description: "Deploy".into(),
+            plugin: "deploy".into(),
+            max_args: 1,
+            has_argument_completion: true,
+        }]),
+    );
+    let generation = app.command_palette.argument_generation();
+
+    app.update(Msg::Paste("/deploy staging".into()));
+
+    assert!(app.command_palette.argument_generation() > generation);
+}
+
 #[test_case("a\rb\rc",       "a\nb\nc"       ; "bare_cr")]
 #[test_case("a\r\nb\r\nc",   "a\nb\nc"       ; "crlf")]
 #[test_case("a\r\nb\rc\nd",  "a\nb\nc\nd"    ; "mixed")]
@@ -648,14 +671,106 @@ fn enter_executes_new_command() {
     assert!(!app.command_palette.is_active());
 }
 
+fn lifecycle_app() -> (App, maki_lua::test_support::RequestProbe) {
+    let dir = StateDir::from_path(env::temp_dir());
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    let mut app = build_app_with_full(
+        dir.clone(),
+        Arc::new(test_writer(dir)),
+        LuaCommandReader::from_commands(vec![LuaCommandInfo {
+            name: "/deploy".into(),
+            description: "Deploy".into(),
+            plugin: "deploy".into(),
+            max_args: 1,
+            has_argument_completion: true,
+        }]),
+        handle,
+        UiConfig::default(),
+    );
+    app.input_box.set_input("/deploy a".into());
+    app.command_palette.sync("/deploy a");
+    app.command_palette.sync_arguments(
+        "/deploy a",
+        9,
+        &app.lua_event_handle,
+        &app.state.mode.id_key(),
+    );
+    probe
+        .try_finish_command_arguments(vec![CommandArgumentItem {
+            label: "alpha".into(),
+            insertion: "alpha".into(),
+            description: None,
+        }])
+        .unwrap();
+    let _ = app.command_palette.poll_arguments(&app.lua_event_handle);
+    probe.try_finish_command_argument_lifecycle().unwrap();
+    (app, probe)
+}
+
 #[test]
-fn ctrl_c_closes_palette() {
-    let mut app = test_app();
-    type_slash(&mut app);
-    assert!(app.command_palette.is_active());
+fn ctrl_c_closes_palette_and_cancels_lifecycle() {
+    let (mut app, probe) = lifecycle_app();
 
     app.update(Msg::Key(kb::QUIT.to_key_event()));
+
     assert!(!app.command_palette.is_active());
+    assert_eq!(
+        probe.try_finish_command_argument_lifecycle(),
+        Some(("cancel", None, true))
+    );
+}
+
+#[test]
+fn esc_closes_palette_and_cancels_lifecycle() {
+    let (mut app, probe) = lifecycle_app();
+
+    app.update(Msg::Key(key(KeyCode::Esc)));
+
+    assert!(!app.command_palette.is_active());
+    assert_eq!(
+        probe.try_finish_command_argument_lifecycle(),
+        Some(("cancel", None, true))
+    );
+}
+
+#[test]
+fn reset_session_cancels_completion_lifecycle_once() {
+    let (mut app, probe) = lifecycle_app();
+
+    app.reset_session();
+
+    assert_eq!(
+        probe.try_finish_command_argument_lifecycle(),
+        Some(("cancel", None, true))
+    );
+    assert!(probe.try_finish_command_argument_lifecycle().is_none());
+}
+
+#[test]
+fn session_switch_cancels_completion_lifecycle_once() {
+    let (mut app, probe) = lifecycle_app();
+    let session = AppSession::new("test-model", "/tmp/test");
+
+    app.apply_loaded_session(session, &test_model());
+
+    assert_eq!(
+        probe.try_finish_command_argument_lifecycle(),
+        Some(("cancel", None, true))
+    );
+    assert!(probe.try_finish_command_argument_lifecycle().is_none());
+}
+
+#[test]
+fn programmatic_overlay_close_cancels_completion_lifecycle_once() {
+    let (mut app, probe) = lifecycle_app();
+
+    app.close_all_overlays();
+
+    assert_eq!(
+        probe.try_finish_command_argument_lifecycle(),
+        Some(("cancel", None, true))
+    );
+    assert!(probe.try_finish_command_argument_lifecycle().is_none());
 }
 
 /// The event exists so plugins can drop what belonged to the session that
@@ -778,6 +893,51 @@ fn tool_lifecycle_events_name_the_session_and_tool() {
     app.run_id += 1;
     app.update(agent_msg_with_run_id(tool_start("stale", "read"), 1));
     assert!(probe.try_recv_autocmd().is_none());
+}
+
+#[test]
+fn argument_completion_enter_fills_then_next_enter_executes() {
+    let dir = StateDir::from_path(env::temp_dir());
+    let mut app = build_app_with_lua(
+        dir.clone(),
+        Arc::new(test_writer(dir)),
+        LuaCommandReader::from_commands(vec![LuaCommandInfo {
+            name: "/rename".into(),
+            description: "Rename".into(),
+            plugin: "sessions".into(),
+            max_args: usize::MAX,
+            has_argument_completion: true,
+        }]),
+    );
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    app.lua_event_handle = handle;
+    app.input_box.set_input("/rename dråft tail".into());
+    app.command_palette.sync("/rename dråft tail");
+    app.input_box.buffer.set_cursor(0, 11);
+    app.command_palette.set_argument_completion(
+        (8, 14),
+        CommandArgumentItem {
+            label: "final".into(),
+            insertion: "final".into(),
+            description: None,
+        },
+    );
+
+    let actions = app.update(Msg::Key(key(KeyCode::Enter)));
+
+    assert!(actions.is_empty());
+    assert_eq!(app.input_box.buffer.value(), "/rename final tail");
+    assert_eq!(app.input_box.buffer.x(), 13);
+    assert!(!app.command_palette.is_active());
+
+    let actions = app.update(Msg::Key(key(KeyCode::Enter)));
+
+    assert!(actions.is_empty());
+    assert!(app.input_box.buffer.value().is_empty());
+    assert_eq!(
+        probe.try_recv_command(),
+        Some(("/rename".into(), "final tail".into(), 0))
+    );
 }
 
 #[test]
@@ -2493,6 +2653,7 @@ fn typed_lua_command_with_args_executes() {
             description: "Rename the current session".into(),
             plugin: "sessions".into(),
             max_args: usize::MAX,
+            has_argument_completion: false,
         }]),
     );
     let (handle, probe) = maki_lua::test_support::probed_event_handle();
@@ -2583,6 +2744,7 @@ fn run_cmdline_forwards_depth_to_lua_command() {
             description: "Browse sessions".into(),
             plugin: "sessions".into(),
             max_args: 0,
+            has_argument_completion: false,
         }]),
     );
     let (handle, probe) = maki_lua::test_support::probed_event_handle();
@@ -4825,6 +4987,37 @@ fn enter_inserts_skill() {
 }
 
 #[test]
+fn at_completion_insertion_synchronizes_argument_completion() {
+    let (_tmp, mut app, _backend) = completion_app();
+    app.command_palette = CommandPalette::new(
+        Arc::from([]),
+        McpSnapshotReader::empty(),
+        LuaCommandReader::from_commands(vec![LuaCommandInfo {
+            name: "/deploy".into(),
+            description: "Deploy".into(),
+            plugin: "deploy".into(),
+            max_args: 1,
+            has_argument_completion: true,
+        }]),
+    );
+    app.input_box.set_input("/deploy @rev".into());
+    app.command_palette.sync("/deploy @rev");
+    app.file_completion
+        .open(&app.state.session.cwd, Vec::new(), "rev", (8, 12));
+    let generation = app.command_palette.argument_generation();
+
+    app.insert_completion(CompletionItem {
+        label: "skill:review".into(),
+        kind: "skill".into(),
+        insertion: "@skill:review".into(),
+        description: None,
+    });
+
+    assert_eq!(app.input_box.buffer.value(), "/deploy @skill:review");
+    assert!(app.command_palette.argument_generation() > generation);
+}
+
+#[test]
 fn skills_complete_without_prefix() {
     let (_tmp, mut app, backend) = completion_app();
     seed_skill(&backend, "review");
@@ -5322,7 +5515,7 @@ fn bell_on_ask_predicate(needs_input: bool, ask: bool) {
 
 #[test]
 fn test_idle_splash_pulls_lua_frame() {
-    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     let dir = StateDir::from_path(env::temp_dir());
     let writer = Arc::new(test_writer(dir.clone()));
     let mut app = build_app_with_handle(dir, writer, handle);
@@ -5352,6 +5545,46 @@ fn test_idle_splash_pulls_lua_frame() {
         all.contains("luna-maki"),
         "idle splash renders the bundled logo"
     );
+}
+
+#[test]
+fn slow_splash_renderer_does_not_block_tick_or_input() {
+    const RENDER_SECS: f64 = 0.3;
+    const MAX_TICK: Duration = Duration::from_millis(50);
+
+    let (handle, guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
+    guard
+        .host()
+        .load_source(
+            "slow_splash",
+            &format!(
+                r##"
+maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
+  local started = os.clock()
+  while os.clock() - started < {RENDER_SECS} do end
+  return {{ {{ {{ glyphs = string.rep("x", w), style = "#ffffff" }} }} }}
+end)
+"##
+            ),
+        )
+        .unwrap();
+    let dir = StateDir::from_path(env::temp_dir());
+    let writer = Arc::new(test_writer(dir.clone()));
+    let mut app = build_app_with_handle(dir, writer, handle);
+    rendered(&mut app);
+
+    let started = std::time::Instant::now();
+    let _ = app.tick();
+    assert!(
+        started.elapsed() < MAX_TICK,
+        "tick waited for splash render"
+    );
+
+    let started = std::time::Instant::now();
+    let _ = app.tick();
+    assert!(started.elapsed() < MAX_TICK, "pending splash blocked tick");
+    app.update(Msg::Key(key(KeyCode::Char('x'))));
+    assert_eq!(app.input_box.buffer.value(), "x");
 }
 
 #[test]
@@ -5387,7 +5620,7 @@ fn test_splash_survives_reset_to_empty_session() {
     // chat with a fresh splash clock and `splash_shown: false`. The reported
     // bug blanked the splash ~1s later; hold it up past the 1.6s entry fade
     // and fail the moment a frame goes missing.
-    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     let dir = StateDir::from_path(env::temp_dir());
     let writer = Arc::new(test_writer(dir.clone()));
     let mut app = build_app_with_handle(dir, writer, handle.clone());
@@ -5489,7 +5722,7 @@ fn test_splash_off_settles_idle() {
 
 #[test]
 fn test_splash_still_repulls_once_on_version_change() {
-    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splash"]);
+    let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     let dir = StateDir::from_path(env::temp_dir());
     let writer = Arc::new(test_writer(dir.clone()));
     let ui = UiConfig {

@@ -1,12 +1,14 @@
--- Bundled splash-gallery skin, part of the maki distribution.
--- Activate from init.lua with:   require("splash.caustics")
--- Requiring self-activates it via maki.api.set_slot("splash.render", ...);
--- the module also returns M with M.render(w, h, t, fade) for custom cyclers.
+-- Bundled splash, part of the maki distribution.
+-- Require from init.lua with:   local splash = require("splash.kaleidoscope")
+-- The module returns M with M.description and M.render(w, h, t, fade) and does not activate itself.
 --
--- Caustics splash. Software port of the WGSL "Caustics" shader from
+-- Kaleidoscope splash. Software port of the WGSL "Kaleidoscope" shader from
 
+local TAU = 2.0 * math.pi
+local SEGMENTS = 10.0
 local RAMP = " .:-=+*#%@"
 local M = {}
+M.description = "A mirrored fractal kaleidoscope with tenfold symmetry."
 
 local function theme_or(name, fallback)
   local c = maki.ui.theme_color(name)
@@ -111,6 +113,32 @@ local function flat_rows(w, h, st)
   return rows
 end
 
+local function atan2(y, x)
+  if x > 0 then
+    return math.atan(y / x)
+  elseif x < 0 and y >= 0 then
+    return math.atan(y / x) + math.pi
+  elseif x < 0 then
+    return math.atan(y / x) - math.pi
+  elseif y > 0 then
+    return math.pi / 2
+  elseif y < 0 then
+    return -math.pi / 2
+  end
+  return 0
+end
+
+local function smoothstep(e0, e1, x)
+  local u = (x - e0) / (e1 - e0)
+  if u < 0 then
+    u = 0
+  elseif u > 1 then
+    u = 1
+  end
+  return u * u * (3.0 - 2.0 * u)
+end
+
+-- 5-bit-per-channel quantized style, keeps the style cache bounded.
 local function shade_style(r, g, b, f)
   local function q(v)
     if v < 0 then
@@ -135,46 +163,36 @@ local function ramp_glyph(lum)
   return string.sub(RAMP, gi, gi)
 end
 
-local function h21(px, py)
-  local s = math.sin(px * 127.1 + py * 311.7) * 43758.5453
-  return s - math.floor(s)
-end
-
--- Smooth value noise.
-function M.n2(px, py)
-  local ix = math.floor(px)
-  local iy = math.floor(py)
-  local fx = px - ix
-  local fy = py - iy
-  local ux = fx * fx * (3.0 - 2.0 * fx)
-  local uy = fy * fy * (3.0 - 2.0 * fy)
-  local a = h21(ix, iy)
-  local b = h21(ix + 1, iy)
-  local c = h21(ix, iy + 1)
-  local d = h21(ix + 1, iy + 1)
-  return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy
-end
-
--- Fragment shade for isotropic coords (nx, ny); returns r, g, b in [0, 1].
+-- Fragment shade: returns r, g, b in [0, 1] for isotropic coords (nx, ny).
 function M.shade(nx, ny, t)
-  local ux = nx * 2.0
-  local uy = ny * 2.0
-  local tt = t * 0.6
-  local qx, qy = ux, uy
-  local c = 0.0
-  for i = 1, 4 do
-    local fi = tonumber(i)
-    local wx = M.n2(qx * fi + tt * 0.3, qy * fi + tt * 0.3)
-    local wy = M.n2(qx * fi - tt * 0.2, qy * fi - tt * 0.2)
-    qx = qx + wx * 0.7
-    qy = qy + wy * 0.7
-    local wv = math.abs(math.sin((qx + qy) * (2.0 + fi) - tt))
-    c = c + (1.0 - wv) ^ 8 / fi
+  local tt = t * 0.25
+  local a = atan2(ny, nx)
+  local r = math.sqrt(nx * nx + ny * ny)
+  local seg = TAU / SEGMENTS
+  local sa = math.abs((a % (2.0 * seg)) - seg) + tt * 0.4
+  local ox = math.cos(sa) * r - (0.3 + 0.2 * math.sin(t * 0.3))
+  local oy = math.sin(sa) * r
+  local qx, qy = ox * 3.0, oy * 3.0
+  local ar, ag, ab = 0.0, 0.0, 0.0
+  for i = 0, 4 do
+    local d = qx * qx + qy * qy
+    if d < 0.15 then
+      d = 0.15
+    end
+    qx = math.abs(qx) / d
+    qy = math.abs(qy) / d
+    qx = qx * 1.9 - (0.9 + 0.3 * math.sin(tt + i))
+    qy = qy * 1.9 - 0.7
+    local s = qx * 0.4 + qy * 0.8 + t + i
+    ar = (ar + 0.5 + 0.5 * math.cos(s + 0.0)) * 0.85
+    ag = (ag + 0.5 + 0.5 * math.cos(s + 2.1)) * 0.85
+    ab = (ab + 0.5 + 0.5 * math.cos(s + 4.3)) * 0.85
   end
-  local deep_r, deep_g, deep_b = 0.0, 0.08, 0.18
-  local lite_r, lite_g, lite_b = 0.4, 0.95, 1.1
-  local vig = 1.0 - 0.35 * math.sqrt(ux * ux + uy * uy) * 0.5
-  return (deep_r + lite_r * c * 0.9) * vig, (deep_g + lite_g * c * 0.9) * vig, (deep_b + lite_b * c * 0.9) * vig
+  ar = ar / 5.0
+  ag = ag / 5.0
+  ab = ab / 5.0
+  local edge = smoothstep(1.6, 0.2, r * 0.5)
+  return ar ^ 1.6 * edge, ag ^ 1.6 * edge, ab ^ 1.6 * edge
 end
 
 function M.render(w, h, t, fade)
@@ -197,7 +215,6 @@ function M.render(w, h, t, fade)
       }
     end
   end
-  place_text(grid, H - 1, math.floor((W - 8) / 2) + 1, "caustics", color(rgb_to_hex(FG, 0.5 * f)))
   place_text(
     grid,
     1,
@@ -207,9 +224,5 @@ function M.render(w, h, t, fade)
   )
   return build_rows(grid)
 end
-
-maki.api.set_slot("splash.render", function(prev, w, h, t, fade)
-  return M.render(w, h, t, fade)
-end)
 
 return M

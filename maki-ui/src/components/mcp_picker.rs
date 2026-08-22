@@ -139,7 +139,9 @@ impl McpPicker {
                     enabled,
                 }
             }
-            PickerAction::Select(..) | PickerAction::Close => McpPickerAction::Close,
+            PickerAction::Select(..) | PickerAction::Close | PickerAction::Delete(..) => {
+                McpPickerAction::Close
+            }
         }
     }
 

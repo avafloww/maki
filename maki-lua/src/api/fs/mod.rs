@@ -1,6 +1,17 @@
-use std::cmp::Reverse;
-use std::collections::HashSet;
-use std::fs::FileType;
+//! `maki.fs` — the plugin-facing file-system namespace.
+//!
+//! All I/O dispatches through the [`FsBackend`] trait: [`RealFs`] is the
+//! production backend (real disk, symlinks, gitignore, permissions);
+//! `InMemoryFs` (behind the `test-support` feature) is the hermetic test
+//! backend, a deliberately dumb `BTreeMap` model — no symlinks, no
+//! gitignore, no permissions, and file mtime is an insertion counter.
+//! Behavior tests must not rely on real-filesystem vagaries; those belong
+//! in the real-backend suite below.
+
+#[cfg(feature = "test-support")]
+mod in_memory;
+mod real;
+
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -10,6 +21,89 @@ use mlua::{Buffer, Lua, Result as LuaResult, Table, Value};
 
 use crate::api::util::pair::{Pair, err_pair, pair, try_pair};
 use crate::plugin_permissions::PluginPermissions;
+
+#[cfg(feature = "test-support")]
+pub use in_memory::InMemoryFs;
+pub use real::RealFs;
+
+/// `dir` entry type tags, shared by both backends and asserted by tests.
+pub(crate) const TYPE_FILE: &str = "file";
+pub(crate) const TYPE_DIRECTORY: &str = "directory";
+pub(crate) const TYPE_LINK: &str = "link";
+pub(crate) const TYPE_UNKNOWN: &str = "unknown";
+
+/// `dir` error prefixes, shared by both backends and asserted by tests.
+pub(crate) const DIR_MISSING_PREFIX: &str = "dir: path does not exist: ";
+pub(crate) const DIR_NOT_A_DIR_PREFIX: &str = "dir: not a directory: ";
+
+/// Metadata as seen by plugins.
+#[derive(Debug)]
+pub struct FsMeta {
+    pub size: u64,
+    pub is_file: bool,
+    pub is_dir: bool,
+    pub mtime: Option<std::time::SystemTime>,
+}
+
+/// Backend failure: a real I/O error, or a plain message the wrappers
+/// surface verbatim (e.g. the `dir:` prefixes).
+#[derive(thiserror::Error, Debug)]
+pub enum FsError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Message(String),
+}
+
+/// Object-safe async return: a boxed future borrowing from `&self` only.
+pub(crate) type BoxFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// All methods return a boxed future so the trait stays object-safe; a
+/// backend that performs blocking I/O hops to a thread pool itself
+/// (`RealFs` uses `smol::unblock`).
+pub trait FsBackend: Send + Sync {
+    fn read(&self, path: PathBuf) -> BoxFuture<'_, std::io::Result<String>>;
+    fn read_bytes(&self, path: PathBuf) -> BoxFuture<'_, std::io::Result<Vec<u8>>>;
+    fn stat(&self, path: PathBuf) -> BoxFuture<'_, std::io::Result<FsMeta>>;
+    fn write(&self, path: PathBuf, content: Vec<u8>) -> BoxFuture<'_, std::io::Result<()>>;
+    fn atomic_write(&self, path: PathBuf, content: Vec<u8>) -> BoxFuture<'_, std::io::Result<()>>;
+    fn rm(&self, path: PathBuf, recursive: bool, force: bool)
+    -> BoxFuture<'_, std::io::Result<()>>;
+    fn mkdir(&self, path: PathBuf, parents: bool) -> BoxFuture<'_, std::io::Result<()>>;
+    fn dir(
+        &self,
+        path: PathBuf,
+        max_depth: u32,
+    ) -> BoxFuture<'_, Result<Vec<(String, &'static str)>, FsError>>;
+    fn glob(
+        &self,
+        patterns: Vec<String>,
+        path: Option<String>,
+        limit: Option<usize>,
+        gitignore: bool,
+        sort_mtime: bool,
+    ) -> BoxFuture<'_, Result<Vec<String>, FsError>>;
+    fn grep(
+        &self,
+        params: maki_agent::tools::grep::GrepParams,
+    ) -> BoxFuture<'_, Result<(PathBuf, Vec<maki_agent::GrepFileEntry>), FsError>>;
+}
+
+pub(crate) struct FsBackendHandle(pub(crate) std::sync::Arc<dyn FsBackend>);
+
+/// The backend for the current Lua state. Falls back to `RealFs` when the
+/// state carries none, so bare `Lua::new()` suites still exercise the disk.
+fn backend(lua: &Lua) -> std::sync::Arc<dyn FsBackend> {
+    lua.app_data_ref::<FsBackendHandle>()
+        .map(|h| std::sync::Arc::clone(&h.0))
+        .unwrap_or_else(default_real_backend)
+}
+
+fn default_real_backend() -> std::sync::Arc<dyn FsBackend> {
+    static DEFAULT: std::sync::OnceLock<std::sync::Arc<dyn FsBackend>> = std::sync::OnceLock::new();
+    DEFAULT.get_or_init(|| std::sync::Arc::new(RealFs)).clone()
+}
 
 pub(crate) fn expand_tilde(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
@@ -41,57 +135,6 @@ fn path_to_string(p: &Path) -> LuaResult<String> {
         .ok_or_else(|| mlua::Error::runtime("non-utf8 path"))
 }
 
-fn filetype_str(ft: &FileType) -> &'static str {
-    if ft.is_file() {
-        "file"
-    } else if ft.is_dir() {
-        "directory"
-    } else if ft.is_symlink() {
-        "link"
-    } else {
-        "unknown"
-    }
-}
-
-fn collect_dir_entries(
-    base: &Path,
-    dir: &Path,
-    depth: u32,
-    max_depth: u32,
-    visited: &mut HashSet<PathBuf>,
-    out: &mut Vec<(String, &'static str)>,
-) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = match path.strip_prefix(base).ok().and_then(|p| p.to_str()) {
-            Some(s) => s.to_owned(),
-            None => continue,
-        };
-        let (type_str, is_dir) = match entry.file_type() {
-            Ok(ft) if ft.is_symlink() => match std::fs::metadata(&path) {
-                Ok(meta) => (filetype_str(&meta.file_type()), meta.is_dir()),
-                Err(_) => ("link", false),
-            },
-            Ok(ft) => (filetype_str(&ft), ft.is_dir()),
-            Err(_) => ("unknown", false),
-        };
-        out.push((name, type_str));
-        if is_dir && depth < max_depth {
-            let canonical = match path.canonicalize() {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            if visited.insert(canonical) {
-                collect_dir_entries(base, &path, depth + 1, max_depth, visited, out);
-            }
-        }
-    }
-}
-
 /// Read the entire file at {path} as a UTF-8 string.
 /// If the file contains bytes that are not valid UTF-8, this function throws.
 /// Use `read_bytes` for binary files.
@@ -105,9 +148,10 @@ fn collect_dir_entries(
 ///   return
 /// end
 #[lua_fn(guard = FsRead)]
-async fn read(_lua: Lua, path: String) -> LuaResult<Pair<String>> {
+async fn read(lua: Lua, path: String) -> LuaResult<Pair<String>> {
     let abs = make_absolute(&path)?;
-    match smol::fs::read_to_string(&abs).await {
+    let fs = backend(&lua);
+    match fs.read(abs).await {
         Ok(s) => Ok((Some(s), None)),
         Err(e) if e.kind() == ErrorKind::InvalidData => {
             Err(mlua::Error::runtime("non-utf8 content; use read_bytes"))
@@ -128,7 +172,8 @@ async fn read(_lua: Lua, path: String) -> LuaResult<Pair<String>> {
 #[lua_fn(guard = FsRead)]
 async fn read_bytes(lua: Lua, path: String) -> LuaResult<Pair<Buffer>> {
     let abs = make_absolute(&path)?;
-    let bytes = try_pair!(smol::fs::read(&abs).await);
+    let fs = backend(&lua);
+    let bytes = try_pair!(fs.read_bytes(abs).await);
     Ok((Some(lua.create_buffer(bytes)?), None))
 }
 
@@ -148,14 +193,15 @@ async fn read_bytes(lua: Lua, path: String) -> LuaResult<Pair<Buffer>> {
 #[lua_fn(guard = FsRead)]
 async fn metadata(lua: Lua, path: String) -> LuaResult<Pair<Table>> {
     let abs = make_absolute(&path)?;
-    match smol::fs::metadata(&abs).await {
+    let fs = backend(&lua);
+    match fs.stat(abs).await {
         Ok(meta) => {
             let tbl = lua.create_table()?;
-            tbl.set("size", meta.len())?;
-            tbl.set("is_file", meta.is_file())?;
-            tbl.set("is_dir", meta.is_dir())?;
-            if let Ok(modified) = meta.modified()
-                && let Ok(dur) = modified.duration_since(UNIX_EPOCH)
+            tbl.set("size", meta.size)?;
+            tbl.set("is_file", meta.is_file)?;
+            tbl.set("is_dir", meta.is_dir)?;
+            if let Some(mtime) = meta.mtime
+                && let Ok(dur) = mtime.duration_since(UNIX_EPOCH)
             {
                 tbl.set("mtime", dur.as_secs_f64())?;
             }
@@ -280,7 +326,7 @@ fn parents(lua: &Lua, path: String) -> LuaResult<Table> {
 /// local root = maki.fs.root("src/main.rs", { ".git", "Cargo.toml" })
 /// if root then print("project root: " .. root) end
 #[lua_fn(guard = FsRead)]
-async fn root(_lua: Lua, source: String, marker: Value) -> LuaResult<Option<String>> {
+async fn root(lua: Lua, source: String, marker: Value) -> LuaResult<Option<String>> {
     let markers: Vec<String> = match marker {
         Value::String(s) => vec![s.to_str()?.to_owned()],
         Value::Table(t) => {
@@ -297,28 +343,30 @@ async fn root(_lua: Lua, source: String, marker: Value) -> LuaResult<Option<Stri
         }
     };
 
-    smol::unblock(move || {
-        let start = Path::new(&source);
-        let start = if start.is_file() || !start.exists() {
-            start.parent().unwrap_or(start)
-        } else {
-            start
-        };
+    let fs = backend(&lua);
+    // `stat` follows symlinks, like the old `is_file`/`exists` probes.
+    // Any stat error counts as missing, as `!Path::exists()` did.
+    let start = Path::new(&source);
+    let stat = fs.stat(start.to_path_buf()).await;
+    let start_is_file = matches!(&stat, Ok(meta) if meta.is_file);
+    let start = if start_is_file || stat.is_err() {
+        start.parent().unwrap_or(start)
+    } else {
+        start
+    };
 
-        let mut dir = make_absolute(start.to_str().unwrap_or_default())?;
+    let mut dir = make_absolute(start.to_str().unwrap_or_default())?;
 
-        loop {
-            for m in &markers {
-                if dir.join(m).exists() {
-                    return Ok(Some(path_to_string(&dir)?));
-                }
-            }
-            if !dir.pop() {
-                return Ok(None);
+    loop {
+        for m in &markers {
+            if fs.stat(dir.join(m)).await.is_ok() {
+                return Ok(Some(path_to_string(&dir)?));
             }
         }
-    })
-    .await
+        if !dir.pop() {
+            return Ok(None);
+        }
+    }
 }
 
 /// Compute a relative path from {base} to {target}.
@@ -384,20 +432,9 @@ async fn dir(lua: Lua, path: String, opts: Option<Table>) -> LuaResult<Pair<Tabl
         Some(t) => t.get::<u32>("depth").unwrap_or(1),
         None => 1,
     };
+    let fs = backend(&lua);
 
-    let result = smol::unblock(move || -> Result<Vec<(String, &'static str)>, String> {
-        if !abs.exists() {
-            return Err(format!("dir: path does not exist: {}", abs.display()));
-        }
-        if !abs.is_dir() {
-            return Err(format!("dir: not a directory: {}", abs.display()));
-        }
-        let mut out = Vec::new();
-        let mut visited = HashSet::new();
-        collect_dir_entries(&abs, &abs, 1, max_depth, &mut visited, &mut out);
-        Ok(out)
-    })
-    .await;
+    let result = fs.dir(abs, max_depth).await;
 
     let entries = try_pair!(result);
     let tbl = lua.create_table()?;
@@ -420,9 +457,11 @@ async fn dir(lua: Lua, path: String, opts: Option<Table>) -> LuaResult<Pair<Tabl
 /// local ok, err = maki.fs.write("out.txt", "hello world")
 /// if err then print("write failed: " .. err) end
 #[lua_fn(guard = FsWrite)]
-async fn write(_lua: Lua, path: String, content: String) -> LuaResult<Pair<bool>> {
+async fn write(lua: Lua, path: String, content: String) -> LuaResult<Pair<bool>> {
     let abs = make_absolute(&path)?;
-    Ok(pair(smol::fs::write(&abs, content).await.map(|()| true)))
+    let fs = backend(&lua);
+    let result = fs.write(abs, content.into_bytes()).await;
+    Ok(pair(result.map(|()| true)))
 }
 
 /// Atomically replace {path} with {content}. The parent directory must exist.
@@ -436,9 +475,10 @@ async fn write(_lua: Lua, path: String, content: String) -> LuaResult<Pair<bool>
 /// local ok, err = maki.fs.atomic_write("state.json", encoded)
 /// if err then print("atomic write failed: " .. err) end
 #[lua_fn(guard = FsWrite)]
-async fn atomic_write(_lua: Lua, path: String, content: String) -> LuaResult<Pair<bool>> {
+async fn atomic_write(lua: Lua, path: String, content: String) -> LuaResult<Pair<bool>> {
     let abs = make_absolute(&path)?;
-    let result = smol::unblock(move || maki_storage::atomic_write(&abs, content.as_bytes())).await;
+    let fs = backend(&lua);
+    let result = fs.atomic_write(abs, content.into_bytes()).await;
     Ok(pair(result.map(|()| true)))
 }
 
@@ -455,7 +495,7 @@ async fn atomic_write(_lua: Lua, path: String, content: String) -> LuaResult<Pai
 /// if err then print("rm failed: " .. err) end
 /// maki.fs.rm("stale_dir", { recursive = true, force = true })
 #[lua_fn(guard = FsWrite)]
-async fn rm(_lua: Lua, path: String, opts: Option<Table>) -> LuaResult<Pair<bool>> {
+async fn rm(lua: Lua, path: String, opts: Option<Table>) -> LuaResult<Pair<bool>> {
     let abs = make_absolute(&path)?;
     let recursive = opts
         .as_ref()
@@ -465,27 +505,8 @@ async fn rm(_lua: Lua, path: String, opts: Option<Table>) -> LuaResult<Pair<bool
         .as_ref()
         .and_then(|t| t.get::<bool>("force").ok())
         .unwrap_or(false);
-    let result = smol::unblock(move || -> std::io::Result<()> {
-        let meta = match std::fs::symlink_metadata(&abs) {
-            Ok(m) => m,
-            Err(e) if force && e.kind() == ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e),
-        };
-        if meta.is_dir() {
-            if recursive {
-                std::fs::remove_dir_all(&abs)
-            } else {
-                std::fs::remove_dir(&abs)
-            }
-        } else {
-            match std::fs::remove_file(&abs) {
-                Ok(()) => Ok(()),
-                Err(e) if meta.file_type().is_symlink() => std::fs::remove_dir(&abs).map_err(|_| e),
-                Err(e) => Err(e),
-            }
-        }
-    })
-    .await;
+    let fs = backend(&lua);
+    let result = fs.rm(abs, recursive, force).await;
     Ok(pair(result.map(|()| true)))
 }
 
@@ -498,17 +519,14 @@ async fn rm(_lua: Lua, path: String, opts: Option<Table>) -> LuaResult<Pair<bool
 /// @example
 /// maki.fs.mkdir("a/b/c", { parents = true })
 #[lua_fn(guard = FsWrite)]
-async fn mkdir(_lua: Lua, path: String, opts: Option<Table>) -> LuaResult<Pair<bool>> {
+async fn mkdir(lua: Lua, path: String, opts: Option<Table>) -> LuaResult<Pair<bool>> {
     let abs = make_absolute(&path)?;
     let parents = opts
         .as_ref()
         .and_then(|t| t.get::<bool>("parents").ok())
         .unwrap_or(false);
-    let result = if parents {
-        smol::fs::create_dir_all(&abs).await
-    } else {
-        smol::fs::create_dir(&abs).await
-    };
+    let fs = backend(&lua);
+    let result = fs.mkdir(abs, parents).await;
     Ok(pair(result.map(|()| true)))
 }
 
@@ -550,42 +568,11 @@ async fn glob(lua: Lua, pattern: Value, opts: Option<Table>) -> LuaResult<Pair<T
     let sort = opts.as_ref().and_then(|t| t.get::<String>("sort").ok());
     let sort_mtime = sort.as_deref() == Some("mtime");
 
-    let result: Result<Vec<String>, String> = smol::unblock(move || {
-        let root = maki_agent::tools::resolve_search_path(path.as_deref())?;
-        let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
-
-        let walker = maki_agent::tools::walk_builder_opts(&root, &pattern_refs, gitignore)?.build();
-
-        let iter = walker
-            .flatten()
-            .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()));
-
-        let paths: Vec<String> = if sort_mtime {
-            let mut entries: Vec<_> = iter
-                .filter_map(|e| {
-                    let p = e.into_path();
-                    let mt = maki_agent::tools::mtime(&p);
-                    p.to_str().map(|s| (mt, s.to_owned()))
-                })
-                .collect();
-            entries.sort_unstable_by_key(|e| Reverse(e.0));
-            if let Some(lim) = limit {
-                entries.truncate(lim);
-            }
-            entries.into_iter().map(|(_, s)| s).collect()
-        } else {
-            let bounded: Box<dyn Iterator<Item = _>> = match limit {
-                Some(lim) => Box::new(iter.take(lim)),
-                None => Box::new(iter),
-            };
-            bounded
-                .filter_map(|e| e.into_path().to_str().map(|s| s.to_owned()))
-                .collect()
-        };
-
-        Ok(paths)
-    })
-    .await;
+    let fs = backend(&lua);
+    let result: Result<Vec<String>, String> = fs
+        .glob(patterns, path, limit, gitignore, sort_mtime)
+        .await
+        .map_err(|e| e.to_string());
 
     let paths = try_pair!(result.map_err(|e| format!("glob: {e}")));
     let tbl = lua.create_table()?;
@@ -638,9 +625,10 @@ async fn grep(lua: Lua, pattern: String, opts: Option<Table>) -> LuaResult<Pair<
         }
     }
 
-    let result = smol::unblock(move || maki_agent::tools::grep::grep_search(params)).await;
+    let fs = backend(&lua);
+    let result = fs.grep(params).await;
 
-    let (base, entries) = try_pair!(result);
+    let (base, entries) = try_pair!(result.map_err(|e| e.to_string()));
     let arr = lua.create_table()?;
     for (i, entry) in entries.iter().enumerate() {
         let etbl = lua.create_table()?;

@@ -4,8 +4,12 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use maki_agent::command::CustomCommand;
+use maki_agent::{CancelToken, CancelTrigger};
 use maki_agent::{McpPromptInfo, McpSnapshotReader};
-use maki_lua::{LuaCommandInfo, LuaCommandReader};
+use maki_lua::{
+    CommandArgumentContext, CommandArgumentItem, CommandArgumentLifecycle, EventHandle,
+    LuaCommandInfo, LuaCommandReader,
+};
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Matcher, Nucleo, Utf32String};
 use ratatui::Frame;
@@ -14,7 +18,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
-use crate::theme;
+use crate::{repaint::Dirty, theme};
 
 const TICK_TIMEOUT_MS: u64 = 10;
 
@@ -124,8 +128,10 @@ pub struct ParsedCommand {
 
 pub enum CommandAction {
     Consumed,
+    SelectionChanged,
     Execute(ParsedCommand),
-    Complete(String),
+    AcceptArgument { text: String, cursor: usize },
+    Complete { text: String, cursor: usize },
     Passthrough,
 }
 
@@ -161,6 +167,27 @@ pub struct CommandPalette {
     nucleo: Nucleo<CommandItem>,
     matcher: Matcher,
     current_arg_count: usize,
+    argument_items: Vec<ArgumentMatch>,
+    argument_range: Option<(usize, usize)>,
+    argument_session: u64,
+    argument_generation: u64,
+    argument_context: Option<CommandArgumentContext>,
+    pending_arguments: Option<PendingArguments>,
+    pending_cancel: Option<CancelTrigger>,
+    lifecycle_cancel: Option<CancelTrigger>,
+    accepted_argument_input: Option<String>,
+}
+
+struct ArgumentMatch {
+    item: CommandArgumentItem,
+    indices: Vec<u32>,
+}
+
+struct PendingArguments {
+    rx: flume::Receiver<Vec<CommandArgumentItem>>,
+    generation: u64,
+    query: String,
+    range: (usize, usize),
 }
 
 impl CommandPalette {
@@ -191,6 +218,15 @@ impl CommandPalette {
             nucleo,
             matcher: Matcher::new(Config::DEFAULT),
             current_arg_count: 0,
+            argument_items: Vec::new(),
+            argument_range: None,
+            argument_session: 0,
+            argument_generation: 0,
+            argument_context: None,
+            pending_arguments: None,
+            pending_cancel: None,
+            lifecycle_cancel: None,
+            accepted_argument_input: None,
         }
     }
 
@@ -261,31 +297,93 @@ impl CommandPalette {
         nucleo
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent, input: &str) -> CommandAction {
+    pub fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        input: &str,
+        handle: &EventHandle,
+    ) -> CommandAction {
+        if self.accepted_argument_input.as_deref() == Some(input) {
+            return if key.code == KeyCode::Enter {
+                match self.confirm(input) {
+                    Some(cmd) => {
+                        self.close(handle);
+                        CommandAction::Execute(cmd)
+                    }
+                    None => CommandAction::Consumed,
+                }
+            } else {
+                CommandAction::Passthrough
+            };
+        }
         if !self.is_active() {
             return CommandAction::Passthrough;
         }
         match key.code {
             KeyCode::Up => {
-                self.move_up();
-                CommandAction::Consumed
+                if !self.argument_items.is_empty() {
+                    self.selected = self.selected.saturating_sub(1);
+                    self.notify_lifecycle(handle, CommandArgumentLifecycle::Highlight);
+                    CommandAction::Consumed
+                } else {
+                    self.move_up();
+                    CommandAction::SelectionChanged
+                }
             }
             KeyCode::Down => {
-                self.move_down();
-                CommandAction::Consumed
+                if !self.argument_items.is_empty() {
+                    self.selected = (self.selected + 1).min(self.argument_items.len() - 1);
+                    self.notify_lifecycle(handle, CommandArgumentLifecycle::Highlight);
+                    CommandAction::Consumed
+                } else {
+                    self.move_down();
+                    CommandAction::SelectionChanged
+                }
             }
             KeyCode::Esc => {
-                self.close();
+                self.close(handle);
                 CommandAction::Consumed
             }
-            KeyCode::Enter => match self.confirm(input) {
-                Some(cmd) => {
-                    self.close();
-                    CommandAction::Execute(cmd)
+            KeyCode::Enter => {
+                if let Some(item) = self.argument_items.get(self.selected) {
+                    let range = self.argument_range.unwrap_or((input.len(), input.len()));
+                    let text = self.replace_argument(input, &item.item.insertion);
+                    let cursor = range.0 + item.item.insertion.len();
+                    self.notify_lifecycle(handle, CommandArgumentLifecycle::Accept);
+                    self.argument_context = None;
+                    self.lifecycle_cancel = None;
+                    self.accepted_argument_input = Some(text.clone());
+                    self.argument_items.clear();
+                    self.argument_range = None;
+                    self.pending_arguments = None;
+                    CommandAction::AcceptArgument { text, cursor }
+                } else {
+                    match self.confirm(input) {
+                        Some(cmd) => {
+                            self.close(handle);
+                            CommandAction::Execute(cmd)
+                        }
+                        None => CommandAction::Consumed,
+                    }
                 }
-                None => CommandAction::Consumed,
-            },
+            }
             KeyCode::Tab => {
+                if let Some(insertion) = self
+                    .argument_items
+                    .get(self.selected)
+                    .map(|item| item.item.insertion.clone())
+                {
+                    let range = self.argument_range.unwrap_or((input.len(), input.len()));
+                    self.notify_lifecycle(handle, CommandArgumentLifecycle::Accept);
+                    self.argument_context = None;
+                    self.lifecycle_cancel = None;
+                    let text = self.replace_argument(input, &insertion);
+                    self.accepted_argument_input = Some(text.clone());
+                    return CommandAction::Complete {
+                        text,
+                        cursor: range.0 + insertion.len(),
+                    };
+                }
                 if let Some(item) = self.filtered.get(self.selected) {
                     let name = self.item_name(item);
                     let text = if self.item_has_args(item) {
@@ -293,7 +391,10 @@ impl CommandPalette {
                     } else {
                         name
                     };
-                    CommandAction::Complete(text)
+                    CommandAction::Complete {
+                        cursor: text.len(),
+                        text,
+                    }
                 } else {
                     CommandAction::Consumed
                 }
@@ -303,7 +404,176 @@ impl CommandPalette {
     }
 
     pub fn is_active(&self) -> bool {
-        !self.filtered.is_empty()
+        self.accepted_argument_input.is_none()
+            && (!self.filtered.is_empty()
+                || !self.argument_items.is_empty()
+                || self.argument_context.is_some())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn argument_generation(&self) -> u64 {
+        self.argument_generation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_argument_completion(
+        &mut self,
+        range: (usize, usize),
+        item: CommandArgumentItem,
+    ) {
+        self.argument_range = Some(range);
+        self.argument_items = vec![ArgumentMatch {
+            item,
+            indices: Vec::new(),
+        }];
+        self.selected = 0;
+    }
+
+    pub fn sync_arguments(&mut self, input: &str, cursor: usize, handle: &EventHandle, mode: &str) {
+        self.pending_cancel.take();
+        self.argument_generation = self.argument_generation.wrapping_add(1);
+        self.argument_items.clear();
+        self.argument_range = None;
+        self.pending_arguments = None;
+        if self.accepted_argument_input.as_deref() == Some(input) {
+            return;
+        }
+        self.accepted_argument_input = None;
+        let command = self
+            .filtered
+            .get(self.selected)
+            .map(|item| self.item_name(item));
+        let lua = command
+            .as_deref()
+            .and_then(|command| self.find_lua_command(command))
+            .filter(|lua| lua.has_argument_completion)
+            .map(|lua| Arc::clone(&lua.plugin));
+        let Some((command, plugin, (start, end, arg, index))) = command
+            .zip(lua)
+            .zip(argument_at_cursor(input, cursor))
+            .map(|((command, plugin), argument)| (command, plugin, argument))
+        else {
+            self.cancel_arguments(handle);
+            return;
+        };
+        let same_session = self
+            .argument_context
+            .as_ref()
+            .is_some_and(|context| context.command.as_ref() == command && context.plugin == plugin);
+        if !same_session {
+            self.cancel_arguments(handle);
+            self.argument_session = self.argument_session.wrapping_add(1);
+        }
+        let context = CommandArgumentContext {
+            command: Arc::from(command.as_str()),
+            plugin,
+            args: command_args(input).to_string(),
+            arg: arg.clone(),
+            index,
+            mode: mode.to_string(),
+            session: self.argument_session,
+            generation: self.argument_generation,
+        };
+        let (cancel, token) = CancelToken::new();
+        let Some(rx) = handle.collect_command_argument_items(context.clone(), token) else {
+            return;
+        };
+        self.argument_context = Some(context);
+        self.pending_cancel = Some(cancel);
+        self.pending_arguments = Some(PendingArguments {
+            rx,
+            generation: self.argument_generation,
+            query: arg,
+            range: (start, end),
+        });
+    }
+
+    pub fn poll_arguments(&mut self, handle: &EventHandle) -> Dirty {
+        let Some(pending) = self.pending_arguments.take() else {
+            return Dirty::NO;
+        };
+        let Ok(items) = pending.rx.try_recv() else {
+            if !pending.rx.is_disconnected() {
+                self.pending_arguments = Some(pending);
+            }
+            return Dirty::NO;
+        };
+        if pending.generation != self.argument_generation {
+            return Dirty::NO;
+        }
+        self.argument_items.clear();
+        self.selected = 0;
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let pattern = nucleo::pattern::Pattern::parse(
+            &pending.query,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+        );
+        for item in items {
+            let mut indices = Vec::new();
+            if pattern
+                .indices(
+                    Utf32String::from(item.label.as_str()).slice(..),
+                    &mut matcher,
+                    &mut indices,
+                )
+                .is_none()
+            {
+                continue;
+            }
+            self.argument_items.push(ArgumentMatch { item, indices });
+        }
+        self.argument_range = Some(pending.range);
+        self.pending_cancel = None;
+        if !self.argument_items.is_empty() {
+            self.notify_lifecycle(handle, CommandArgumentLifecycle::Highlight);
+        }
+        Dirty::YES
+    }
+
+    fn notify_lifecycle(&mut self, handle: &EventHandle, event: CommandArgumentLifecycle) {
+        let Some(context) = self.argument_context.clone() else {
+            return;
+        };
+        let item = match event {
+            CommandArgumentLifecycle::Cancel => None,
+            CommandArgumentLifecycle::Highlight | CommandArgumentLifecycle::Accept => self
+                .argument_items
+                .get(self.selected)
+                .map(|item| item.item.clone()),
+        };
+        self.lifecycle_cancel.take();
+        if matches!(event, CommandArgumentLifecycle::Highlight) {
+            let (cancel, token) = CancelToken::new();
+            handle.command_argument_lifecycle(context, event, item, token);
+            self.lifecycle_cancel = Some(cancel);
+        } else {
+            handle.command_argument_lifecycle(context, event, item, CancelToken::none());
+        }
+    }
+
+    pub fn cancel_arguments(&mut self, handle: &EventHandle) {
+        self.pending_cancel.take();
+        self.lifecycle_cancel.take();
+        if let Some(context) = self.argument_context.clone() {
+            handle.command_argument_lifecycle(
+                context,
+                CommandArgumentLifecycle::Cancel,
+                None,
+                CancelToken::none(),
+            );
+        }
+        self.argument_context = None;
+        self.argument_items.clear();
+        self.argument_range = None;
+        self.pending_arguments = None;
+    }
+
+    fn replace_argument(&self, input: &str, replacement: &str) -> String {
+        let Some((start, end)) = self.argument_range else {
+            return input.to_string();
+        };
+        format!("{}{}{}", &input[..start], replacement, &input[end..])
     }
 
     pub fn sync(&mut self, input: &str) {
@@ -390,10 +660,17 @@ impl CommandPalette {
         }
 
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+        self.argument_items.clear();
+        self.argument_range = None;
     }
 
-    pub fn close(&mut self) {
+    pub fn close(&mut self, handle: &EventHandle) {
+        self.cancel_arguments(handle);
         self.filtered.clear();
+        self.argument_items.clear();
+        self.argument_range = None;
+        self.pending_arguments = None;
+        self.accepted_argument_input = None;
         self.current_arg_count = 0;
     }
 
@@ -486,7 +763,11 @@ impl CommandPalette {
     }
 
     pub fn view(&self, frame: &mut Frame, input_area: Rect) -> Option<Rect> {
-        let filtered = &self.filtered;
+        let filtered = if self.argument_items.is_empty() {
+            &self.filtered
+        } else {
+            return self.view_arguments(frame, input_area);
+        };
         if filtered.is_empty() {
             return None;
         }
@@ -557,6 +838,48 @@ impl CommandPalette {
         Some(popup)
     }
 
+    fn view_arguments(&self, frame: &mut Frame, input_area: Rect) -> Option<Rect> {
+        let height = (self.argument_items.len() as u16).min(input_area.y);
+        if height == 0 {
+            return None;
+        }
+        let width = self
+            .argument_items
+            .iter()
+            .map(|m| m.item.label.len() + m.item.description.as_deref().map_or(0, |d| d.len() + 2))
+            .max()
+            .unwrap_or(0) as u16
+            + 2;
+        let popup = Rect {
+            x: input_area.x,
+            y: input_area.y.saturating_sub(height),
+            width: width.min(input_area.width),
+            height,
+        };
+        let t = theme::current();
+        let lines = self
+            .argument_items
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let selected = i == self.selected;
+                let style = if selected { t.item_selected } else { t.item };
+                let desc = m.item.description.as_deref().unwrap_or("");
+                let label = self.build_highlighted_spans(&m.item.label, &m.indices, style);
+                let mut spans = vec![Span::raw(" ")];
+                spans.extend(label);
+                spans.push(Span::styled(format!("  {desc}"), style));
+                Line::from(spans)
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines).style(Style::new().bg(t.background)),
+            popup,
+        );
+        Some(popup)
+    }
+
     fn build_highlighted_spans(&self, text: &str, indices: &[u32], base: Style) -> Vec<Span<'_>> {
         if indices.is_empty() {
             return vec![Span::styled(text.to_string(), base)];
@@ -589,6 +912,30 @@ impl CommandPalette {
 
         spans
     }
+}
+
+fn command_args(input: &str) -> &str {
+    input
+        .strip_prefix('/')
+        .and_then(|input| input.find(char::is_whitespace).map(|i| &input[i + 1..]))
+        .unwrap_or("")
+}
+
+fn argument_at_cursor(input: &str, cursor: usize) -> Option<(usize, usize, String, usize)> {
+    let slash = input.strip_prefix('/')?;
+    let command_end = slash.find(char::is_whitespace)? + 1;
+    if cursor < command_end || !input.is_char_boundary(cursor) {
+        return None;
+    }
+    let start = input[..cursor]
+        .rfind(char::is_whitespace)
+        .map_or(command_end, |i| i + 1);
+    let end = input[cursor..]
+        .find(char::is_whitespace)
+        .map_or(input.len(), |i| cursor + i);
+    let arg = input[start..end].to_string();
+    let index = input[command_end..start].split_whitespace().count();
+    Some((start, end, arg, index))
 }
 
 #[cfg(test)]
@@ -651,6 +998,7 @@ mod tests {
             description: Arc::from("thinking selector"),
             plugin: Arc::from("thinking"),
             max_args: 1,
+            has_argument_completion: false,
         }]);
         let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), lua);
         p.sync("/thinking");
@@ -668,7 +1016,7 @@ mod tests {
     #[test]
     fn close_deactivates() {
         let mut p = synced("/");
-        p.close();
+        p.close(&EventHandle::disconnected_for_test());
         assert!(!p.is_active());
     }
 
@@ -941,12 +1289,14 @@ mod tests {
                 description: Arc::from("View memory files"),
                 plugin: Arc::from("memory"),
                 max_args: 0,
+                has_argument_completion: false,
             },
             LuaCommandInfo {
                 name: Arc::from("/deploy"),
                 description: Arc::from("Deploy the project"),
                 plugin: Arc::from("deploy_plugin"),
                 max_args: 0,
+                has_argument_completion: false,
             },
         ])
     }
@@ -957,6 +1307,7 @@ mod tests {
             description: Arc::from("Rename the current session"),
             plugin: Arc::from("sessions"),
             max_args,
+            has_argument_completion: false,
         }]);
         let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), reader);
         p.sync(input);
@@ -974,6 +1325,24 @@ mod tests {
         assert_eq!(
             synced_with_nargs(input, max_args).is_active(),
             expect_active
+        );
+    }
+
+    #[test]
+    fn argument_at_cursor_selects_middle_argument() {
+        assert_eq!(
+            argument_at_cursor("/rename first second third", 16),
+            Some((14, 20, "second".to_string(), 1))
+        );
+    }
+
+    #[test]
+    fn argument_at_cursor_handles_multibyte_text() {
+        let input = "/rename αβ second";
+        let cursor = input.find('β').unwrap();
+        assert_eq!(
+            argument_at_cursor(input, cursor),
+            Some((8, 12, "αβ".to_string(), 0))
         );
     }
 
@@ -1031,6 +1400,180 @@ mod tests {
         assert_eq!(cmd.args, "some-arg");
     }
 
+    #[test_case("/deploy", "" ; "no_arguments")]
+    #[test_case("/deploy ", "" ; "empty_argument")]
+    #[test_case("/deploy  staging west ", " staging west " ; "raw_whitespace")]
+    fn command_args_excludes_slash_command(input: &str, expected: &str) {
+        assert_eq!(command_args(input), expected);
+    }
+
+    #[test]
+    fn navigation_requires_argument_completion_resync() {
+        let lua = LuaCommandReader::from_commands(vec![
+            LuaCommandInfo {
+                name: Arc::from("/alpha"),
+                description: Arc::from("alpha"),
+                plugin: Arc::from("plugin"),
+                max_args: 1,
+                has_argument_completion: true,
+            },
+            LuaCommandInfo {
+                name: Arc::from("/beta"),
+                description: Arc::from("beta"),
+                plugin: Arc::from("plugin"),
+                max_args: 1,
+                has_argument_completion: true,
+            },
+        ]);
+        let mut palette = CommandPalette::new(Arc::from([]), empty_snapshot(), lua);
+        palette.sync("/ ");
+        let handle = EventHandle::disconnected_for_test();
+
+        assert!(matches!(
+            palette.handle_key(KeyEvent::from(KeyCode::Down), "/ ", &handle),
+            CommandAction::SelectionChanged
+        ));
+    }
+
+    #[test]
+    fn delayed_argument_response_is_rejected_after_navigation_resync() {
+        let lua = LuaCommandReader::from_commands(vec![
+            LuaCommandInfo {
+                name: Arc::from("/alpha"),
+                description: Arc::from("alpha"),
+                plugin: Arc::from("plugin"),
+                max_args: 1,
+                has_argument_completion: true,
+            },
+            LuaCommandInfo {
+                name: Arc::from("/beta"),
+                description: Arc::from("beta"),
+                plugin: Arc::from("plugin"),
+                max_args: 1,
+                has_argument_completion: true,
+            },
+        ]);
+        let mut palette = CommandPalette::new(Arc::from([]), empty_snapshot(), lua);
+        palette.sync("/ ");
+        let handle = EventHandle::disconnected_for_test();
+        let (tx, rx) = flume::bounded(1);
+        palette.pending_arguments = Some(PendingArguments {
+            rx,
+            generation: palette.argument_generation,
+            query: String::new(),
+            range: (2, 2),
+        });
+        assert!(matches!(
+            palette.handle_key(KeyEvent::from(KeyCode::Down), "/ ", &handle),
+            CommandAction::SelectionChanged
+        ));
+        tx.send(vec![CommandArgumentItem {
+            label: "stale".into(),
+            insertion: "stale".into(),
+            description: None,
+        }])
+        .unwrap();
+        palette.sync_arguments("/ ", 2, &handle, "build");
+
+        assert_eq!(palette.poll_arguments(&handle), Dirty::NO);
+        assert!(palette.argument_items.is_empty());
+    }
+
+    #[test]
+    fn enter_accepts_argument_then_executes_completed_command() {
+        let mut palette = synced_with_nargs("/rename draft", usize::MAX);
+        palette.set_argument_completion(
+            (8, 13),
+            CommandArgumentItem {
+                label: "final".into(),
+                insertion: "final".into(),
+                description: None,
+            },
+        );
+
+        let handle = EventHandle::disconnected_for_test();
+        assert!(matches!(
+            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename draft", &handle),
+            CommandAction::AcceptArgument { text, cursor }
+                if text == "/rename final" && cursor == 13
+        ));
+        assert!(!palette.is_active());
+        assert!(matches!(
+            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename final", &handle),
+            CommandAction::Execute(ParsedCommand { name, args })
+                if name == "/rename" && args == "final"
+        ));
+    }
+
+    #[test]
+    fn tab_completes_selected_argument_in_place() {
+        let mut palette = synced_with_nargs("/rename one draft three", usize::MAX);
+        palette.argument_items.push(ArgumentMatch {
+            item: CommandArgumentItem {
+                label: "final".into(),
+                insertion: "final".into(),
+                description: None,
+            },
+            indices: Vec::new(),
+        });
+        palette.argument_range = Some((12, 17));
+
+        let handle = EventHandle::disconnected_for_test();
+        assert!(matches!(
+            palette.handle_key(KeyEvent::from(KeyCode::Tab), "/rename one draft three", &handle),
+            CommandAction::Complete { text, cursor }
+                if text == "/rename one final three" && cursor == 17
+        ));
+    }
+
+    #[test]
+    fn zero_match_keeps_lifecycle_until_recovery_and_close_cancels_once() {
+        let lua = LuaCommandReader::from_commands(vec![LuaCommandInfo {
+            name: Arc::from("/deploy"),
+            description: Arc::from("Deploy"),
+            plugin: Arc::from("deploy"),
+            max_args: 1,
+            has_argument_completion: true,
+        }]);
+        let mut palette = CommandPalette::new(Arc::from([]), empty_snapshot(), lua);
+        let (handle, probe) = maki_lua::test_support::probed_event_handle();
+        let items = vec![CommandArgumentItem {
+            label: "alpha".into(),
+            insertion: "alpha".into(),
+            description: None,
+        }];
+
+        palette.sync("/deploy a");
+        palette.sync_arguments("/deploy a", 9, &handle, "build");
+        probe.try_finish_command_arguments(items.clone()).unwrap();
+        let _ = palette.poll_arguments(&handle);
+        assert_eq!(
+            probe.try_finish_command_argument_lifecycle(),
+            Some(("highlight", Some("alpha".into()), true))
+        );
+
+        palette.sync_arguments("/deploy z", 9, &handle, "build");
+        probe.try_finish_command_arguments(items.clone()).unwrap();
+        let _ = palette.poll_arguments(&handle);
+        assert!(palette.is_active());
+        assert!(probe.try_finish_command_argument_lifecycle().is_none());
+
+        palette.sync_arguments("/deploy a", 9, &handle, "build");
+        probe.try_finish_command_arguments(items).unwrap();
+        let _ = palette.poll_arguments(&handle);
+        assert_eq!(
+            probe.try_finish_command_argument_lifecycle(),
+            Some(("highlight", Some("alpha".into()), true))
+        );
+        palette.close(&handle);
+        assert_eq!(
+            probe.try_finish_command_argument_lifecycle(),
+            Some(("cancel", None, true))
+        );
+        palette.close(&handle);
+        assert!(probe.try_finish_command_argument_lifecycle().is_none());
+    }
+
     #[test]
     fn lua_commands_update_on_generation_change() {
         let (writer, reader) = maki_lua::test_support::lua_command_writer_pair();
@@ -1039,6 +1582,7 @@ mod tests {
             description: Arc::from("old command"),
             plugin: Arc::from("p"),
             max_args: 0,
+            has_argument_completion: false,
         }]);
         let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), reader);
         p.sync("/");
@@ -1055,12 +1599,14 @@ mod tests {
                 description: Arc::from("new"),
                 plugin: Arc::from("p"),
                 max_args: 0,
+                has_argument_completion: false,
             },
             LuaCommandInfo {
                 name: Arc::from("/new2"),
                 description: Arc::from("new2"),
                 plugin: Arc::from("p"),
                 max_args: 0,
+                has_argument_completion: false,
             },
         ]);
         p.sync("/");

@@ -765,13 +765,41 @@ fn register_permission_rule(
 ///                          with one opts table: `opts.args` is the raw
 ///                          argument string (whitespace kept, may be empty)
 ///                          and `opts.fargs` is the same split into words.
+///   completion  (table)    Optional. Argument completion specification. Use
+///                          `items = {...}` for a static list or `get_items =
+///                          function(ctx) -> {...}` for dynamic candidates.
+///                          Each candidate has `label` (match/display text),
+///                          `insertion` (replacement text), and optional
+///                          `description`. The callback context has `command`
+///                          (registered slash name), `args` (raw argument string,
+///                          never the full slash input), `arg` (argument under
+///                          the cursor), `index` (zero-based argument index),
+///                          `mode` (active mode id), `session` (stable for one
+///                          popup session), and `generation` (increases for
+///                          each request in that session). Optional lifecycle
+///                          callbacks `on_highlight(ctx, item)`,
+///                          `on_accept(ctx, item)`, and `on_cancel(ctx)` run in
+///                          request order. The first result highlights its
+///                          selected candidate. A later highlight cancels a
+///                          running highlight callback. Accept runs after its
+///                          highlight and ends the session without on_cancel.
+///                          Dismissal, an empty result, or a new completion
+///                          session calls on_cancel once. `Tab` accepts and
+///                          keeps editing. `Enter` accepts; press `Enter` again
+///                          to execute the command.
 /// @return
 /// @example
 /// maki.api.register_command({
 ///   name = "/hello",
 ///   description = "Say hello",
-///   handler = function()
-///     maki.ui.flash("Hello from my plugin!")
+///   nargs = 1,
+///   completion = {
+///     get_items = function(ctx)
+///       return { { label = "world", insertion = "world", description = ctx.mode } }
+///     end,
+///   },
+///   handler = function(opts)
+///     maki.ui.flash("Hello " .. opts.args)
 ///   end,
 /// })
 #[lua_fn]
@@ -1382,6 +1410,30 @@ fn register_command_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> LuaRe
         .get("handler")
         .map_err(|_| mlua::Error::runtime("register_command: missing 'handler'"))?;
 
+    let (completion_key, completion_on_highlight, completion_on_accept, completion_on_cancel) =
+        match spec.get::<Table>("completion") {
+            Ok(completion) => {
+                let items = if let Ok(items) = completion.get::<mlua::Table>("items") {
+                    lua.create_registry_value(items)?
+                } else {
+                    let get_items: Function = completion.get("get_items")?;
+                    lua.create_registry_value(get_items)?
+                };
+                let hook = |name| -> LuaResult<Option<RegistryKey>> {
+                    completion
+                        .get::<Option<Function>>(name)?
+                        .map(|function| lua.create_registry_value(function))
+                        .transpose()
+                };
+                (
+                    Some(items),
+                    hook("on_highlight")?,
+                    hook("on_accept")?,
+                    hook("on_cancel")?,
+                )
+            }
+            Err(_) => (None, None, None, None),
+        };
     let handler_key = lua.create_registry_value(handler)?;
     let name: Arc<str> = Arc::from(name.as_str());
     let description: Arc<str> = Arc::from(description.as_str());
@@ -1390,12 +1442,31 @@ fn register_command_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> LuaRe
         let mut map = lua
             .app_data_mut::<CommandHandlerMap>()
             .ok_or_else(|| mlua::Error::runtime("register_command: not initialized"))?;
-        map.entry(Arc::clone(&plugin)).or_default().insert(
+        let commands = map.entry(Arc::clone(&plugin)).or_default();
+        if let Some(previous) = commands.remove(&name) {
+            let _ = lua.remove_registry_value(previous.handler);
+            for key in [
+                previous.argument_completion,
+                previous.completion_on_highlight,
+                previous.completion_on_accept,
+                previous.completion_on_cancel,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let _ = lua.remove_registry_value(key);
+            }
+        }
+        commands.insert(
             Arc::clone(&name),
             CommandEntry {
                 handler: handler_key,
                 description,
                 max_args,
+                argument_completion: completion_key,
+                completion_on_highlight,
+                completion_on_accept,
+                completion_on_cancel,
             },
         );
     }

@@ -601,6 +601,23 @@ pub(crate) fn key_event_to_string(key: &KeyEvent) -> String {
     s
 }
 
+/// The human-facing form of a key: each `+`-separated segment of
+/// [`key_event_to_string`] title-cased (`ctrl+d` -> `Ctrl+D`).
+pub(crate) fn key_display(key: &KeyEvent) -> String {
+    key_event_to_string(key)
+        .split('+')
+        .map(|seg| {
+            let mut chars = seg.chars();
+            let head = chars
+                .next()
+                .map(|c| c.to_uppercase().collect::<String>())
+                .unwrap_or_default();
+            format!("{head}{}", chars.collect::<String>())
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -616,6 +633,14 @@ mod tests {
     #[test_case(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), "a")]
     fn key_event_to_string_cases(input: KeyEvent, expected: &str) {
         assert_eq!(key_event_to_string(&input), expected);
+    }
+
+    #[test_case(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL), "Ctrl+D")]
+    #[test_case(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT), "Shift+Tab")]
+    #[test_case(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), "Enter")]
+    #[test_case(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), "Esc")]
+    fn key_display_title_cases_segments(input: KeyEvent, expected: &str) {
+        assert_eq!(key_display(&input), expected);
     }
 
     #[test]
