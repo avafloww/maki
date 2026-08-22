@@ -381,11 +381,12 @@ impl InputBox {
                 Placeholder::Blank => (" ", Vec::new()),
             };
             let mut spans = vec![super::chevron_span()];
-            spans.push(if focused {
-                Span::styled(head, placeholder_base.reversed())
+            if focused && !head.is_empty() {
+                spans.push(Span::styled(&head[..1], placeholder_base.reversed()));
+                spans.push(Span::styled(&head[1..], placeholder_base));
             } else {
-                Span::styled(head, placeholder_base)
-            });
+                spans.push(Span::styled(head, placeholder_base));
+            }
             spans.extend(tail);
             vec![Line::from(spans)]
         } else {
