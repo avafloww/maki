@@ -372,19 +372,24 @@ impl CommandPalette {
                 CommandAction::Consumed
             }
             KeyCode::Enter => {
-                if let Some(item) = self.argument_items.get(self.selected) {
-                    let range = self.argument_range.unwrap_or((input.len(), input.len()));
-                    let text = self.replace_argument(input, &item.item.insertion);
-                    let cursor = range.0 + item.item.insertion.len();
+                if let Some((range, item)) = self
+                    .argument_range
+                    .zip(self.argument_items.get(self.selected))
+                {
+                    let insertion = &item.item.insertion;
+                    let text = self.replace_argument(input, insertion);
+                    let cursor = range.0 + insertion.len();
                     self.notify_lifecycle(handle, CommandArgumentLifecycle::Accept);
                     self.argument_context = None;
                     self.lifecycle_cancel = None;
-                    self.accepted_argument_input = Some(text.clone());
                     self.argument_items.clear();
                     self.argument_range = None;
                     self.pending_arguments = None;
+                    self.accepted_argument_input = Some(text.clone());
                     CommandAction::AcceptArgument { text, cursor }
                 } else {
+                    // Not settled: no items, or stale ones still on screen
+                    // while the current query is in flight.
                     match self.confirm(input) {
                         Some(cmd) => {
                             self.close(handle);
@@ -395,12 +400,11 @@ impl CommandPalette {
                 }
             }
             KeyCode::Tab => {
-                if let Some(insertion) = self
-                    .argument_items
-                    .get(self.selected)
-                    .map(|item| item.item.insertion.clone())
+                if let Some((range, item)) = self
+                    .argument_range
+                    .zip(self.argument_items.get(self.selected))
                 {
-                    let range = self.argument_range.unwrap_or((input.len(), input.len()));
+                    let insertion = item.item.insertion.clone();
                     self.notify_lifecycle(handle, CommandArgumentLifecycle::Accept);
                     self.argument_context = None;
                     self.lifecycle_cancel = None;
@@ -459,7 +463,8 @@ impl CommandPalette {
     pub fn sync_arguments(&mut self, input: &str, cursor: usize, handle: &EventHandle, mode: &str) {
         self.pending_cancel.take();
         self.argument_generation = self.argument_generation.wrapping_add(1);
-        self.argument_items.clear();
+        // The previous items stay on screen until the new query lands; the
+        // branches below cancel (and clear) them when they cannot survive.
         self.argument_range = None;
         self.pending_arguments = None;
         if self.accepted_argument_input.as_deref() == Some(input) {
@@ -688,8 +693,8 @@ impl CommandPalette {
         }
 
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
-        self.argument_items.clear();
-        self.argument_range = None;
+        // Argument items survive here: sync_arguments follows every sync
+        // and clears them when their session ends.
     }
 
     pub fn close(&mut self, handle: &EventHandle) {
@@ -1600,6 +1605,76 @@ mod tests {
             CommandAction::Execute(ParsedCommand { name, args })
                 if name == "/rename" && args == "final"
         ));
+    }
+
+    fn settled_rename_palette() -> (
+        CommandPalette,
+        EventHandle,
+        maki_lua::test_support::RequestProbe,
+        CommandArgumentItem,
+    ) {
+        let lua = LuaCommandReader::from_commands(vec![LuaCommandInfo {
+            name: Arc::from("/rename"),
+            description: Arc::from("Rename the current session"),
+            plugin: Arc::from("sessions"),
+            max_args: usize::MAX,
+            has_argument_completion: true,
+        }]);
+        let mut palette = CommandPalette::new(Arc::from([]), empty_snapshot(), lua);
+        let (handle, probe) = maki_lua::test_support::probed_event_handle();
+        let final_item = CommandArgumentItem {
+            label: "final".into(),
+            insertion: "final".into(),
+            description: None,
+        };
+        palette.sync("/rename final");
+        palette.sync_arguments("/rename final", 13, &handle, "build");
+        probe
+            .try_finish_command_arguments(vec![final_item.clone()])
+            .unwrap();
+        let _ = palette.poll_arguments(&handle);
+        (palette, handle, probe, final_item)
+    }
+
+    #[test]
+    fn stale_argument_items_stay_until_new_result_lands() {
+        let (mut palette, handle, probe, _) = settled_rename_palette();
+
+        // Keystroke: the app re-syncs the command list and re-queries.
+        palette.sync("/rename final");
+        palette.sync_arguments("/rename final", 13, &handle, "build");
+        // The previous items stay on screen while the new query is in flight.
+        assert!(matches!(
+            palette.handle_key(KeyEvent::from(KeyCode::Down), "/rename final", &handle),
+            CommandAction::Consumed
+        ));
+
+        let finale = CommandArgumentItem {
+            label: "finale".into(),
+            insertion: "finale".into(),
+            description: None,
+        };
+        probe.try_finish_command_arguments(vec![finale]).unwrap();
+        let _ = palette.poll_arguments(&handle);
+        // The new result replaces the stale item: accepting now inserts it.
+        assert!(matches!(
+            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename final", &handle),
+            CommandAction::AcceptArgument { text, .. } if text == "/rename finale"
+        ));
+    }
+
+    #[test]
+    fn enter_while_argument_query_in_flight_executes_input() {
+        let (mut palette, handle, _, _) = settled_rename_palette();
+        palette.sync("/rename final");
+        palette.sync_arguments("/rename final", 13, &handle, "build");
+
+        assert!(matches!(
+            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename final", &handle),
+            CommandAction::Execute(ParsedCommand { name, args })
+                if name == "/rename" && args == "final"
+        ));
+        assert!(!palette.is_active());
     }
 
     #[test]
