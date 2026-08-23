@@ -48,6 +48,15 @@ pub trait PickerItem {
     fn is_highlighted(&self) -> bool {
         false
     }
+    fn context_str(&self) -> Option<&str> {
+        None
+    }
+    fn ago(&self) -> Option<String> {
+        None
+    }
+    fn is_finished(&self) -> bool {
+        false
+    }
 }
 
 impl PickerItem for String {
@@ -920,6 +929,11 @@ fn render_list<T: PickerItem>(
             (false, true) => (t.accent, theme::dim_style(t.accent, 0.4)),
             (false, false) => (t.item, t.item_desc),
         };
+        let label_style = if item.is_finished() && i != selected {
+            theme::dim_style(t.item, 0.5)
+        } else {
+            style
+        };
         let checkbox = enabled.map(|en| {
             let sym = if en[item_idx] { "✓ " } else { "✗ " };
             let sty = if i == selected {
@@ -932,11 +946,22 @@ fn render_list<T: PickerItem>(
             Span::styled(sym, sty)
         });
         let suffix = item.suffix();
-        let detail: Option<&str> = if item.is_spinning() {
-            Some(spinner_str(animation_elapsed_ms()))
+        let status: Option<String> = if item.is_spinning() {
+            Some(spinner_str(animation_elapsed_ms()).to_string())
         } else {
-            item.detail()
+            item.detail().map(String::from)
         };
+        let mut right_parts: Vec<String> = Vec::new();
+        if let Some(s) = status {
+            right_parts.push(s);
+        }
+        if let Some(ctx) = item.context_str() {
+            right_parts.push(ctx.to_string());
+        }
+        if let Some(ago_s) = item.ago() {
+            right_parts.push(ago_s);
+        }
+        let right = right_parts.join(" ");
         let suffix_gap = 2usize;
         let suffix_w = suffix.map(|s| s.width()).unwrap_or(0);
         let trailing_gap = suffix_w + if suffix_w > 0 { suffix_gap } else { 0 };
@@ -946,49 +971,52 @@ fn render_list<T: PickerItem>(
         } else {
             t.item_match
         };
-        let line = match detail {
-            Some(detail) => {
-                let max_label = area.width.saturating_sub(
-                    detail.width() as u16 + trailing_gap as u16 + 1 + DETAIL_RIGHT_PAD,
-                ) as usize;
-                let (label_spans, label_w) = label_spans(
-                    item.label(),
-                    label_indices,
-                    style,
-                    match_style,
-                    max_label.saturating_sub(2),
-                );
-                let pad = (area.width as usize).saturating_sub(
-                    label_w + trailing_gap + detail.width() + DETAIL_RIGHT_PAD as usize + 1,
-                );
-                let mut spans = Vec::with_capacity(8);
-                if let Some(cb) = checkbox {
-                    spans.push(cb);
-                }
-                spans.extend(label_spans);
-                if let Some(s) = suffix {
-                    spans.push(Span::styled(" ".repeat(suffix_gap), style));
-                    spans.push(Span::styled(s.to_string(), theme::dim_style(style, 0.4)));
-                }
-                spans.push(Span::styled(" ".repeat(pad), style));
-                spans.push(Span::styled(detail.to_string(), detail_style));
-                spans.push(Span::styled(" ".repeat(DETAIL_RIGHT_PAD as usize), style));
-                Line::from(spans)
+        let line = if !right.is_empty() {
+            let right_w = right.width();
+            let max_label = area
+                .width
+                .saturating_sub(right_w as u16 + trailing_gap as u16 + 1 + DETAIL_RIGHT_PAD)
+                as usize;
+            let (label_spans, label_w) = label_spans(
+                item.label(),
+                label_indices,
+                label_style,
+                match_style,
+                max_label.saturating_sub(2),
+            );
+            let pad = (area.width as usize)
+                .saturating_sub(label_w + trailing_gap + right_w + DETAIL_RIGHT_PAD as usize + 1);
+            let mut spans = Vec::with_capacity(8);
+            if let Some(cb) = checkbox {
+                spans.push(cb);
             }
-            None => {
-                let (label_spans, _) =
-                    label_spans(item.label(), label_indices, style, match_style, usize::MAX);
-                let mut spans: Vec<Span> = Vec::with_capacity(5);
-                if let Some(cb) = checkbox {
-                    spans.push(cb);
-                }
-                spans.extend(label_spans);
-                if let Some(s) = suffix {
-                    spans.push(Span::styled(" ".repeat(suffix_gap), style));
-                    spans.push(Span::styled(s.to_string(), theme::dim_style(style, 0.4)));
-                }
-                Line::from(spans)
+            spans.extend(label_spans);
+            if let Some(s) = suffix {
+                spans.push(Span::styled(" ".repeat(suffix_gap), style));
+                spans.push(Span::styled(s.to_string(), theme::dim_style(style, 0.4)));
             }
+            spans.push(Span::styled(" ".repeat(pad), style));
+            spans.push(Span::styled(right, detail_style));
+            spans.push(Span::styled(" ".repeat(DETAIL_RIGHT_PAD as usize), style));
+            Line::from(spans)
+        } else {
+            let (label_spans, _) = label_spans(
+                item.label(),
+                label_indices,
+                label_style,
+                match_style,
+                usize::MAX,
+            );
+            let mut spans: Vec<Span> = Vec::with_capacity(5);
+            if let Some(cb) = checkbox {
+                spans.push(cb);
+            }
+            spans.extend(label_spans);
+            if let Some(s) = suffix {
+                spans.push(Span::styled(" ".repeat(suffix_gap), style));
+                spans.push(Span::styled(s.to_string(), theme::dim_style(style, 0.4)));
+            }
+            Line::from(spans)
         };
         lines.push(line);
         i += 1;
@@ -1423,6 +1451,99 @@ mod tests {
             Some(unsel_cell.fg),
             t.item_match.fg,
             "unselected row match char uses the plain match style"
+        );
+    }
+
+    #[test]
+    fn render_list_composes_right_cell_and_dims_finished_titles() {
+        struct Task {
+            label: String,
+            finished: bool,
+            ctx: Option<String>,
+            ago: Option<String>,
+        }
+        impl PickerItem for Task {
+            fn label(&self) -> &str {
+                &self.label
+            }
+            fn is_finished(&self) -> bool {
+                self.finished
+            }
+            fn context_str(&self) -> Option<&str> {
+                self.ctx.as_deref()
+            }
+            fn ago(&self) -> Option<String> {
+                self.ago.clone()
+            }
+        }
+
+        let items = vec![
+            Task {
+                label: "running".into(),
+                finished: false,
+                ctx: Some("12k".into()),
+                ago: Some("2min ago".into()),
+            },
+            Task {
+                label: "done".into(),
+                finished: true,
+                ctx: Some("3k".into()),
+                ago: Some("5min ago".into()),
+            },
+        ];
+        let area = Rect::new(0, 0, 80, 12);
+        let t = theme::current();
+
+        let mut p = ListPicker::new();
+        p.open(items, " Tasks ");
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|f| {
+                p.view(f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let lines = buffer_lines(&terminal, area);
+
+        let running_row = lines.iter().position(|l| l.contains("running")).unwrap() as u16;
+        let done_row = lines.iter().position(|l| l.contains("done")).unwrap() as u16;
+        assert!(lines[running_row as usize].contains("12k"));
+        assert!(lines[running_row as usize].contains("2min ago"));
+        assert!(lines[done_row as usize].contains("3k"));
+        assert!(lines[done_row as usize].contains("5min ago"));
+
+        let done_line = &lines[done_row as usize];
+        let done_col = done_line
+            .char_indices()
+            .position(|(b, _)| done_line[b..].starts_with("done"))
+            .unwrap() as u16;
+        let done_fg = buf.cell(Position::new(done_col, done_row)).unwrap().fg;
+        assert_eq!(
+            Some(done_fg),
+            theme::dim_style(t.item, 0.5).fg,
+            "unselected finished title is dimmed"
+        );
+
+        // Selecting the finished row restores full brightness.
+        p.handle_key(key(KeyCode::Down));
+        terminal
+            .draw(|f| {
+                p.view(f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let lines = buffer_lines(&terminal, area);
+        let done_row = lines.iter().position(|l| l.contains("done")).unwrap() as u16;
+        let done_line = &lines[done_row as usize];
+        let done_col = done_line
+            .char_indices()
+            .position(|(b, _)| done_line[b..].starts_with("done"))
+            .unwrap() as u16;
+        let done_fg = buf.cell(Position::new(done_col, done_row)).unwrap().fg;
+        assert_eq!(
+            Some(done_fg),
+            t.item_selected.fg,
+            "selected finished title is not dimmed"
         );
     }
 

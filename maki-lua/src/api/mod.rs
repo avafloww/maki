@@ -21,6 +21,7 @@ pub(crate) mod slot;
 pub(crate) mod split;
 pub(crate) mod store;
 pub(crate) mod text;
+pub(crate) mod time;
 pub(crate) mod timer;
 pub(crate) mod tool;
 pub(crate) mod treesitter;
@@ -109,6 +110,7 @@ pub(crate) fn create_maki_global(
         "timer",
         timer::create_timer_table(lua, Arc::clone(&plugin))?,
     )?;
+    maki.set("time", time::create_time_table(lua)?)?;
     crate::splash::register_version_api(lua, &maki)?;
 
     Ok(maki)

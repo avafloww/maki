@@ -4,17 +4,18 @@ use crate::components::Overlay;
 use crate::components::input::Placeholder;
 #[cfg(test)]
 use crate::components::keybindings::KeybindContext;
+use crate::components::keybindings::key;
 use crate::components::queue_panel;
 use crate::components::split_layout::{MIN_CHAT_ROWS, SplitLayout, carve};
-use crate::components::status_bar::{StatusBarContext, UsageStats};
+use crate::components::status_bar::{self, StatusBarContext, UsageStats};
 use crate::components::usage_modal::UsageModalContext;
 use crate::selection::{self, SelectableZone, SelectionZone, ZoneRegistry};
 use crate::theme;
 use maki_lua::Split;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Widget};
+use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use super::{App, Mode, Status};
 
@@ -35,6 +36,7 @@ struct ViewLayout {
     input_area: Rect,
     splits: SplitLayout,
     bottom_takeover: bool,
+    top_bar_area: Rect,
 }
 
 impl App {
@@ -44,6 +46,7 @@ impl App {
         let render_chat = self.resolve_render_chat();
 
         self.render_background(frame);
+        self.render_top_bar(frame, &layout);
         self.render_messages(frame, &layout, render_chat);
         self.render_bottom_panel(frame, &layout);
         self.render_splits(frame, &layout);
@@ -59,8 +62,16 @@ impl App {
 
         // Carve the full-width status bar first so the split carving below only
         // ever deals with the content region above it.
-        let [content, status_area] =
+        let [mut content, status_area] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+
+        // A persistent one-line info bar pinned to the top: the active chat
+        // badge, a running-subagent hint, and the cwd:branch. It never crowds
+        // the chat below the minimum height.
+        let top_bar_h = 1u16.min(content.height.saturating_sub(MIN_CHAT_ROWS));
+        let [top_bar_area, rest] =
+            Layout::vertical([Constraint::Length(top_bar_h), Constraint::Min(1)]).areas(content);
+        content = rest;
 
         // The permission prompt owns the bottom area, so drop any `below` split
         // here at the source. That keeps "prompt wins bottom" in one filter
@@ -137,6 +148,7 @@ impl App {
             input_area,
             splits,
             bottom_takeover,
+            top_bar_area,
         }
     }
 
@@ -154,6 +166,54 @@ impl App {
         let bg =
             Block::default().style(ratatui::style::Style::new().bg(theme::current().background));
         bg.render(frame.area(), frame.buffer_mut());
+    }
+
+    fn render_top_bar(&self, frame: &mut Frame, layout: &ViewLayout) {
+        let area = layout.top_bar_area;
+        if area.height == 0 {
+            return;
+        }
+        let t = theme::current();
+        let active = &self.chats[self.active_chat];
+        let mut left_spans: Vec<Span> = Vec::new();
+        if active.subagent_id.is_some() {
+            left_spans.push(Span::styled(
+                status_bar::subagent_label(&active.name),
+                t.accent,
+            ));
+        } else {
+            left_spans.push(Span::styled(format!(" [{}]", active.name), t.status_dim));
+        }
+        // Running subagents other than the active chat, if any.
+        let n_more = self
+            .chats
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(i, c)| *i != self.active_chat && !c.is_finished())
+            .count();
+        if n_more > 0 {
+            left_spans.push(Span::styled(
+                format!(" ({n_more} more, {})", key::TASKS.label),
+                t.item_desc,
+            ));
+        }
+
+        let left_width: usize = left_spans.iter().map(Span::width).sum();
+        let cwd_max = (area.width as usize).saturating_sub(left_width + 1);
+        let cwd = status_bar::truncate_tail(self.status_bar.cwd_branch(), cwd_max);
+        let right_span = Span::styled(cwd.into_owned(), t.status_dim);
+
+        let [left_area, right_area] = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(right_span.width() as u16),
+        ])
+        .areas(area);
+        frame.render_widget(Paragraph::new(Line::from(left_spans)), left_area);
+        frame.render_widget(
+            Paragraph::new(Line::from(right_span)).alignment(Alignment::Right),
+            right_area,
+        );
     }
 
     fn render_messages(&mut self, frame: &mut Frame, layout: &ViewLayout, render_chat: usize) {
@@ -321,7 +381,6 @@ impl App {
 
     fn render_status_bar(&mut self, frame: &mut Frame, status_area: Rect, render_chat: usize) {
         let chat = &self.chats[render_chat];
-        let chat_name = (self.chats.len() > 1).then_some(chat.name.as_str());
         let (mode_label, mode_style) = self.mode_label();
         let ctx = StatusBarContext {
             status: &self.status,
@@ -339,8 +398,6 @@ impl App {
                 show_global: self.chats.len() > 1,
             },
             auto_scroll: chat.auto_scroll(),
-            chat_name,
-            is_subagent: chat.subagent_id.is_some(),
             retry_info: self.retry_info.as_ref(),
             thinking_label: self.state.thinking.status_label(),
             fast: self.state.fast,
@@ -439,6 +496,12 @@ impl App {
             layout.input_area,
             layout.splits,
         )
+    }
+
+    #[cfg(test)]
+    pub(super) fn top_bar_rect(&self, area: Rect) -> Rect {
+        let form_visible = self.permission_prompt.is_open() || self.plan_form_active();
+        self.compute_layout(area, form_visible).top_bar_area
     }
 
     fn lua_hint_line(&self) -> Option<Line<'static>> {

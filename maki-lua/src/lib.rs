@@ -11,6 +11,7 @@ mod splash;
 
 pub use api::keymap::{KeymapEntry, KeymapReader, KeymapSnapshot};
 pub use api::options::{OptionSpec, OptionType, PluginOptionSpecs};
+pub use api::time::format_ago;
 pub use api::util::command::{
     Anchor, Axis, Border, BuiltinAction, CommandArgumentItem, Dimension, Edge, FloatConfig,
     FloatConfigPatch, HintReader, HintSnapshot, LuaCommandInfo, LuaCommandReader, ModelRequest,
