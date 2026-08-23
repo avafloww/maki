@@ -37,6 +37,7 @@ const LATE_MODEL_SPEC: &str = "zai/glm-5";
 const MODEL_SPEC_GLM4: &str = "zai/glm-4";
 const MODEL_SPEC_OPUS: &str = "anthropic/claude-opus-4-5";
 const MODEL_SPEC_GPT9: &str = "openai/gpt-9";
+const MODEL_SPEC_CLAUDE: &str = "anthropic/claude-sonnet-4-20250514";
 const HINT_PLUGIN: &str = "statusline";
 const HINT_TEXT: &str = "2/4 staged";
 const HINT_STYLE: &str = "fg";
@@ -1897,6 +1898,44 @@ fn model_arg_no_match_flashes() {
     assert_eq!(
         app.status_bar.flash_text().unwrap(),
         format!("{MODEL_NO_MATCH_MSG}: xyz")
+    );
+}
+
+#[test]
+fn model_arg_matches_provider_section() {
+    let (mut app, models) = app_with_model_slot();
+    models.store(Some(Arc::new(vec![
+        MODEL_SPEC_CLAUDE.into(),
+        LATE_MODEL_SPEC.into(),
+    ])));
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: "anthropic".into(),
+        },
+        0,
+    );
+    assert!(matches!(&actions[..], [Action::ChangeModel(spec)] if spec == MODEL_SPEC_CLAUDE));
+}
+
+#[test]
+fn malformed_model_arg_flashes_invalid_model() {
+    let (mut app, _models) = app_with_model_slot();
+    let before = app.state.model.spec();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: "anthropic/".into(),
+        },
+        0,
+    );
+    assert!(actions.is_empty());
+    assert_eq!(app.state.model.spec(), before);
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        "Invalid model: model must be in 'provider/model' format (e.g. anthropic/claude-sonnet-4-20250514)"
     );
 }
 

@@ -736,6 +736,8 @@ mod tests {
     }
 
     #[test_case("no-slash-here", ModelError::InvalidFormat ; "invalid_format")]
+    #[test_case("/gpt-4", ModelError::InvalidFormat ; "missing_provider")]
+    #[test_case("foobar/", ModelError::InvalidFormat ; "missing_model")]
     #[test_case("foobar/gpt-4", ModelError::UnsupportedProvider("foobar".into()) ; "unsupported_provider")]
     fn from_spec_errors(spec: &str, expected: ModelError) {
         warm_empty_catalog();
