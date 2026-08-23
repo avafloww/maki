@@ -1378,19 +1378,6 @@ fn ago_formats_relative_start_time() {
 }
 
 #[test]
-fn running_subagent_count_skips_main_and_finished() {
-    let mut app = app_with_subagent_id("task1");
-    app.update(subagent_msg(
-        AgentEvent::TextDelta { text: "y".into() },
-        "task2",
-        Some("build"),
-    ));
-    assert_eq!(app.running_subagent_count(), 2);
-    finish_subagent(&mut app, "task1", false);
-    assert_eq!(app.running_subagent_count(), 1);
-}
-
-#[test]
 fn task_entries_sorted_running_first() {
     let mut app = app_with_subagent_id("task1");
     app.update(subagent_msg(

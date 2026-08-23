@@ -674,14 +674,6 @@ impl App {
         Some(zone)
     }
 
-    fn running_subagent_count(&self) -> usize {
-        self.chats
-            .iter()
-            .skip(1)
-            .filter(|c| !c.is_finished())
-            .count()
-    }
-
     fn task_entries(&self) -> Vec<TaskEntry> {
         let mut entries: Vec<TaskEntry> = self
             .chats
