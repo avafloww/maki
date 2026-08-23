@@ -1,9 +1,12 @@
 use std::sync::atomic::Ordering;
 
+use crate::animation::{animation_elapsed_ms, spinner_str};
+use crate::chat::Chat;
 use crate::components::Overlay;
 use crate::components::input::Placeholder;
 #[cfg(test)]
 use crate::components::keybindings::KeybindContext;
+use crate::components::keybindings::key;
 use crate::components::queue_panel;
 use crate::components::split_layout::{MIN_CHAT_ROWS, SplitLayout, carve};
 use crate::components::status_bar::{StatusBarContext, UsageStats};
@@ -11,14 +14,17 @@ use crate::components::usage_modal::UsageModalContext;
 use crate::selection::{self, SelectableZone, SelectionZone, ZoneRegistry};
 use crate::theme;
 use maki_lua::Split;
+use maki_providers::format_tokens;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Widget};
+use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use unicode_width::UnicodeWidthStr;
 
 use super::{App, Mode, Status};
 
 const SUBAGENT_INPUT_HINT: &str = "sends to this subagent \u{b7} TAB mode \u{b7} ESC cancel";
+pub(super) const MAX_RUNNING_ROWS: u16 = 4;
 
 /// Target hint shown under the input box so a user typing on a subagent chat
 /// knows their Enter goes to that subagent, not the main agent.
@@ -35,6 +41,7 @@ struct ViewLayout {
     input_area: Rect,
     splits: SplitLayout,
     bottom_takeover: bool,
+    subagent_panel_area: Rect,
 }
 
 impl App {
@@ -44,6 +51,7 @@ impl App {
         let render_chat = self.resolve_render_chat();
 
         self.render_background(frame);
+        self.render_subagent_panel(frame, &layout);
         self.render_messages(frame, &layout, render_chat);
         self.render_bottom_panel(frame, &layout);
         self.render_splits(frame, &layout);
@@ -59,8 +67,28 @@ impl App {
 
         // Carve the full-width status bar first so the split carving below only
         // ever deals with the content region above it.
-        let [content, status_area] =
+        let [mut content, status_area] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+
+        // Pin a compact panel of currently-running subagents to the top of the
+        // content region. It only appears while subagents are running and never
+        // crowds the chat below the minimum height.
+        let running = self.running_subagent_count();
+        let panel_h = if running > 0 {
+            let rows = running.min(MAX_RUNNING_ROWS as usize) as u16;
+            let desired = rows + 2; // header + rows + bottom border
+            desired.min(content.height.saturating_sub(MIN_CHAT_ROWS))
+        } else {
+            0
+        };
+        let subagent_panel_area = if panel_h > 0 {
+            let [panel, rest] =
+                Layout::vertical([Constraint::Length(panel_h), Constraint::Min(1)]).areas(content);
+            content = rest;
+            panel
+        } else {
+            Rect::default()
+        };
 
         // The permission prompt owns the bottom area, so drop any `below` split
         // here at the source. That keeps "prompt wins bottom" in one filter
@@ -137,6 +165,7 @@ impl App {
             input_area,
             splits,
             bottom_takeover,
+            subagent_panel_area,
         }
     }
 
@@ -154,6 +183,69 @@ impl App {
         let bg =
             Block::default().style(ratatui::style::Style::new().bg(theme::current().background));
         bg.render(frame.area(), frame.buffer_mut());
+    }
+
+    fn render_subagent_panel(&self, frame: &mut Frame, layout: &ViewLayout) {
+        let area = layout.subagent_panel_area;
+        if area.height == 0 {
+            return;
+        }
+        let t = theme::current();
+        let block = Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(t.item_desc);
+        let inner = block.inner(area);
+        block.render(area, frame.buffer_mut());
+        if inner.height == 0 {
+            return;
+        }
+
+        let running: Vec<&Chat> = self
+            .chats
+            .iter()
+            .skip(1)
+            .filter(|c| !c.is_finished())
+            .take(MAX_RUNNING_ROWS as usize)
+            .collect();
+        let header_left = format!(" Tasks ({} running)", running.len());
+        let header_right = format!("{} to view more", key::TASKS.label);
+        let mut lines: Vec<Line> = Vec::with_capacity(inner.height as usize);
+
+        let header_pad = inner
+            .width
+            .saturating_sub(header_left.width() as u16 + header_right.width() as u16);
+        lines.push(Line::from(vec![
+            Span::styled(header_left, t.keybind_section),
+            Span::raw(" ".repeat(header_pad as usize)),
+            Span::styled(header_right, t.item_desc),
+        ]));
+
+        let spinner = spinner_str(animation_elapsed_ms());
+        for chat in running {
+            if lines.len() >= inner.height as usize {
+                break;
+            }
+            let mut right_parts: Vec<String> = Vec::new();
+            if chat.context_size > 0 {
+                right_parts.push(format_tokens(chat.context_size));
+            }
+            if let Some(started) = chat.started_at() {
+                right_parts.push(super::ago(started));
+            }
+            let right = right_parts.join(" ");
+            let pad = inner.width.saturating_sub(
+                spinner.width() as u16 + 1 + chat.name.width() as u16 + right.width() as u16,
+            );
+            let mut spans = vec![Span::styled(spinner, t.item_desc), Span::raw(" ")];
+            spans.push(Span::styled(chat.name.clone(), t.item));
+            spans.push(Span::raw(" ".repeat(pad as usize)));
+            if !right.is_empty() {
+                spans.push(Span::styled(right, t.item_desc));
+            }
+            lines.push(Line::from(spans));
+        }
+
+        Paragraph::new(lines).render(inner, frame.buffer_mut());
     }
 
     fn render_messages(&mut self, frame: &mut Frame, layout: &ViewLayout, render_chat: usize) {
@@ -439,6 +531,12 @@ impl App {
             layout.input_area,
             layout.splits,
         )
+    }
+
+    #[cfg(test)]
+    pub(super) fn subagent_panel_rect(&self, area: Rect) -> Rect {
+        let form_visible = self.permission_prompt.is_open() || self.plan_form_active();
+        self.compute_layout(area, form_visible).subagent_panel_area
     }
 
     fn lua_hint_line(&self) -> Option<Line<'static>> {

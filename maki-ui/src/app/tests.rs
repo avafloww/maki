@@ -21,7 +21,7 @@ use maki_lua::{
     BuiltinAction, CommandArgumentItem, HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader,
 };
 use maki_providers::{ContentBlock, Effort, Message, Role, TokenUsage};
-use maki_storage::sessions::{StoredMode, StoredThinking};
+use maki_storage::sessions::{StoredMode, StoredSubagent, StoredThinking};
 use ratatui::layout::Rect;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -1343,6 +1343,215 @@ fn ctrl_x_toggles_tasks_picker() {
     assert!(app.task_picker.is_open());
     app.update(Msg::Key(kb::TASKS.to_key_event()));
     assert!(!app.task_picker.is_open());
+}
+
+#[test]
+fn open_tasks_picker_highlights_active_chat_after_sort() {
+    // task1 (chat index 1) finishes, task2 (chat index 2) stays running. The
+    // picker sorts running first, so row order != chat_index; opening while
+    // active on the finished task must still highlight that task, not row N.
+    let mut app = app_with_subagent_id("task1");
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "y".into() },
+        "task2",
+        Some("build"),
+    ));
+    finish_subagent(&mut app, "task1", false);
+    app.active_chat = 1;
+
+    app.update(Msg::Key(kb::TASKS.to_key_event()));
+    assert!(app.task_picker.is_open());
+    assert_eq!(
+        app.task_picker.selected_item().unwrap().chat_index,
+        1,
+        "picker highlights the active chat, not the sorted row"
+    );
+}
+
+#[test]
+fn ago_formats_relative_start_time() {
+    let now = Instant::now();
+    assert_eq!(ago(now), "just now");
+    assert_eq!(ago(now - Duration::from_secs(5 * 60)), "5min ago");
+    assert_eq!(ago(now - Duration::from_secs(2 * 60 * 60)), "2h ago");
+    assert_eq!(ago(now - Duration::from_secs(3 * 24 * 60 * 60)), "3d ago");
+}
+
+#[test]
+fn running_subagent_count_skips_main_and_finished() {
+    let mut app = app_with_subagent_id("task1");
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "y".into() },
+        "task2",
+        Some("build"),
+    ));
+    assert_eq!(app.running_subagent_count(), 2);
+    finish_subagent(&mut app, "task1", false);
+    assert_eq!(app.running_subagent_count(), 1);
+}
+
+#[test]
+fn task_entries_sorted_running_first() {
+    let mut app = app_with_subagent_id("task1");
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "y".into() },
+        "task2",
+        Some("build"),
+    ));
+    finish_subagent(&mut app, "task1", false);
+
+    let entries = app.task_entries();
+    assert_eq!(entries[0].chat_index, 0, "main chat stays first");
+    assert!(
+        !entries[1].is_finished(),
+        "running subagent before finished"
+    );
+    assert!(entries[1].is_spinning());
+    assert!(entries[2].is_finished(), "finished subagent last");
+}
+
+#[test]
+fn task_entry_shows_context_and_ago() {
+    let mut app = app_with_subagent();
+    app.chats[1].context_size = 5000;
+    let entries = app.task_entries();
+
+    let sub = entries.iter().find(|e| e.chat_index == 1).unwrap();
+    assert_eq!(sub.context_str(), Some("5.0k"));
+    assert!(sub.ago().is_some_and(|s| !s.is_empty()));
+
+    let main = &entries[0];
+    assert_eq!(main.context_str(), None);
+    assert_eq!(main.ago(), None);
+}
+
+#[test]
+fn finished_subagent_entry_is_finished_flag() {
+    let mut app = app_with_subagent();
+    let entries = app.task_entries();
+    assert!(!entries[0].is_finished(), "main chat is not finished");
+    assert!(
+        !entries[1].is_finished(),
+        "running subagent is not finished"
+    );
+
+    finish_subagent_task(&mut app, false);
+    let done_entries = app.task_entries();
+    let done = done_entries.iter().find(|e| e.chat_index == 1).unwrap();
+    assert!(done.is_finished());
+}
+
+fn rendered_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.view(frame)).unwrap();
+    let buf = terminal.backend().buffer();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| {
+                    buf.cell(ratatui::layout::Position::new(x, y))
+                        .map(|c| c.symbol())
+                        .unwrap_or(" ")
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn subagent_panel_area_carved_only_when_running() {
+    let area = Rect::new(0, 0, 80, 24);
+    let app = test_app();
+    assert_eq!(app.subagent_panel_rect(area).height, 0);
+
+    let mut app = app_with_subagent();
+    let h = app.subagent_panel_rect(area).height;
+    assert!(h > 0, "panel appears for a running subagent");
+    assert!(h <= 1 + super::view::MAX_RUNNING_ROWS + 1);
+
+    // Many running subagents stay capped by MAX_RUNNING_ROWS.
+    for i in 2..=6 {
+        app.update(subagent_msg(
+            AgentEvent::TextDelta { text: "x".into() },
+            &format!("task{i}"),
+            Some("name"),
+        ));
+    }
+    let capped = app.subagent_panel_rect(area).height;
+    assert_eq!(
+        capped,
+        1 + super::view::MAX_RUNNING_ROWS + 1,
+        "capped at MAX_RUNNING_ROWS"
+    );
+}
+
+#[test]
+fn subagent_panel_lists_running_subagents_and_hint() {
+    let mut app = app_with_subagent_id("task1");
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "y".into() },
+        "task2",
+        Some("build"),
+    ));
+    finish_subagent(&mut app, "task2", false);
+
+    let panel_h = app.subagent_panel_rect(Rect::new(0, 0, 80, 24)).height;
+    let rows = rendered_rows(&mut app, 80, 24);
+    let panel: String = rows
+        .iter()
+        .take(panel_h as usize)
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(panel.contains("Tasks (1 running)"), "panel header: {panel}");
+    assert!(panel.contains("to view more"), "ctrl-x hint: {panel}");
+    assert!(
+        panel.contains("research"),
+        "running subagent name shown: {panel}"
+    );
+    assert!(
+        !panel.contains("build"),
+        "finished subagent excluded: {panel}"
+    );
+}
+
+#[test]
+fn subagent_panel_hidden_when_only_finished_subagents() {
+    let mut app = app_with_subagent_id("task1");
+    finish_subagent_task(&mut app, false);
+    let rows = rendered_rows(&mut app, 80, 24);
+    let top: String = rows
+        .iter()
+        .take(6)
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!top.contains("Tasks (") && !top.contains("to view more"));
+}
+
+#[test]
+fn restored_subagents_have_no_ago_and_are_finished() {
+    let mut app = test_app();
+    let id = "restored-sub".to_string();
+    app.state.session_mut().set_subagents(vec![StoredSubagent {
+        tool_use_id: id.clone(),
+        name: "old task".into(),
+        model: None,
+    }]);
+    app.state
+        .session_mut()
+        .set_subagent_messages(id.clone(), vec![Message::user("hi".into())]);
+    app.restore_display();
+
+    assert_eq!(app.chats.len(), 2);
+    assert!(app.chats[1].is_finished());
+    assert_eq!(app.chats[1].started_at(), None);
+
+    let entries = app.task_entries();
+    let sub = entries.iter().find(|e| e.chat_index == 1).unwrap();
+    assert!(sub.is_finished());
+    assert_eq!(sub.ago(), None);
 }
 
 fn streaming_app() -> App {

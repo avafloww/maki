@@ -67,7 +67,7 @@ use maki_lua::{
     BuiltinAction, CompletionCtx, EventHandle, HintReader, HintSnapshot, ItemSpec, KeymapReader,
     LuaCommandReader, WinView,
 };
-use maki_providers::{ContentBlock, Message, Model, Role, ThinkingConfig, add_cost};
+use maki_providers::{ContentBlock, Message, Model, Role, ThinkingConfig, add_cost, format_tokens};
 use maki_storage::StateDir;
 use maki_storage::input_history::InputHistory;
 use maki_storage::model::persist_model;
@@ -190,6 +190,8 @@ pub(super) struct TaskEntry {
     chat_index: usize,
     /// First `SNIPPET_CHARS` of the subagent chat's last message, shown dimly.
     snippet: String,
+    context: String,
+    started_at: Option<Instant>,
 }
 
 impl PickerItem for TaskEntry {
@@ -204,6 +206,15 @@ impl PickerItem for TaskEntry {
     }
     fn is_spinning(&self) -> bool {
         matches!(self.finished, Some(false))
+    }
+    fn context_str(&self) -> Option<&str> {
+        (!self.context.is_empty()).then_some(self.context.as_str())
+    }
+    fn ago(&self) -> Option<String> {
+        self.started_at.map(ago)
+    }
+    fn is_finished(&self) -> bool {
+        matches!(self.finished, Some(true))
     }
 }
 
@@ -222,6 +233,22 @@ fn truncate_snippet(text: &str) -> String {
     } else {
         truncated
     }
+}
+
+fn ago(since: Instant) -> String {
+    let secs = since.elapsed().as_secs();
+    if secs < 60 {
+        return "just now".into();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}min ago");
+    }
+    let hrs = mins / 60;
+    if hrs < 24 {
+        return format!("{hrs}h ago");
+    }
+    format!("{}d ago", hrs / 24)
 }
 
 /// Last assistant text block in a subagent's flushed history, used to feed an
@@ -647,8 +674,17 @@ impl App {
         Some(zone)
     }
 
-    fn task_entries(&self) -> Vec<TaskEntry> {
+    fn running_subagent_count(&self) -> usize {
         self.chats
+            .iter()
+            .skip(1)
+            .filter(|c| !c.is_finished())
+            .count()
+    }
+
+    fn task_entries(&self) -> Vec<TaskEntry> {
+        let mut entries: Vec<TaskEntry> = self
+            .chats
             .iter()
             .enumerate()
             .map(|(chat_index, chat)| TaskEntry {
@@ -660,14 +696,23 @@ impl App {
                 } else {
                     truncate_snippet(chat.last_message_text())
                 },
+                context: if chat_index > 0 && chat.context_size > 0 {
+                    format_tokens(chat.context_size)
+                } else {
+                    String::new()
+                },
+                started_at: (chat_index > 0).then_some(chat.started_at()).flatten(),
             })
-            .collect()
+            .collect();
+        entries[1..].sort_by_key(|e| e.is_finished());
+        entries
     }
 
     fn open_tasks(&mut self) {
         self.task_picker_original = Some(self.active_chat);
         self.task_picker.open(self.task_entries(), " Tasks ");
-        self.task_picker.select(self.active_chat);
+        self.task_picker
+            .select_item_by(|entry| entry.chat_index == self.active_chat);
     }
 
     fn sync_task_picker(&mut self) {
@@ -1693,6 +1738,7 @@ impl App {
         chat.set_restore_channel(self.restore_event_tx.clone());
         chat.model_id = subagent.model.clone();
         chat.subagent_id = Some(id.clone());
+        chat.set_started_at_now();
         if let Some(ref prompt) = subagent.prompt {
             chat.push_user_message(prompt);
         }
