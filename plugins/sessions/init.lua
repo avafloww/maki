@@ -152,7 +152,7 @@ local function render()
     local selected = s.id == board.sel_id
     local icon, icon_style, spinning = icon_of(s)
     local base = selected and "selected" or "item"
-    local right = s.focused and CURRENT_LABEL or maki.time.ago(s.updated_at)
+    local right = s.focused and CURRENT_LABEL or maki.time.ago(maki.time.at(s.updated_at))
     local right_style = selected and "selected" or (s.focused and "accent" or "dim")
     if selected then
       icon_style = "selected"

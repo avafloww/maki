@@ -3461,11 +3461,11 @@ print(md) -- "# Hello\n\nworld"
 
 Wall-clock timestamps and relative-age formatting.
 
-`now` returns seconds since the Unix epoch, the same clock the host
-uses for session `updated_at`, so plugin timestamps can be persisted
-and sorted with host data. `ago` renders a relative age the same way
-maki's own pickers do, so callers get one consistent format instead
-of each plugin inventing its own.
+`now` returns `{secs, nanosecs}` since the Unix epoch, the same clock
+the host uses for session `updated_at` but with full nanosecond
+precision. Timestamps are opaque objects you hand to `ago` — not raw
+numbers to subtract — so callers get one consistent relative-age
+format instead of reimplementing epoch math per plugin.
 
 ```lua
 local t0 = maki.time.now()
@@ -3481,16 +3481,20 @@ print(maki.time.ago(t0))
 maki.time.now()
 ```
 
-Return the current wall-clock time as seconds since the Unix epoch
-(`1970-01-01T00:00:00Z`), as a number.
+Return the current wall-clock time as a timestamp table.
 
-This is the same clock the host uses for session `updated_at`, so the
-value round-trips through storage and sort. It keeps sub-second precision
-(unlike `os.time()`, which returns whole seconds), but stays compatible:
-the whole part equals what `os.time()` returns. Pass the result to
-`maki.time.ago` to render a relative age.
+The table is `{ secs = integer, nanosecs = integer }` where `secs` is
+whole seconds since the Unix epoch (`1970-01-01T00:00:00Z`) and `nanosecs`
+is the sub-second part, `0 .. 999_999_999`. Split like this, both fields
+stay exact in a Lua number (each under 2^53), so the timestamp keeps full
+nanosecond precision — the same clock the host uses for session
+`updated_at`, just finer than its whole seconds.
 
-**Returns:** (`number`) Seconds since the Unix epoch, fractional.
+Treat the returned table as opaque; pass it to `maki.time.ago` rather than
+doing epoch math by hand. To wrap a stored whole-second value (like a
+session's `updated_at`) use `maki.time.at`.
+
+**Returns:** (`table`) `{secs = integer, nanosecs = integer}` timestamp.
 
 **Example:**
 
@@ -3502,29 +3506,55 @@ print(maki.time.ago(t0))
 
 ---
 
-### `maki.time.ago()` {#maki-time-ago}
+### `maki.time.at()` {#maki-time-at}
 
 ```lua
-maki.time.ago({instant})
+maki.time.at({secs})
 ```
 
-Format {instant} as a relative age like `3h ago`, or `just now` for less
-than a minute. {instant} is a timestamp from `maki.time.now`.
-
-Uses the same clock as `now`, so subtracting two `now` timestamps spans
-real elapsed time (sub-second inclusive). A timestamp in the future (or a
-non-number) renders as `just now`.
+Wrap a whole-second Unix timestamp (e.g. a session's `updated_at`) into a
+timestamp object readable by `maki.time.ago`.
 
 **Parameters:**
 
-- `{instant}` (`number`) Timestamp from `maki.time.now`.
+- `{secs}` (`integer`) Whole seconds since the Unix epoch.
+
+**Returns:** (`table`) `{secs = secs, nanosecs = 0}` timestamp.
+
+**Example:**
+
+```lua
+print(maki.time.ago(maki.time.at(session.updated_at)))
+```
+
+---
+
+### `maki.time.ago()` {#maki-time-ago}
+
+```lua
+maki.time.ago({instant}, {reference?})
+```
+
+Format {instant} as a relative age like `3h ago`, or `just now` for less
+than a minute. {instant} is a timestamp from `maki.time.now` (or
+`maki.time.at`). If {reference} is given, age is measured from it instead
+of the current time.
+
+A timestamp in the future renders as `just now`.
+
+**Parameters:**
+
+- `{instant}` (`table`) Timestamp from `maki.time.now`/`maki.time.at`.
+- `{reference?}` (`table?`) Timestamp to measure from; defaults to `maki.time.now`.
 
 **Returns:** (`string`) Relative age, e.g. `42min ago`.
 
 **Example:**
 
 ```lua
-print(maki.time.ago(maki.time.now() - 30 * 60)) -- "30min ago"
+local t0 = maki.time.now()
+-- ...work...
+print(maki.time.ago(t0))
 ```
 
 ---
