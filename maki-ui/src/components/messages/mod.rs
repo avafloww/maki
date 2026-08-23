@@ -21,7 +21,7 @@ use crate::markdown::{hr_line, plain_lines, text_to_lines, truncate_output};
 use crate::render_worker::RenderWorker;
 use crate::selection::Selection;
 use crate::splash::{ColorTransition, Splash};
-use crate::theme;
+use crate::theme::{self, ThemesProvider};
 use crate::update;
 use maki_config::{ClockFormat, ToolOutputLines, UiConfig};
 
@@ -73,6 +73,7 @@ pub struct MessagesPanel {
     cache: SegmentCache,
     last_total_lines: u16,
     hl_worker: RenderWorker,
+    provider: Arc<dyn ThemesProvider>,
     theme_generation: u64,
     highlight_segment: Option<usize>,
     idle_splash: Splash,
@@ -118,10 +119,15 @@ pub struct MessagesPanel {
 }
 
 impl MessagesPanel {
-    pub fn new(ui_config: UiConfig, lua_event_handle: EventHandle) -> Self {
+    pub fn new(
+        ui_config: UiConfig,
+        lua_event_handle: EventHandle,
+        provider: Arc<dyn ThemesProvider>,
+    ) -> Self {
         let thinking = thinking_style();
         let assistant = assistant_style();
         let ms = ui_config.typewriter_ms_per_char;
+        let theme_generation = provider.generation();
         Self {
             messages: Vec::new(),
             streaming_thinking: StreamingContent::new(
@@ -144,7 +150,8 @@ impl MessagesPanel {
             cache: SegmentCache::new(),
             last_total_lines: 0,
             hl_worker: RenderWorker::new(),
-            theme_generation: theme::generation(),
+            provider,
+            theme_generation,
             highlight_segment: None,
             idle_splash: Splash::new(ui_config.splash_animation),
             accent: ColorTransition::new(theme::current().mode_build),
@@ -389,11 +396,11 @@ impl MessagesPanel {
         if let Some(seg_idx) = self.cache.find_by_tool_id(&inst_id) {
             let seg = self.cache.get_mut(seg_idx).unwrap();
             seg.search_text = tl.search_text.clone();
-            seg.update_with_reuse(tl, &self.hl_worker);
+            seg.update_with_reuse(tl, &self.hl_worker, self.provider.generation());
         } else {
             let mut seg = Segment::with_tool(inst_id);
             seg.search_text = tl.search_text.clone();
-            seg.apply_highlight(tl, &self.hl_worker);
+            seg.apply_highlight(tl, &self.hl_worker, self.provider.generation());
             self.cache.insert(parent_idx + 1, Segment::spacer());
             self.cache.insert(parent_idx + 2, seg);
         }
@@ -870,7 +877,7 @@ impl MessagesPanel {
     pub fn view(&mut self, frame: &mut Frame, area: Rect, has_selection: bool) {
         self.viewport_height = area.height;
         let width = area.width.saturating_sub(1);
-        let theme_gen = theme::generation();
+        let theme_gen = self.provider.generation();
         let theme_changed = self.theme_generation != theme_gen;
         let width_changed = self.viewport_width != width || theme_changed;
         if width_changed {
@@ -928,7 +935,7 @@ impl MessagesPanel {
             }
             streaming_heights.push(collapsed_thinking_lines.len() as u16);
         } else if !self.streaming_thinking.is_empty() {
-            let lines = self.streaming_thinking.render_lines(width);
+            let lines = self.streaming_thinking.render_lines(width, theme_gen);
             if cached_count > 0 || !streaming_heights.is_empty() {
                 streaming_heights.push(1);
             }
@@ -936,7 +943,7 @@ impl MessagesPanel {
         }
 
         if !self.streaming_text.is_empty() {
-            let lines = self.streaming_text.render_lines(width);
+            let lines = self.streaming_text.render_lines(width, theme_gen);
             if cached_count > 0 || !streaming_heights.is_empty() {
                 streaming_heights.push(1);
             }
@@ -1397,7 +1404,7 @@ impl MessagesPanel {
 
         let seg = self.cache.get_mut(seg_idx).unwrap();
         seg.search_text = tl.search_text.clone();
-        seg.update_with_reuse(tl, &self.hl_worker);
+        seg.update_with_reuse(tl, &self.hl_worker, self.provider.generation());
 
         if let Some(blocks) = instructions {
             self.upsert_instruction_segment(tool_id, &blocks, seg_idx);
@@ -1420,7 +1427,7 @@ impl MessagesPanel {
                 self.cache.push_spacer_if_needed();
                 let mut seg = Segment::with_tool(id.clone());
                 seg.search_text = search_text;
-                seg.apply_highlight(tl, &self.hl_worker);
+                seg.apply_highlight(tl, &self.hl_worker, self.provider.generation());
                 self.cache.push(seg);
 
                 let blocks = msg

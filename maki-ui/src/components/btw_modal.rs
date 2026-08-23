@@ -114,7 +114,7 @@ impl BtwModal {
         }
     }
 
-    pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
+    pub fn view(&mut self, frame: &mut Frame, area: Rect, theme_gen: u64) -> Rect {
         if !self.open {
             return Rect::default();
         }
@@ -131,7 +131,7 @@ impl BtwModal {
         )));
         lines.push(Line::default());
 
-        let md_lines = self.answer.render_lines(padded_width);
+        let md_lines = self.answer.render_lines(padded_width, theme_gen);
         lines.extend_from_slice(md_lines);
 
         let total = Paragraph::new(lines.clone())

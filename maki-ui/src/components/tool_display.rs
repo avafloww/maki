@@ -778,6 +778,8 @@ pub fn build_instructions_lines(
 mod tests {
     use super::*;
 
+    use crate::theme::ThemesProvider;
+
     const TOL: ToolOutputLines = ToolOutputLines::DEFAULT;
     use crate::components::{DisplayRole, ToolRole};
     use crate::markdown::TRUNCATION_PREFIX;
@@ -1723,7 +1725,10 @@ mod tests {
 
     #[test]
     fn default_span_resolves_to_theme_tool() {
-        theme::set(theme::load_by_name("dracula").expect("dracula theme"));
+        let _guard = theme::theme_test_guard();
+        theme::InMemoryThemesProvider::bundled()
+            .install("dracula")
+            .unwrap();
         assert_eq!(
             resolve_span_style(&SpanStyle::Default),
             theme::current().tool

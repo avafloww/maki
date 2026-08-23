@@ -110,6 +110,7 @@ fn build_app_with_full(
         Arc::from([]),
         handle,
         Arc::new(maki_config::ModelPolicy::default()),
+        Arc::new(crate::theme::InMemoryThemesProvider::bundled()),
     )
 }
 

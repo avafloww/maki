@@ -73,6 +73,7 @@ use maki_storage::input_history::InputHistory;
 use maki_storage::model::persist_model;
 
 use crate::storage_writer::StorageWriter;
+use crate::theme::ThemesProvider;
 use ratatui::layout::Position;
 
 pub(crate) use crate::agent::QueuedMessage;
@@ -297,6 +298,7 @@ pub struct App {
     pub(super) last_esc: Option<Instant>,
 
     pub(crate) storage: StateDir,
+    pub(crate) theme_provider: Arc<dyn ThemesProvider>,
     pub(crate) usage_slot: Arc<ArcSwapOption<UsageFetchState>>,
     pub(crate) available_models: Arc<ArcSwapOption<Vec<String>>>,
     pub(crate) shared_history: Option<SharedMessages>,
@@ -322,7 +324,7 @@ pub struct App {
 
 impl App {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         model: &Model,
         session: AppSession,
         storage: StateDir,
@@ -339,6 +341,7 @@ impl App {
         custom_commands: Arc<[maki_agent::command::CustomCommand]>,
         lua_event_handle: EventHandle,
         model_policy: Arc<ModelPolicy>,
+        theme_provider: Arc<dyn ThemesProvider>,
     ) -> Self {
         scrollbar::set_enabled(ui_config.scrollbar);
         let state = SessionState::from_session(session, model, &storage, &model_policy);
@@ -353,6 +356,7 @@ impl App {
                 "Main".into(),
                 ui_config.clone(),
                 lua_event_handle.clone(),
+                Arc::clone(&theme_provider),
             )],
             active_chat: 0,
             chat_index: HashMap::new(),
@@ -365,7 +369,7 @@ impl App {
             task_picker: ListPicker::new(),
             task_picker_original: None,
             lua_picker: LuaPicker::new(lua_event_handle.clone()),
-            theme_picker: ThemePicker::new(),
+            theme_picker: ThemePicker::new(Arc::clone(&theme_provider)),
             model_picker: ModelPicker::new(Arc::clone(&available_models)),
             login_picker: LoginPicker::new(),
             mcp_picker: McpPicker::new(mcp_reader, mcp_config_errors),
@@ -396,6 +400,7 @@ impl App {
             clipboard: ClipboardState::new(),
             last_esc: None,
             storage,
+            theme_provider,
             usage_slot: Arc::new(ArcSwapOption::empty()),
             available_models,
             shared_history: None,
@@ -1689,6 +1694,7 @@ impl App {
             subagent.name.clone(),
             self.ui_config.clone(),
             self.lua_event_handle.clone(),
+            Arc::clone(&self.theme_provider),
         );
         chat.set_restore_channel(self.restore_event_tx.clone());
         chat.model_id = subagent.model.clone();

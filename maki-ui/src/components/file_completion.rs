@@ -608,6 +608,8 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
 
+    use crate::theme::ThemesProvider;
+
     use crossterm::event::{KeyEventKind, KeyEventState, KeyModifiers};
     use nucleo::{Config, Nucleo, Utf32String};
     use ratatui::Terminal;
@@ -922,7 +924,9 @@ mod tests {
 
     #[test]
     fn completion_kind_highlights_do_not_collapse_into_item_colour() {
-        let t = theme::load_by_name("lunared").expect("lunared is a bundled theme");
+        let t = theme::InMemoryThemesProvider::bundled()
+            .load("lunared")
+            .unwrap();
         // A kind highlight equal to the base item colour renders as plain
         // unhighlighted text, hiding prefix matches whose label starts with
         // the kind name.
@@ -1063,7 +1067,9 @@ mod tests {
             "prefix query must highlight the leading chars"
         );
 
-        let t = theme::load_by_name("lunared").expect("lunared is a bundled theme");
+        let t = theme::InMemoryThemesProvider::bundled()
+            .load("lunared")
+            .unwrap();
         let line = cell_line(&c, 40, true, &t);
         let kind = t.completion_kinds.get("skill").copied().unwrap_or(t.item);
         let expected_match = Style {
@@ -1098,7 +1104,9 @@ mod tests {
             "fuzzy query must highlight the scattered chars"
         );
 
-        let t = theme::load_by_name("lunared").expect("lunared is a bundled theme");
+        let t = theme::InMemoryThemesProvider::bundled()
+            .load("lunared")
+            .unwrap();
         let line = cell_line(&c, 40, true, &t);
         let kind = t.completion_kinds.get("skill").copied().unwrap_or(t.item);
         let expected_match = Style {

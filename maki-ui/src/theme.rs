@@ -134,32 +134,47 @@ include!(concat!(env!("OUT_DIR"), "/bundled_themes.rs"));
 static THEME: LazyLock<ArcSwap<Theme>> =
     LazyLock::new(|| ArcSwap::from_pointee(Theme::load_or_bundled()));
 
-static GENERATION: AtomicU64 = AtomicU64::new(0);
-
-static CURRENT_NAME: Mutex<Option<String>> = Mutex::new(None);
-
-pub fn current() -> Guard<Arc<Theme>> {
-    THEME.load()
+/// Theme catalog and identity: which themes exist, which one the user picked
+/// and persisted, which one is active this run, and the invalidation
+/// generation. Tests inject an in-memory provider, so the test binary never
+/// touches the real config/state dirs. The installed palette itself stays in
+/// the `THEME` global, read hot every frame.
+pub(crate) trait ThemesProvider: Send + Sync {
+    /// Bundled plus user theme names, sorted, deduped.
+    fn names(&self) -> Vec<String>;
+    /// User-theme-first: an override of a bundled name wins.
+    fn load(&self, name: &str) -> Result<Theme, String>;
+    /// The selection made this run (config override or preview), if any.
+    fn current_name(&self) -> Option<String>;
+    /// The persisted pick from the last run, if any.
+    fn persisted_name(&self) -> Option<String>;
+    /// Remember the active theme in memory, without writing to disk.
+    fn select(&self, name: &str);
+    /// Remember the active theme and persist it.
+    fn persist(&self, name: &str);
+    /// Install `name` as the active theme: store the palette in `THEME`,
+    /// refresh the highlighter, then bump the invalidation generation.
+    /// Store-then-bump is observable: a reader that sees the new generation
+    /// always sees the new palette.
+    fn install(&self, name: &str) -> Result<(), String>;
+    fn generation(&self) -> u64;
+    /// current → persisted → DEFAULT_THEME.
+    fn current_theme_name(&self) -> String {
+        self.current_name()
+            .or_else(|| self.persisted_name())
+            .unwrap_or_else(|| DEFAULT_THEME.to_owned())
+    }
 }
 
-pub fn set(theme: Theme) {
+fn store_and_bump(gen_counter: &AtomicU64, theme: Theme) {
     // Order matters: install colors before bumping the counter, otherwise a
     // reader could see the new generation but bake with the old palette.
     THEME.store(Arc::new(theme));
     crate::highlight::refresh_syntax_theme();
-    GENERATION.fetch_add(1, Ordering::Release);
+    gen_counter.fetch_add(1, Ordering::Release);
 }
 
-pub fn generation() -> u64 {
-    GENERATION.load(Ordering::Acquire)
-}
-
-pub fn load_by_name(name: &str) -> Result<Theme, String> {
-    if let Some(path) = user_themes_dir().map(|d| d.join(format!("{name}.toml")))
-        && let Ok(toml) = std::fs::read_to_string(&path)
-    {
-        return Theme::from_toml(&toml).map_err(|e| format!("{}: {e}", path.display()));
-    }
+fn load_bundled(name: &str) -> Result<Theme, String> {
     BUNDLED_THEMES
         .iter()
         .find(|e| e.name == name)
@@ -167,26 +182,170 @@ pub fn load_by_name(name: &str) -> Result<Theme, String> {
         .unwrap_or_else(|| Err(format!("unknown theme: {name}")))
 }
 
-fn user_themes_dir() -> Option<PathBuf> {
-    maki_storage::paths::config_dir()
-        .ok()
-        .map(|d| d.join("themes"))
+/// The production provider, built lazily from the real dirs on first use; the
+/// test build never touches it, so no test reads or writes real state.
+static DEFAULT_PROVIDER: LazyLock<Arc<DiskThemesProvider>> =
+    LazyLock::new(|| Arc::new(DiskThemesProvider::default()));
+
+pub(crate) fn default_provider() -> &'static Arc<DiskThemesProvider> {
+    &DEFAULT_PROVIDER
 }
 
-pub fn all_theme_names() -> Vec<String> {
-    let user_names = user_themes_dir()
-        .and_then(|dir| std::fs::read_dir(dir).ok())
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let path = e.path();
-            if path.extension()? != "toml" {
-                return None;
-            }
-            Some(path.file_stem()?.to_str()?.to_owned())
-        });
-    merge_theme_names(user_names)
+/// Today's behaviour, parameterised: the config themes root and the app's
+/// `StateDir`.
+pub(crate) struct DiskThemesProvider {
+    storage: Option<StateDir>,
+    themes_root: PathBuf,
+    current: Mutex<Option<String>>,
+    gen_counter: AtomicU64,
+}
+
+impl DiskThemesProvider {
+    /// Real dirs; a failed `StateDir::resolve()` degrades to bundled-only, the
+    /// same leniency as today's `if let Ok(dir)`.
+    pub(crate) fn default() -> Self {
+        Self {
+            storage: StateDir::resolve().ok(),
+            themes_root: maki_storage::paths::config_dir()
+                .map(|d| d.join("themes"))
+                .unwrap_or_default(),
+            current: Mutex::new(None),
+            gen_counter: AtomicU64::new(0),
+        }
+    }
+
+    /// Explicit dirs; tests build one on a tempdir and never call `default`.
+    #[cfg(test)]
+    pub(crate) fn new(storage: Option<StateDir>, themes_root: PathBuf) -> Self {
+        Self {
+            storage,
+            themes_root,
+            current: Mutex::new(None),
+            gen_counter: AtomicU64::new(0),
+        }
+    }
+}
+
+impl ThemesProvider for DiskThemesProvider {
+    fn names(&self) -> Vec<String> {
+        let user_names = std::fs::read_dir(&self.themes_root)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| {
+                let path = e.ok()?.path();
+                if path.extension()? != "toml" {
+                    return None;
+                }
+                Some(path.file_stem()?.to_str()?.to_owned())
+            });
+        merge_theme_names(user_names)
+    }
+
+    fn load(&self, name: &str) -> Result<Theme, String> {
+        let user_path = self.themes_root.join(format!("{name}.toml"));
+        if let Ok(toml) = std::fs::read_to_string(&user_path) {
+            return Theme::from_toml(&toml).map_err(|e| format!("{}: {e}", user_path.display()));
+        }
+        load_bundled(name)
+    }
+
+    fn current_name(&self) -> Option<String> {
+        self.current.lock().unwrap().clone()
+    }
+
+    fn persisted_name(&self) -> Option<String> {
+        self.storage
+            .as_ref()
+            .and_then(maki_storage::theme::read_theme_name)
+    }
+
+    fn select(&self, name: &str) {
+        *self.current.lock().unwrap() = Some(name.to_owned());
+    }
+
+    fn persist(&self, name: &str) {
+        self.select(name);
+        if let Some(dir) = self.storage.as_ref() {
+            maki_storage::theme::persist_theme_name(dir, name);
+        }
+    }
+
+    fn install(&self, name: &str) -> Result<(), String> {
+        store_and_bump(&self.gen_counter, self.load(name)?);
+        Ok(())
+    }
+
+    fn generation(&self) -> u64 {
+        self.gen_counter.load(Ordering::Acquire)
+    }
+}
+
+/// No filesystem: the bundled catalog plus an explicit name→toml map. The
+/// provider tests inject, so theme state never touches real user state.
+#[cfg(test)]
+pub(crate) struct InMemoryThemesProvider {
+    extra: Vec<(String, String)>,
+    current: Mutex<Option<String>>,
+    persisted: Mutex<Option<String>>,
+    gen_counter: AtomicU64,
+}
+
+#[cfg(test)]
+impl InMemoryThemesProvider {
+    /// Bundled catalog only.
+    pub(crate) fn bundled() -> Self {
+        Self::new(Vec::new())
+    }
+
+    pub(crate) fn new(extra: Vec<(String, String)>) -> Self {
+        Self {
+            extra,
+            current: Mutex::new(None),
+            persisted: Mutex::new(None),
+            gen_counter: AtomicU64::new(0),
+        }
+    }
+}
+
+#[cfg(test)]
+impl ThemesProvider for InMemoryThemesProvider {
+    fn names(&self) -> Vec<String> {
+        merge_theme_names(self.extra.iter().map(|(name, _)| name.clone()))
+    }
+
+    fn load(&self, name: &str) -> Result<Theme, String> {
+        if let Some((_, toml)) = self.extra.iter().find(|(n, _)| n == name) {
+            return Theme::from_toml(toml).map_err(|e| format!("{name}.toml: {e}"));
+        }
+        load_bundled(name)
+    }
+
+    fn current_name(&self) -> Option<String> {
+        self.current.lock().unwrap().clone()
+    }
+
+    fn persisted_name(&self) -> Option<String> {
+        self.persisted.lock().unwrap().clone()
+    }
+
+    fn select(&self, name: &str) {
+        *self.current.lock().unwrap() = Some(name.to_owned());
+    }
+
+    fn persist(&self, name: &str) {
+        self.select(name);
+        *self.persisted.lock().unwrap() = Some(name.to_owned());
+    }
+
+    fn install(&self, name: &str) -> Result<(), String> {
+        store_and_bump(&self.gen_counter, self.load(name)?);
+        Ok(())
+    }
+
+    fn generation(&self) -> u64 {
+        self.gen_counter.load(Ordering::Acquire)
+    }
 }
 
 fn merge_theme_names(user_names: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -197,27 +356,27 @@ fn merge_theme_names(user_names: impl IntoIterator<Item = String>) -> Vec<String
     names
 }
 
-pub fn set_current_name(name: &str) {
-    *CURRENT_NAME.lock().unwrap() = Some(name.to_owned());
+/// `install` with the error swallowed: a preview of an un-loadable theme must
+/// not take the picker down.
+pub(crate) fn apply_theme(provider: &dyn ThemesProvider, name: &str) {
+    let _ = provider.install(name);
 }
 
-pub fn persist_theme(name: &str) {
-    set_current_name(name);
-    if let Ok(dir) = StateDir::resolve() {
-        maki_storage::theme::persist_theme_name(&dir, name);
-    }
+pub fn current() -> Guard<Arc<Theme>> {
+    THEME.load()
 }
 
-fn read_theme_name() -> Option<String> {
-    let dir = StateDir::resolve().ok()?;
-    maki_storage::theme::read_theme_name(&dir)
-}
+#[cfg(test)]
+static THEME_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-pub fn current_theme_name() -> String {
-    if let Some(name) = CURRENT_NAME.lock().unwrap().clone() {
-        return name;
-    }
-    read_theme_name().unwrap_or_else(|| DEFAULT_THEME.to_owned())
+/// Serializes the tests that mutate the global `THEME` via a provider
+/// `install`. Poisoning-tolerant: a panic in one test must not wedge the rest
+/// of the suite.
+#[cfg(test)]
+pub(crate) fn theme_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    THEME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub fn style_by_name(name: &str) -> Style {
@@ -801,8 +960,11 @@ impl Theme {
     }
 
     fn load_or_bundled() -> Self {
-        if let Some(name) = read_theme_name()
-            && let Ok(theme) = load_by_name(&name)
+        // Test builds pin the initial palette to the first bundled theme:
+        // deterministic and zero I/O, so no test reads the real state dir.
+        #[cfg(not(test))]
+        if let Some(name) = default_provider().persisted_name()
+            && let Ok(theme) = default_provider().load(&name)
         {
             return theme;
         }
@@ -991,8 +1153,12 @@ mod tests {
     }
 
     #[test]
-    fn load_by_name_unknown() {
-        assert!(load_by_name("nonexistent").is_err());
+    fn load_unknown_theme_errors() {
+        assert!(
+            InMemoryThemesProvider::bundled()
+                .load("nonexistent")
+                .is_err()
+        );
     }
 
     #[test]
@@ -1004,8 +1170,10 @@ mod tests {
 
     #[test]
     fn current_theme_name_prefers_in_memory_name() {
-        set_current_name("zenburn");
-        assert_eq!(current_theme_name(), "zenburn");
+        let _guard = theme_test_guard();
+        let p = InMemoryThemesProvider::bundled();
+        p.select("zenburn");
+        assert_eq!(p.current_theme_name(), "zenburn");
     }
 
     #[test]
@@ -1190,7 +1358,9 @@ mode_build = "#112233"
 
     #[test]
     fn style_by_name_resolves() {
-        set(dracula());
+        let _guard = theme_test_guard();
+        let p = InMemoryThemesProvider::bundled();
+        p.install("dracula").unwrap();
         let t = current();
         assert_eq!(style_by_name("dim"), t.tool_dim);
         assert_eq!(style_by_name("tool_dim"), t.tool_dim);
@@ -1237,25 +1407,31 @@ mode_build = "#112233"
     const TOKYONIGHT_BG: Color = Color::Rgb(0x1a, 0x1b, 0x26);
 
     fn tokyonight() -> Theme {
-        load_by_name("tokyonight").expect("tokyonight theme must exist")
+        InMemoryThemesProvider::bundled()
+            .load("tokyonight")
+            .expect("tokyonight theme must exist")
     }
 
     #[test]
-    fn set_advances_generation() {
-        let before = generation();
-        set(dracula());
-        assert!(generation() > before);
+    fn install_advances_generation() {
+        let _guard = theme_test_guard();
+        let p = InMemoryThemesProvider::bundled();
+        let before = p.generation();
+        p.install("dracula").unwrap();
+        assert!(p.generation() > before);
     }
 
     #[test]
-    fn set_installs_theme_before_generation_observed() {
+    fn install_theme_before_generation_observed() {
+        let _guard = theme_test_guard();
+        let p = InMemoryThemesProvider::bundled();
         let theme = tokyonight();
         let expected_syntax_bg = theme.syntax.settings.background;
-        let before = generation();
+        let before = p.generation();
 
-        set(theme);
+        p.install("tokyonight").unwrap();
 
-        let observed = generation();
+        let observed = p.generation();
         assert!(observed > before);
         assert_eq!(current().background, TOKYONIGHT_BG);
         assert_eq!(
@@ -1266,20 +1442,102 @@ mode_build = "#112233"
     }
 
     #[test]
-    fn set_generation_is_monotonic_across_switches() {
-        let g0 = generation();
-        set(dracula());
-        let g1 = generation();
+    fn install_generation_is_monotonic_across_switches() {
+        let _guard = theme_test_guard();
+        let p = InMemoryThemesProvider::bundled();
+        let g0 = p.generation();
+        p.install("dracula").unwrap();
+        let g1 = p.generation();
         assert!(g1 > g0);
         assert_eq!(current().background, DRACULA_BG);
 
-        set(tokyonight());
-        let g2 = generation();
+        p.install("tokyonight").unwrap();
+        let g2 = p.generation();
         assert!(g2 > g1);
         assert_eq!(current().background, TOKYONIGHT_BG);
         assert_eq!(
             maki_highlight::theme().settings.background,
             tokyonight().syntax.settings.background,
         );
+    }
+
+    const DISK_USER_THEME_TOML: &str = "\
+[palette]
+foreground = \"#ffffff\"
+background = \"#000000\"
+";
+
+    fn disk_provider_fixture() -> (tempfile::TempDir, DiskThemesProvider) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let themes_root = tmp.path().join("themes");
+        std::fs::create_dir_all(&themes_root).unwrap();
+        let dir = maki_storage::StateDir::from_path(tmp.path().join("state"));
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let provider = DiskThemesProvider::new(Some(dir), themes_root);
+        (tmp, provider)
+    }
+
+    #[test]
+    fn disk_provider_loads_user_theme_first() {
+        let (_tmp, p) = disk_provider_fixture();
+        let root = p.themes_root.clone();
+        std::fs::write(root.join("dracula.toml"), DISK_USER_THEME_TOML).unwrap();
+        std::fs::write(root.join("custom.toml"), DISK_USER_THEME_TOML).unwrap();
+        // A user file shadowing a bundled name wins.
+        let user_dracula = p.load("dracula").unwrap();
+        assert_eq!(user_dracula.background, Color::Rgb(0, 0, 0));
+        assert_eq!(p.load("custom").unwrap().background, Color::Rgb(0, 0, 0));
+        // A bundled name with no override loads the bundled one.
+        assert_eq!(
+            p.load("tokyonight").unwrap().background,
+            Theme::from_toml(
+                BUNDLED_THEMES
+                    .iter()
+                    .find(|e| e.name == "tokyonight")
+                    .expect("tokyonight must exist")
+                    .toml
+            )
+            .unwrap()
+            .background
+        );
+    }
+
+    #[test]
+    fn disk_provider_names_merge_sorted_deduped() {
+        let (_tmp, p) = disk_provider_fixture();
+        let root = p.themes_root.clone();
+        std::fs::write(root.join("custom.toml"), DISK_USER_THEME_TOML).unwrap();
+        std::fs::write(root.join("dracula.toml"), DISK_USER_THEME_TOML).unwrap();
+        let names = p.names();
+        // Bundled + user, sorted, deduped: the override does not double.
+        assert_eq!(names.iter().filter(|n| *n == "dracula").count(), 1);
+        assert_eq!(names.iter().filter(|n| *n == "custom").count(), 1);
+        assert!(
+            names.windows(2).all(|w| w[0] < w[1]),
+            "names must be sorted"
+        );
+        let bundled = BUNDLED_THEMES.len();
+        assert_eq!(names.len(), bundled + 1, "one new user theme, one override");
+    }
+
+    #[test]
+    fn disk_provider_persist_round_trip() {
+        let (_tmp, p) = disk_provider_fixture();
+        assert_eq!(p.persisted_name(), None);
+        p.persist("gruvbox");
+        assert_eq!(p.persisted_name().as_deref(), Some("gruvbox"));
+        assert_eq!(p.current_name().as_deref(), Some("gruvbox"));
+        assert_eq!(p.current_theme_name(), "gruvbox");
+        let dir = p.storage.clone().unwrap();
+        assert_eq!(
+            maki_storage::theme::read_theme_name(&dir).as_deref(),
+            Some("gruvbox")
+        );
+    }
+
+    #[test]
+    fn disk_provider_load_unknown_errors() {
+        let (_tmp, p) = disk_provider_fixture();
+        assert!(p.load("nonexistent").is_err());
     }
 }
