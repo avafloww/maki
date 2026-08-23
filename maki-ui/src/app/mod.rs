@@ -68,6 +68,7 @@ use maki_lua::{
     BuiltinAction, CompletionCtx, EventHandle, HintReader, HintSnapshot, ItemSpec, KeymapReader,
     LuaCommandReader, WinView,
 };
+use maki_match::{Resolution, fuzzy_resolve};
 use maki_providers::{ContentBlock, Message, Model, Role, ThinkingConfig, add_cost};
 use maki_storage::StateDir;
 use maki_storage::input_history::InputHistory;
@@ -106,6 +107,16 @@ const WORKFLOW_ON_MSG: &str = "Workflow mode: on";
 const WORKFLOW_OFF_MSG: &str = "Workflow mode: off";
 const IMPLEMENT_MSG_PREFIX: &str = "Implement the plan";
 const IMPLEMENT_PARALLEL_HINT: &str = "Use batch+task to parallelize, assign each subagent a separate module and restrict its tests to that module to avoid interference.";
+/// `/model <fragment>` resolution: no discovered spec fuzzy-matches.
+const MODEL_NO_MATCH_MSG: &str = "No model matches";
+/// `/model <fragment>` resolution: two or more specs fuzzy-match.
+const MODEL_AMBIGUOUS_MSG: &str = "Ambiguous model";
+/// `/theme <name>` commit: the resolved theme was applied and persisted.
+const THEME_APPLIED_PREFIX: &str = "Theme";
+/// `/theme <name>`: the name is not in the catalog (mirrors `load`'s error).
+const THEME_UNKNOWN_MSG: &str = "unknown theme";
+/// `/theme <fragment>` resolution: two or more names fuzzy-match.
+const THEME_AMBIGUOUS_MSG: &str = "Ambiguous theme";
 
 const TASK_DONE_DETAIL: &str = "✓ ";
 const MISSING_TOOL_COMPLETION: &str = "Tool did not report completion before the turn ended";
@@ -1769,12 +1780,22 @@ impl App {
                 vec![]
             }
             "/model" => {
-                self.model_picker.open(&self.state.model.spec());
-                vec![Action::RefreshModels]
+                let arg = cmd.args.trim();
+                if arg.is_empty() {
+                    self.model_picker.open(&self.state.model.spec());
+                    vec![Action::RefreshModels]
+                } else {
+                    self.resolve_model_arg(arg)
+                }
             }
             "/theme" => {
-                self.theme_picker.open();
-                vec![]
+                let arg = cmd.args.trim();
+                if arg.is_empty() {
+                    self.theme_picker.open();
+                    vec![]
+                } else {
+                    self.resolve_theme_arg(arg)
+                }
             }
             "/mcp" => {
                 self.mcp_picker.open();
@@ -1949,6 +1970,62 @@ impl App {
             text: cmd.render(args),
             images: Vec::new(),
         })
+    }
+
+    /// Resolve a `/model <arg>` argument without the picker. An explicit
+    /// `provider/id` spec bypasses the discovered list (matching `ChangeModel`
+    /// behaviour); otherwise the argument is fuzzy-resolved against the
+    /// discovered specs. Zero or ambiguous matches flash and emit nothing, so
+    /// the session model is left untouched and the picker stays closed.
+    fn resolve_model_arg(&mut self, arg: &str) -> Vec<Action> {
+        if arg.contains('/') {
+            return vec![Action::ChangeModel(arg.to_string())];
+        }
+        let models = self
+            .available_models
+            .load_full()
+            .map(|arc| (*arc).clone())
+            .unwrap_or_default();
+        match fuzzy_resolve(arg, &models) {
+            Resolution::Unique(index) => vec![Action::ChangeModel(models[index].clone())],
+            Resolution::NoMatch => {
+                self.flash(format!("{MODEL_NO_MATCH_MSG}: {arg}"));
+                vec![]
+            }
+            Resolution::Ambiguous => {
+                self.flash(format!("{MODEL_AMBIGUOUS_MSG}: {arg}"));
+                vec![]
+            }
+        }
+    }
+
+    /// Resolve a `/theme <arg>` argument without the picker. A unique match is
+    /// installed (palette store, highlighter refresh, generation bump) and
+    /// persisted under the app's `StateDir`, then flashed; unknown or ambiguous
+    /// arguments flash and change nothing.
+    fn resolve_theme_arg(&mut self, arg: &str) -> Vec<Action> {
+        let names = self.theme_provider.names();
+        match fuzzy_resolve(arg, &names) {
+            Resolution::Unique(index) => {
+                let name = names[index].clone();
+                match self.theme_provider.install(&name) {
+                    Ok(()) => {
+                        self.theme_provider.persist(&name);
+                        self.flash(format!("{THEME_APPLIED_PREFIX}: {name}"));
+                    }
+                    Err(error) => self.flash(error),
+                }
+                vec![]
+            }
+            Resolution::NoMatch => {
+                self.flash(format!("{THEME_UNKNOWN_MSG}: {arg}"));
+                vec![]
+            }
+            Resolution::Ambiguous => {
+                self.flash(format!("{THEME_AMBIGUOUS_MSG}: {arg}"));
+                vec![]
+            }
+        }
     }
 
     fn cmd_cd(&mut self, args: &str) -> Vec<Action> {
