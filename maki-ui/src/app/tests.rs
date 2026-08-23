@@ -1460,16 +1460,14 @@ fn rendered_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
 }
 
 #[test]
-fn subagent_panel_area_carved_only_when_running() {
+fn top_bar_is_always_one_row() {
     let area = Rect::new(0, 0, 80, 24);
-    let app = test_app();
-    assert_eq!(app.subagent_panel_rect(area).height, 0);
+    // Persistent even with no subagents.
+    assert_eq!(test_app().top_bar_rect(area).height, 1);
 
+    // Stays one row regardless of how many subagents are running.
     let mut app = app_with_subagent();
-    // The panel is a fixed one-line hint plus a bottom border.
-    assert_eq!(app.subagent_panel_rect(area).height, 2);
-
-    // More running subagents do not grow the panel; it stays one line.
+    assert_eq!(app.top_bar_rect(area).height, 1);
     for i in 2..=6 {
         app.update(subagent_msg(
             AgentEvent::TextDelta { text: "x".into() },
@@ -1477,15 +1475,11 @@ fn subagent_panel_area_carved_only_when_running() {
             Some("name"),
         ));
     }
-    assert_eq!(
-        app.subagent_panel_rect(area).height,
-        2,
-        "panel stays one line"
-    );
+    assert_eq!(app.top_bar_rect(area).height, 1, "top bar stays one row");
 }
 
 #[test]
-fn subagent_panel_shows_running_count_and_hint() {
+fn top_bar_shows_active_chat_running_count_and_cwd() {
     let mut app = app_with_subagent_id("task1");
     app.update(subagent_msg(
         AgentEvent::TextDelta { text: "y".into() },
@@ -1494,55 +1488,81 @@ fn subagent_panel_shows_running_count_and_hint() {
     ));
     finish_subagent(&mut app, "task2", false);
 
-    let panel_h = app.subagent_panel_rect(Rect::new(0, 0, 80, 24)).height;
+    let bar_h = app.top_bar_rect(Rect::new(0, 0, 80, 24)).height;
     let rows = rendered_rows(&mut app, 80, 24);
-    let panel: String = rows
+    let bar: String = rows
         .iter()
-        .take(panel_h as usize)
+        .take(bar_h as usize)
         .map(|s| s.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        panel.contains("1 subagent running"),
-        "singular count: {panel}"
-    );
-    assert!(panel.contains(kb::TASKS.label), "ctrl-x hint: {panel}");
-    assert!(panel.contains("to learn more"), "hint wording: {panel}");
-    // The panel is a one-line hint; it no longer lists subagent names.
-    assert!(!panel.contains("research"), "no name listed: {panel}");
-    assert!(!panel.contains("build"), "no name listed: {panel}");
 
-    // A second running subagent pluralizes the count.
+    // Active chat badge for the main chat.
+    assert!(bar.contains("[Main]"), "active badge: {bar}");
+    // One running subagent besides the main chat.
+    assert!(bar.contains("1 more"), "running count: {bar}");
+    assert!(bar.contains(kb::TASKS.label), "ctrl-x hint: {bar}");
+    // cwd:branch lives on the right, sourced from the status bar's cache.
+    assert!(
+        bar.contains(app.status_bar.cwd_branch()),
+        "cwd shown: {bar}"
+    );
+    // No per-subagent rows in the bar.
+    assert!(!bar.contains("research"), "no name rows: {bar}");
+
+    // A second running subagent bumps the count.
     app.update(subagent_msg(
         AgentEvent::TextDelta { text: "z".into() },
         "task3",
         Some("third"),
     ));
     let rows = rendered_rows(&mut app, 80, 24);
-    let panel: String = rows
+    let bar: String = rows
         .iter()
-        .take(panel_h as usize)
+        .take(bar_h as usize)
         .map(|s| s.as_str())
         .collect::<Vec<_>>()
         .join("\n");
+    assert!(bar.contains("2 more"), "two running: {bar}");
+}
+
+#[test]
+fn top_bar_omits_more_hint_when_no_other_running_subagents() {
+    let mut app = test_app();
+    let rows = rendered_rows(&mut app, 80, 24);
+    let bar: String = rows.first().map(|s| s.as_str()).unwrap_or("").to_string();
+    assert!(bar.contains("[Main]"), "badge always present: {bar}");
     assert!(
-        panel.contains("2 subagents running"),
-        "plural count: {panel}"
+        !bar.contains("more") && !bar.contains(kb::TASKS.label),
+        "no hint without running subagents: {bar}"
     );
 }
 
 #[test]
-fn subagent_panel_hidden_when_only_finished_subagents() {
-    let mut app = app_with_subagent_id("task1");
-    finish_subagent_task(&mut app, false);
+fn top_bar_shows_subagent_badge_when_tabbed_into_subagent() {
+    let mut app = app_with_subagent();
+    app.active_chat = 1;
     let rows = rendered_rows(&mut app, 80, 24);
-    let top: String = rows
-        .iter()
-        .take(6)
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(!top.contains("subagent") && !top.contains("to learn more"));
+    let bar: String = rows.first().map(|s| s.as_str()).unwrap_or("").to_string();
+    assert!(bar.contains("↳"), "subagent badge: {bar}");
+    assert!(bar.contains("research"), "subagent name: {bar}");
+    // No "more" hint: the only running subagent is the active one.
+    assert!(!bar.contains("more"), "no self-count: {bar}");
+}
+
+#[test]
+fn top_bar_hint_excludes_finished_subagents() {
+    let mut app = app_with_subagent_id("task1");
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "y".into() },
+        "task2",
+        Some("build"),
+    ));
+    finish_subagent(&mut app, "task1", false);
+    // task2 still running, task1 finished: from Main, one more running.
+    let rows = rendered_rows(&mut app, 80, 24);
+    let bar: String = rows.first().map(|s| s.as_str()).unwrap_or("").to_string();
+    assert!(bar.contains("1 more"), "only running counted: {bar}");
 }
 
 #[test]
