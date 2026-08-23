@@ -481,8 +481,16 @@ impl Model {
         Self::from_spec(spec)
     }
 
-    pub fn from_spec(spec: &str) -> Result<Self, ModelError> {
+    pub fn parse_spec(spec: &str) -> Result<(&str, &str), ModelError> {
         let (slug, model_id) = spec.split_once('/').ok_or(ModelError::InvalidFormat)?;
+        if slug.is_empty() || model_id.is_empty() {
+            return Err(ModelError::InvalidFormat);
+        }
+        Ok((slug, model_id))
+    }
+
+    pub fn from_spec(spec: &str) -> Result<Self, ModelError> {
+        let (slug, model_id) = Self::parse_spec(spec)?;
 
         // Precedence: builtin, then dynamic script, then providers.toml custom,
         // then models.dev catalogue sub-provider.

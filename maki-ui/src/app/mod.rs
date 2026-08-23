@@ -108,6 +108,7 @@ const WORKFLOW_OFF_MSG: &str = "Workflow mode: off";
 const IMPLEMENT_MSG_PREFIX: &str = "Implement the plan";
 const IMPLEMENT_PARALLEL_HINT: &str = "Use batch+task to parallelize, assign each subagent a separate module and restrict its tests to that module to avoid interference.";
 /// `/model <fragment>` resolution: no discovered spec fuzzy-matches.
+const INVALID_MODEL_MSG: &str = "Invalid model";
 const MODEL_NO_MATCH_MSG: &str = "No model matches";
 /// `/model <fragment>` resolution: two or more specs fuzzy-match.
 const MODEL_AMBIGUOUS_MSG: &str = "Ambiguous model";
@@ -1979,6 +1980,10 @@ impl App {
     /// the session model is left untouched and the picker stays closed.
     fn resolve_model_arg(&mut self, arg: &str) -> Vec<Action> {
         if arg.contains('/') {
+            if let Err(error) = Model::parse_spec(arg) {
+                self.flash(format!("{INVALID_MODEL_MSG}: {error}"));
+                return vec![];
+            }
             return vec![Action::ChangeModel(arg.to_string())];
         }
         let models = self
