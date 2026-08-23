@@ -236,19 +236,7 @@ fn truncate_snippet(text: &str) -> String {
 }
 
 fn ago(since: Instant) -> String {
-    let secs = since.elapsed().as_secs();
-    if secs < 60 {
-        return "just now".into();
-    }
-    let mins = secs / 60;
-    if mins < 60 {
-        return format!("{mins}min ago");
-    }
-    let hrs = mins / 60;
-    if hrs < 24 {
-        return format!("{hrs}h ago");
-    }
-    format!("{}d ago", hrs / 24)
+    maki_lua::format_ago(since.elapsed().as_secs())
 }
 
 /// Last assistant text block in a subagent's flushed history, used to feed an

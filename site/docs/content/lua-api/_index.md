@@ -108,6 +108,7 @@ The rules:
 | [`maki.net`](#maki-net) | HTTP client for fetching web content. |
 | [`maki.session`](#maki-session) | Host session primitives. |
 | [`maki.text`](#maki-text) | Text transformation utilities. |
+| [`maki.time`](#maki-time) | Wall-clock timestamps and relative-age formatting. |
 | [`maki.timer`](#maki-timer) | Recurring callbacks on the runtime's timer pump. |
 | [`maki.treesitter`](#maki-treesitter) | Tree-sitter parsing and query API. |
 | [`maki.treesitter.language`](#maki-treesitter-language) | Language registry for tree-sitter grammars. |
@@ -3455,6 +3456,78 @@ if err then return end
 print(md) -- "# Hello\n\nworld"
 ```
 
+
+## maki.time {#maki-time}
+
+Wall-clock timestamps and relative-age formatting.
+
+`now` returns seconds since the Unix epoch, the same clock the host
+uses for session `updated_at`, so plugin timestamps can be persisted
+and sorted with host data. `ago` renders a relative age the same way
+maki's own pickers do, so callers get one consistent format instead
+of each plugin inventing its own.
+
+```lua
+local t0 = maki.time.now()
+-- work...
+print(maki.time.ago(t0))
+```
+
+---
+
+### `maki.time.now()` {#maki-time-now}
+
+```lua
+maki.time.now()
+```
+
+Return the current wall-clock time as seconds since the Unix epoch
+(`1970-01-01T00:00:00Z`), as a number.
+
+This is the same clock the host uses for session `updated_at`, so the
+value round-trips through storage and sort. It keeps sub-second precision
+(unlike `os.time()`, which returns whole seconds), but stays compatible:
+the whole part equals what `os.time()` returns. Pass the result to
+`maki.time.ago` to render a relative age.
+
+**Returns:** (`number`) Seconds since the Unix epoch, fractional.
+
+**Example:**
+
+```lua
+local t0 = maki.time.now()
+-- ...work...
+print(maki.time.ago(t0))
+```
+
+---
+
+### `maki.time.ago()` {#maki-time-ago}
+
+```lua
+maki.time.ago({instant})
+```
+
+Format {instant} as a relative age like `3h ago`, or `just now` for less
+than a minute. {instant} is a timestamp from `maki.time.now`.
+
+Uses the same clock as `now`, so subtracting two `now` timestamps spans
+real elapsed time (sub-second inclusive). A timestamp in the future (or a
+non-number) renders as `just now`.
+
+**Parameters:**
+
+- `{instant}` (`number`) Timestamp from `maki.time.now`.
+
+**Returns:** (`string`) Relative age, e.g. `42min ago`.
+
+**Example:**
+
+```lua
+print(maki.time.ago(maki.time.now() - 30 * 60)) -- "30min ago"
+```
+
+---
 
 ## maki.timer {#maki-timer}
 
