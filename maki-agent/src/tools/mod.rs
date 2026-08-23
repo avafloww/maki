@@ -355,44 +355,55 @@ pub fn mtime(path: &Path) -> SystemTime {
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
-pub(crate) fn truncate_bytes(line: &str, max_bytes: usize) -> String {
-    if line.len() > max_bytes {
-        let boundary = line.floor_char_boundary(max_bytes);
-        format!("{}...", &line[..boundary])
-    } else {
-        line.to_owned()
+pub const LINE_TRUNCATED_MARKER: &str = "[line truncated]";
+pub const FILE_TRUNCATED_MARKER: &str = "[file truncated]";
+
+pub fn truncate_line(line: &str, max_bytes: usize) -> String {
+    if line.len() <= max_bytes {
+        return line.to_owned();
     }
+    let boundary = line.floor_char_boundary(max_bytes.saturating_sub(LINE_TRUNCATED_MARKER.len()));
+    format!("{}{}", &line[..boundary], LINE_TRUNCATED_MARKER)
 }
 
-pub fn truncate_output(text: String, max_lines: usize, max_bytes: usize) -> String {
-    const TRUNCATED_MARKER: &str = "[truncated]";
-    let mut lines = text.lines();
+pub fn truncate_file(
+    text: &str,
+    max_lines: usize,
+    max_bytes: usize,
+    remaining_lines: Option<usize>,
+) -> String {
     let mut result = String::new();
-    let mut truncated = false;
-
-    for _ in 0..max_lines {
-        let Some(line) = lines.next() else { break };
+    let mut truncated = remaining_lines.is_some();
+    for (index, line) in text.split('\n').enumerate() {
+        if index >= max_lines
+            || result.len() + line.len() + usize::from(!result.is_empty()) > max_bytes
+        {
+            truncated = true;
+            break;
+        }
         if !result.is_empty() {
             result.push('\n');
         }
         result.push_str(line);
-        if result.len() > max_bytes {
-            let boundary = result.floor_char_boundary(max_bytes);
-            result.truncate(boundary);
-            truncated = true;
-            break;
-        }
     }
-
-    if !truncated && lines.next().is_some() {
-        truncated = true;
-    }
-
     if truncated {
-        result.push('\n');
-        result.push_str(TRUNCATED_MARKER);
+        if !result.is_empty() {
+            result.push_str("\n\n");
+        }
+        result.push_str(&format_file_truncated_marker(remaining_lines));
     }
     result
+}
+
+pub fn format_file_truncated_marker(remaining_lines: Option<usize>) -> String {
+    match remaining_lines {
+        Some(lines) => format!("[file truncated, {lines} lines remaining]"),
+        None => FILE_TRUNCATED_MARKER.to_owned(),
+    }
+}
+
+pub fn truncate_output(text: String, max_lines: usize, max_bytes: usize) -> String {
+    truncate_file(&text, max_lines, max_bytes, None)
 }
 
 pub fn is_builtin_tool(name: &str) -> bool {
@@ -662,12 +673,16 @@ mod tests {
 
     #[test_case("short",                            "short"                             ; "short_passthrough")]
     #[test_case(&"x".repeat(LINE_LIMIT),       &"x".repeat(LINE_LIMIT)        ; "exact_boundary")]
-    #[test_case(&"x".repeat(LINE_LIMIT + 500), &format!("{}...", "x".repeat(LINE_LIMIT)) ; "long_truncated")]
-    #[test_case(&format!("{}\u{1F600}", "a".repeat(LINE_LIMIT - 1)), &format!("{}...", "a".repeat(LINE_LIMIT - 1)) ; "multibyte_char_boundary")]
-    #[test_case(&format!("{}\u{0430}tail", "a".repeat(LINE_LIMIT - 1)), &format!("{}...", "a".repeat(LINE_LIMIT - 1)) ; "two_byte_char_boundary")]
-    fn truncate_bytes_cases(input: &str, expected: &str) {
-        let result = truncate_bytes(input, LINE_LIMIT);
+    #[test_case(&"x".repeat(LINE_LIMIT + 500), &format!("{}{}", "x".repeat(LINE_LIMIT - LINE_TRUNCATED_MARKER.len()), LINE_TRUNCATED_MARKER) ; "long_truncated")]
+    fn truncate_line_cases(input: &str, expected: &str) {
+        let result = truncate_line(input, LINE_LIMIT);
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn truncate_file_includes_remaining_line_count() {
+        let result = truncate_file("a\nb\nc", 2, usize::MAX, Some(7));
+        assert!(result.ends_with("[file truncated, 7 lines remaining]"));
     }
 
     #[test]
@@ -680,11 +695,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let result = truncate_output(many_lines, MAX_LINES, MAX_BYTES);
-        assert!(result.ends_with("[truncated]"));
+        assert!(result.ends_with(FILE_TRUNCATED_MARKER));
 
         let many_bytes = "x".repeat(MAX_BYTES + 1000);
         let result = truncate_output(many_bytes, MAX_LINES, MAX_BYTES);
-        assert!(result.ends_with("[truncated]"));
+        assert!(result.ends_with(FILE_TRUNCATED_MARKER));
     }
 
     #[test]

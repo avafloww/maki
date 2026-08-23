@@ -1,4 +1,3 @@
-local truncate = require("maki.truncate")
 local ToolView = require("maki.tool_view")
 local shorten_path = require("maki.shorten_path")
 local color = require("maki.color")
@@ -239,7 +238,7 @@ maki.api.register_tool({
     if #entries == 0 then
       return nil
     end
-    return build_grep_view(entries, ctx)
+    return ToolView.restore(output, grep_view_opts(ctx))
   end,
 
   handler = function(input, ctx)
@@ -277,11 +276,11 @@ maki.api.register_tool({
     end
 
     local llm_output = format_llm_output(entries)
-    llm_output = truncate(llm_output, max_lines, max_bytes)
+    llm_output = maki.text.truncate_file(llm_output, max_lines, max_bytes, nil)
 
     return {
       llm_output = llm_output,
-      body = build_grep_view(entries, ctx),
+      body = ToolView.restore(llm_output, grep_view_opts(ctx)),
       annotation = count_matches(entries),
     }
   end,

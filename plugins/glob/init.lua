@@ -1,4 +1,3 @@
-local truncate = require("maki.truncate")
 local ToolView = require("maki.tool_view")
 local shorten_path = require("maki.shorten_path")
 local output_limits = require("maki.output_limits")
@@ -75,7 +74,7 @@ maki.api.register_tool({
       lines[i] = shorten_path(f)
     end
     local text = table.concat(lines, "\n")
-    local llm_output = truncate(text, max_lines, max_bytes)
+    local llm_output = maki.text.truncate_file(text, max_lines, max_bytes, nil)
 
     local buf = maki.ui.buf()
     local view = ToolView.new(buf, glob_view_opts(ctx))
