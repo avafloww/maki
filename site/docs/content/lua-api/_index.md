@@ -3557,7 +3557,6 @@ local t0 = maki.time.now()
 print(maki.time.ago(t0))
 ```
 
----
 
 ## maki.timer {#maki-timer}
 
