@@ -66,13 +66,48 @@ pub fn fuzzy_resolve(query: &str, candidates: &[impl AsRef<str>]) -> Resolution 
     }
     if let Some(index) = candidates
         .iter()
-        .position(|c| c.as_ref().eq_ignore_ascii_case(query))
+        .position(|candidate| candidate.as_ref().eq_ignore_ascii_case(query))
     {
         return Resolution::Unique(index);
     }
+    fuzzy_resolve_by(query, candidates, |query, candidate| {
+        fuzzy_match(query, candidate.as_ref()).is_some()
+    })
+}
+
+pub struct MatchCandidate<'a> {
+    pub value: &'a str,
+    pub fields: Vec<&'a str>,
+}
+
+pub fn fuzzy_resolve_candidates(query: &str, candidates: &[MatchCandidate<'_>]) -> Resolution {
+    let query = query.trim();
+    if query.is_empty() {
+        return Resolution::NoMatch;
+    }
+    if let Some(index) = candidates
+        .iter()
+        .position(|candidate| candidate.value.eq_ignore_ascii_case(query))
+    {
+        return Resolution::Unique(index);
+    }
+    fuzzy_resolve_by(query, candidates, |query, candidate| {
+        fuzzy_match_fields(query, candidate.fields.iter().copied())
+    })
+}
+
+fn fuzzy_resolve_by<T>(
+    query: &str,
+    candidates: &[T],
+    matches: impl Fn(&str, &T) -> bool,
+) -> Resolution {
+    let query = query.trim();
+    if query.is_empty() {
+        return Resolution::NoMatch;
+    }
     let mut unique: Option<usize> = None;
     for (index, candidate) in candidates.iter().enumerate() {
-        if fuzzy_match(query, candidate.as_ref()).is_some() {
+        if matches(query, candidate) {
             match unique {
                 None => unique = Some(index),
                 Some(_) => return Resolution::Ambiguous,
@@ -83,6 +118,39 @@ pub fn fuzzy_resolve(query: &str, candidates: &[impl AsRef<str>]) -> Resolution 
         Some(index) => Resolution::Unique(index),
         None => Resolution::NoMatch,
     }
+}
+
+fn fuzzy_match_fields<I>(query: &str, fields: I) -> bool
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let patterns: Vec<_> = query
+        .split_whitespace()
+        .map(|word| {
+            Pattern::new(
+                word,
+                CaseMatching::Smart,
+                Normalization::Smart,
+                AtomKind::Fuzzy,
+            )
+        })
+        .collect();
+    let fields: Vec<_> = fields.into_iter().collect();
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    patterns.iter().all(|pattern| {
+        fields.iter().any(|field| {
+            let text = field.as_ref();
+            let mut chars = Vec::new();
+            let haystack = if text.is_ascii() {
+                Utf32Str::Ascii(text.as_bytes())
+            } else {
+                chars.extend(text.chars());
+                Utf32Str::Unicode(&chars)
+            };
+            pattern.score(haystack, &mut matcher).is_some()
+        })
+    })
 }
 
 #[cfg(test)]

@@ -68,7 +68,7 @@ use maki_lua::{
     BuiltinAction, CompletionCtx, EventHandle, HintReader, HintSnapshot, ItemSpec, KeymapReader,
     LuaCommandReader, WinView,
 };
-use maki_match::{Resolution, fuzzy_resolve};
+use maki_match::{MatchCandidate, Resolution, fuzzy_resolve, fuzzy_resolve_candidates};
 use maki_providers::{ContentBlock, Message, Model, Role, ThinkingConfig, add_cost};
 use maki_storage::StateDir;
 use maki_storage::input_history::InputHistory;
@@ -1986,7 +1986,17 @@ impl App {
             .load_full()
             .map(|arc| (*arc).clone())
             .unwrap_or_default();
-        match fuzzy_resolve(arg, &models) {
+        let candidates: Vec<_> = models
+            .iter()
+            .map(|spec| {
+                let (provider, model_id) = spec.split_once('/').unwrap_or(("", spec));
+                MatchCandidate {
+                    value: spec,
+                    fields: vec![spec, provider, model_id],
+                }
+            })
+            .collect();
+        match fuzzy_resolve_candidates(arg, &candidates) {
             Resolution::Unique(index) => vec![Action::ChangeModel(models[index].clone())],
             Resolution::NoMatch => {
                 self.flash(format!("{MODEL_NO_MATCH_MSG}: {arg}"));
