@@ -2924,6 +2924,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "maki-match"
+version = "0.4.11-luna"
+dependencies = [
+ "nucleo-matcher",
+ "test-case",
+]
+
+[[package]]
 name = "maki-providers"
 version = "0.4.11-luna"
 dependencies = [
