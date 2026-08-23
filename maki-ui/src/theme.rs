@@ -440,7 +440,7 @@ pub fn style_by_name(name: &str) -> Style {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Theme {
     pub background: Color,
     pub foreground: Color,

@@ -691,12 +691,8 @@ fn lifecycle_app() -> (App, maki_lua::test_support::RequestProbe) {
     );
     app.input_box.set_input("/deploy a".into());
     app.command_palette.sync("/deploy a");
-    app.command_palette.sync_arguments(
-        "/deploy a",
-        9,
-        &app.lua_event_handle,
-        &app.state.mode.id_key(),
-    );
+    app.command_palette
+        .sync_arguments("/deploy a", 9, &app.state.mode.id_key());
     probe
         .try_finish_command_arguments(vec![CommandArgumentItem {
             label: "alpha".into(),
@@ -704,7 +700,7 @@ fn lifecycle_app() -> (App, maki_lua::test_support::RequestProbe) {
             description: None,
         }])
         .unwrap();
-    let _ = app.command_palette.poll_arguments(&app.lua_event_handle);
+    let _ = app.command_palette.poll_arguments();
     probe.try_finish_command_argument_lifecycle().unwrap();
     (app, probe)
 }
@@ -3132,6 +3128,9 @@ fn mcp_prompt_args_expand_references() {
             ..Default::default()
         }),
         LuaCommandReader::empty(),
+        ModelArgSource::new(Arc::clone(&app.available_models)),
+        ThemeArgSource::new(Arc::clone(&app.theme_provider)),
+        LuaArgumentSource::new(app.lua_event_handle.clone()),
     );
 
     let actions = app.execute_command(
@@ -5034,6 +5033,9 @@ fn at_completion_insertion_synchronizes_argument_completion() {
             max_args: 1,
             has_argument_completion: true,
         }]),
+        ModelArgSource::new(Arc::clone(&app.available_models)),
+        ThemeArgSource::new(Arc::clone(&app.theme_provider)),
+        LuaArgumentSource::new(app.lua_event_handle.clone()),
     );
     app.input_box.set_input("/deploy @rev".into());
     app.command_palette.sync("/deploy @rev");

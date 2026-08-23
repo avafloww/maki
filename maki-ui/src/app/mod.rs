@@ -26,6 +26,7 @@ use crate::AppSession;
 use crate::chat::Chat;
 use crate::chat::{CANCELLED_TEXT, ChatEventResult, DONE_TEXT, ERROR_TEXT};
 use crate::clipboard::ClipboardState;
+use crate::components::arg_completion::{LuaArgumentSource, ModelArgSource, ThemeArgSource};
 use crate::components::btw_modal::BtwModal;
 use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
 use crate::components::file_completion::{
@@ -365,6 +366,9 @@ impl App {
                 custom_commands,
                 mcp_reader.clone(),
                 lua_command_reader,
+                ModelArgSource::new(Arc::clone(&available_models)),
+                ThemeArgSource::new(Arc::clone(&theme_provider)),
+                LuaArgumentSource::new(lua_event_handle.clone()),
             ),
             task_picker: ListPicker::new(),
             task_picker_original: None,
@@ -695,7 +699,7 @@ impl App {
             return None;
         }
         if key::QUIT.matches(key) {
-            self.command_palette.close(&self.lua_event_handle);
+            self.command_palette.close();
             return Some(if !self.is_main_chat() || self.input_box.is_empty() {
                 if self.status == Status::Streaming {
                     return Some(self.handle_cancel());
@@ -832,7 +836,6 @@ impl App {
                         self.command_palette.sync_arguments(
                             &val,
                             self.input_box.buffer.cursor_byte_offset(),
-                            &self.lua_event_handle,
                             &self.state.mode.id_key(),
                         );
                         self.sync_file_completion();
@@ -1110,7 +1113,6 @@ impl App {
                 self.command_palette.sync_arguments(
                     &val,
                     self.input_box.buffer.cursor_byte_offset(),
-                    &self.lua_event_handle,
                     &self.state.mode.id_key(),
                 );
                 self.sync_file_completion();
@@ -1118,18 +1120,16 @@ impl App {
             return vec![];
         }
 
-        match self.command_palette.handle_key(
-            key,
-            &self.input_box.buffer.value(),
-            &self.lua_event_handle,
-        ) {
+        match self
+            .command_palette
+            .handle_key(key, &self.input_box.buffer.value())
+        {
             CommandAction::Consumed => return vec![],
             CommandAction::SelectionChanged => {
                 let input = self.input_box.buffer.value();
                 self.command_palette.sync_arguments(
                     &input,
                     self.input_box.buffer.cursor_byte_offset(),
-                    &self.lua_event_handle,
                     &self.state.mode.id_key(),
                 );
                 return vec![];
@@ -1151,12 +1151,8 @@ impl App {
                 self.refresh_at_ref_labels(&text);
                 self.input_box.set_input(text.clone());
                 self.input_box.buffer.set_cursor_byte_offset(cursor);
-                self.command_palette.sync_arguments(
-                    &text,
-                    cursor,
-                    &self.lua_event_handle,
-                    &self.state.mode.id_key(),
-                );
+                self.command_palette
+                    .sync_arguments(&text, cursor, &self.state.mode.id_key());
                 return vec![];
             }
             CommandAction::Passthrough => {}
@@ -1188,7 +1184,6 @@ impl App {
                 self.command_palette.sync_arguments(
                     &val,
                     self.input_box.buffer.cursor_byte_offset(),
-                    &self.lua_event_handle,
                     &self.state.mode.id_key(),
                 );
                 self.sync_file_completion();
@@ -1326,7 +1321,6 @@ impl App {
         self.command_palette.sync_arguments(
             &val,
             self.input_box.buffer.cursor_byte_offset(),
-            &self.lua_event_handle,
             &self.state.mode.id_key(),
         );
     }
@@ -2053,7 +2047,7 @@ impl App {
     }
 
     pub fn close_all_overlays(&mut self) {
-        self.command_palette.close(&self.lua_event_handle);
+        self.command_palette.close();
         self.overlays_mut().iter_mut().for_each(|o| o.close());
     }
 
@@ -2075,7 +2069,7 @@ impl App {
             | self.hints.poll(self.hint_reader.load_full())
             | self.tick_file_picker()
             | self.tick_file_completion()
-            | self.command_palette.poll_arguments(&self.lua_event_handle);
+            | self.command_palette.poll_arguments();
         dirty |= self.tick_chats();
         while let Some(shown) = self.chats[0].take_splash_event() {
             // The autocmd is fire-and-forget; repainting is the frame pull's
@@ -2207,7 +2201,6 @@ impl App {
             self.command_palette.sync_arguments(
                 &val,
                 self.input_box.buffer.cursor_byte_offset(),
-                &self.lua_event_handle,
                 &self.state.mode.id_key(),
             );
             self.sync_file_completion();
