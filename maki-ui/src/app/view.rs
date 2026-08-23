@@ -184,20 +184,20 @@ impl App {
         } else {
             left_spans.push(Span::styled(format!(" [{}]", active.name), t.status_dim));
         }
-        // Running subagents other than the active chat, if any.
-        let n_more = self
+        // Always surface the running-task hint so tasks are discoverable from
+        // any view, even when none are running yet.
+        let n_running = self
             .chats
             .iter()
-            .enumerate()
             .skip(1)
-            .filter(|(i, c)| *i != self.active_chat && !c.is_finished())
+            .filter(|c| !c.is_finished())
             .count();
-        if n_more > 0 {
-            left_spans.push(Span::styled(
-                format!(" ({n_more} more, {})", key::TASKS.label),
-                t.item_desc,
-            ));
-        }
+        let task_hint = if n_running > 0 {
+            format!(" ({} to see {n_running} tasks)", key::TASKS.label)
+        } else {
+            format!(" ({} to see tasks)", key::TASKS.label)
+        };
+        left_spans.push(Span::styled(task_hint, t.item_desc));
 
         let left_width: usize = left_spans.iter().map(Span::width).sum();
         let cwd_max = (area.width as usize).saturating_sub(left_width + 1);
