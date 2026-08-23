@@ -1,7 +1,5 @@
 use std::sync::atomic::Ordering;
 
-use crate::animation::{animation_elapsed_ms, spinner_str};
-use crate::chat::Chat;
 use crate::components::Overlay;
 use crate::components::input::Placeholder;
 #[cfg(test)]
@@ -14,17 +12,14 @@ use crate::components::usage_modal::UsageModalContext;
 use crate::selection::{self, SelectableZone, SelectionZone, ZoneRegistry};
 use crate::theme;
 use maki_lua::Split;
-use maki_providers::format_tokens;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
-use unicode_width::UnicodeWidthStr;
 
 use super::{App, Mode, Status};
 
 const SUBAGENT_INPUT_HINT: &str = "sends to this subagent \u{b7} TAB mode \u{b7} ESC cancel";
-pub(super) const MAX_RUNNING_ROWS: u16 = 4;
 
 /// Target hint shown under the input box so a user typing on a subagent chat
 /// knows their Enter goes to that subagent, not the main agent.
@@ -70,14 +65,11 @@ impl App {
         let [mut content, status_area] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
 
-        // Pin a compact panel of currently-running subagents to the top of the
-        // content region. It only appears while subagents are running and never
-        // crowds the chat below the minimum height.
+        // Pin a one-line hint to the top of the content region while subagents
+        // are running. It never crowds the chat below the minimum height.
         let running = self.running_subagent_count();
         let panel_h = if running > 0 {
-            let rows = running.min(MAX_RUNNING_ROWS as usize) as u16;
-            let desired = rows + 2; // header + rows + bottom border
-            desired.min(content.height.saturating_sub(MIN_CHAT_ROWS))
+            2u16.min(content.height.saturating_sub(MIN_CHAT_ROWS)) // hint + bottom border
         } else {
             0
         };
@@ -199,53 +191,14 @@ impl App {
         if inner.height == 0 {
             return;
         }
-
-        let running: Vec<&Chat> = self
-            .chats
-            .iter()
-            .skip(1)
-            .filter(|c| !c.is_finished())
-            .take(MAX_RUNNING_ROWS as usize)
-            .collect();
-        let header_left = format!(" Tasks ({} running)", running.len());
-        let header_right = format!("{} to view more", key::TASKS.label);
-        let mut lines: Vec<Line> = Vec::with_capacity(inner.height as usize);
-
-        let header_pad = inner
-            .width
-            .saturating_sub(header_left.width() as u16 + header_right.width() as u16);
-        lines.push(Line::from(vec![
-            Span::styled(header_left, t.keybind_section),
-            Span::raw(" ".repeat(header_pad as usize)),
-            Span::styled(header_right, t.item_desc),
-        ]));
-
-        let spinner = spinner_str(animation_elapsed_ms());
-        for chat in running {
-            if lines.len() >= inner.height as usize {
-                break;
-            }
-            let mut right_parts: Vec<String> = Vec::new();
-            if chat.context_size > 0 {
-                right_parts.push(format_tokens(chat.context_size));
-            }
-            if let Some(started) = chat.started_at() {
-                right_parts.push(super::ago(started));
-            }
-            let right = right_parts.join(" ");
-            let pad = inner.width.saturating_sub(
-                spinner.width() as u16 + 1 + chat.name.width() as u16 + right.width() as u16,
-            );
-            let mut spans = vec![Span::styled(spinner, t.item_desc), Span::raw(" ")];
-            spans.push(Span::styled(chat.name.clone(), t.item));
-            spans.push(Span::raw(" ".repeat(pad as usize)));
-            if !right.is_empty() {
-                spans.push(Span::styled(right, t.item_desc));
-            }
-            lines.push(Line::from(spans));
-        }
-
-        Paragraph::new(lines).render(inner, frame.buffer_mut());
+        let running = self.running_subagent_count();
+        let plural = if running == 1 { "" } else { "s" };
+        let hint = format!(
+            "{running} subagent{plural} running, press {} to learn more",
+            key::TASKS.label,
+        );
+        Paragraph::new(Line::from(Span::styled(hint, t.item_desc)))
+            .render(inner, frame.buffer_mut());
     }
 
     fn render_messages(&mut self, frame: &mut Frame, layout: &ViewLayout, render_chat: usize) {

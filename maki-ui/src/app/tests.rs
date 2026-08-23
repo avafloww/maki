@@ -1466,11 +1466,10 @@ fn subagent_panel_area_carved_only_when_running() {
     assert_eq!(app.subagent_panel_rect(area).height, 0);
 
     let mut app = app_with_subagent();
-    let h = app.subagent_panel_rect(area).height;
-    assert!(h > 0, "panel appears for a running subagent");
-    assert!(h <= 1 + super::view::MAX_RUNNING_ROWS + 1);
+    // The panel is a fixed one-line hint plus a bottom border.
+    assert_eq!(app.subagent_panel_rect(area).height, 2);
 
-    // Many running subagents stay capped by MAX_RUNNING_ROWS.
+    // More running subagents do not grow the panel; it stays one line.
     for i in 2..=6 {
         app.update(subagent_msg(
             AgentEvent::TextDelta { text: "x".into() },
@@ -1478,16 +1477,15 @@ fn subagent_panel_area_carved_only_when_running() {
             Some("name"),
         ));
     }
-    let capped = app.subagent_panel_rect(area).height;
     assert_eq!(
-        capped,
-        1 + super::view::MAX_RUNNING_ROWS + 1,
-        "capped at MAX_RUNNING_ROWS"
+        app.subagent_panel_rect(area).height,
+        2,
+        "panel stays one line"
     );
 }
 
 #[test]
-fn subagent_panel_lists_running_subagents_and_hint() {
+fn subagent_panel_shows_running_count_and_hint() {
     let mut app = app_with_subagent_id("task1");
     app.update(subagent_msg(
         AgentEvent::TextDelta { text: "y".into() },
@@ -1504,15 +1502,32 @@ fn subagent_panel_lists_running_subagents_and_hint() {
         .map(|s| s.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(panel.contains("Tasks (1 running)"), "panel header: {panel}");
-    assert!(panel.contains("to view more"), "ctrl-x hint: {panel}");
     assert!(
-        panel.contains("research"),
-        "running subagent name shown: {panel}"
+        panel.contains("1 subagent running"),
+        "singular count: {panel}"
     );
+    assert!(panel.contains(kb::TASKS.label), "ctrl-x hint: {panel}");
+    assert!(panel.contains("to learn more"), "hint wording: {panel}");
+    // The panel is a one-line hint; it no longer lists subagent names.
+    assert!(!panel.contains("research"), "no name listed: {panel}");
+    assert!(!panel.contains("build"), "no name listed: {panel}");
+
+    // A second running subagent pluralizes the count.
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "z".into() },
+        "task3",
+        Some("third"),
+    ));
+    let rows = rendered_rows(&mut app, 80, 24);
+    let panel: String = rows
+        .iter()
+        .take(panel_h as usize)
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        !panel.contains("build"),
-        "finished subagent excluded: {panel}"
+        panel.contains("2 subagents running"),
+        "plural count: {panel}"
     );
 }
 
@@ -1527,7 +1542,7 @@ fn subagent_panel_hidden_when_only_finished_subagents() {
         .map(|s| s.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(!top.contains("Tasks (") && !top.contains("to view more"));
+    assert!(!top.contains("subagent") && !top.contains("to learn more"));
 }
 
 #[test]
