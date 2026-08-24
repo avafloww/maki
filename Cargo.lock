@@ -2762,6 +2762,7 @@ dependencies = [
 name = "maki-commands"
 version = "0.4.11-luna"
 dependencies = [
+ "futures-lite",
  "thiserror 2.0.20",
 ]
 
