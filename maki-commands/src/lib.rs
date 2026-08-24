@@ -1,10 +1,10 @@
 //! Frontend-neutral contracts for slash commands.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Poll, Waker};
 
@@ -13,6 +13,8 @@ use thiserror::Error;
 pub type CommandFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
 pub const MAX_COMMAND_DEPTH: usize = 8;
+
+static NEXT_REGISTRY_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSpec {
@@ -87,16 +89,19 @@ impl fmt::Debug for Registration {
 macro_rules! opaque_id {
     ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub struct $name(u64);
+        pub struct $name(RegistryId, u64);
 
         #[allow(dead_code)]
         impl $name {
-            pub(crate) const fn new(value: u64) -> Self {
-                Self(value)
+            pub(crate) const fn new(registry_id: RegistryId, value: u64) -> Self {
+                Self(registry_id, value)
             }
         }
     };
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct RegistryId(u64);
 
 opaque_id!(ProducerId);
 opaque_id!(CommandId);
@@ -121,6 +126,7 @@ pub enum ProducerPrecedence {
 pub struct CommandRegistry(Arc<RegistryInner>);
 
 struct RegistryInner {
+    id: RegistryId,
     state: Mutex<RegistryState>,
 }
 
@@ -130,6 +136,9 @@ struct RegistryState {
     producers: Vec<ProducerSlot>,
     winners: HashMap<String, Winner>,
     projection: Arc<[ResolvedCommand]>,
+    completion_sessions: HashMap<CompletionSessionId, Weak<CompletionSessionCore>>,
+    #[cfg(test)]
+    invalidation_gate: Option<Arc<TestRaceGate>>,
 }
 
 struct ProducerSlot {
@@ -137,6 +146,70 @@ struct ProducerSlot {
     precedence: ProducerPrecedence,
     creation_order: u64,
     records: Vec<Arc<RegistrationRecord>>,
+    generation: u64,
+}
+
+struct CompletionSessionCore {
+    id: CompletionSessionId,
+    producer_id: ProducerId,
+    registry: Weak<RegistryInner>,
+    state: Mutex<CompletionSessionState>,
+    #[cfg(test)]
+    commit_gate: Mutex<Option<Arc<TestRaceGate>>>,
+    #[cfg(test)]
+    lifecycle_gate: Mutex<Option<Arc<TestRaceGate>>>,
+}
+
+#[cfg(test)]
+struct TestRaceGate {
+    reached: std::sync::Barrier,
+    resume: std::sync::Barrier,
+}
+
+#[cfg(test)]
+impl TestRaceGate {
+    fn new() -> Self {
+        Self {
+            reached: std::sync::Barrier::new(2),
+            resume: std::sync::Barrier::new(2),
+        }
+    }
+
+    fn wait(&self) {
+        self.reached.wait();
+        self.resume.wait();
+    }
+}
+
+struct CompletionSessionState {
+    command: ResolvedCommand,
+    provider: Arc<dyn CommandCompletion>,
+    target_id: InvocationTargetId,
+    producer_generation: u64,
+    next_request: u64,
+    current_request: Option<CurrentCompletionRequest>,
+    callback_in_flight: bool,
+    pending_callbacks: VecDeque<LifecycleCallback>,
+    closed: bool,
+}
+
+struct CurrentCompletionRequest {
+    id: u64,
+    context: CompletionContext,
+    cancellation: CancellationToken,
+    items: Option<Vec<CompletionItem>>,
+}
+
+struct LifecycleCallback {
+    provider: Arc<dyn CommandCompletion>,
+    context: CompletionContext,
+    event: CompletionLifecycleEvent,
+    cancellation: CancellationToken,
+}
+
+struct InvalidatedSession {
+    session: Arc<CompletionSessionCore>,
+    callback: Option<LifecycleCallback>,
 }
 
 #[derive(Clone)]
@@ -188,12 +261,16 @@ pub struct Producer {
 impl CommandRegistry {
     pub fn new() -> Self {
         Self(Arc::new(RegistryInner {
+            id: RegistryId(NEXT_REGISTRY_ID.fetch_add(1, Ordering::Relaxed)),
             state: Mutex::new(RegistryState {
                 next_id: 1,
                 generation: 0,
                 producers: Vec::new(),
                 winners: HashMap::new(),
                 projection: Arc::from([]),
+                completion_sessions: HashMap::new(),
+                #[cfg(test)]
+                invalidation_gate: None,
             }),
         }))
     }
@@ -204,13 +281,14 @@ impl CommandRegistry {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let id = ProducerId::new(state.take_id());
+        let id = ProducerId::new(self.0.id, state.take_id());
         let creation_order = state.producers.len() as u64;
         state.producers.push(ProducerSlot {
             id,
             precedence,
             creation_order,
             records: Vec::new(),
+            generation: 0,
         });
         Producer {
             registry: Arc::downgrade(&self.0),
@@ -224,7 +302,62 @@ impl CommandRegistry {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        InvocationTargetId::new(state.take_id())
+        InvocationTargetId::new(self.0.id, state.take_id())
+    }
+
+    pub fn open_completion(
+        &self,
+        command: ResolvedCommand,
+        target_id: InvocationTargetId,
+    ) -> Result<CompletionSession, CompletionError> {
+        if command.registry_id != self.0.id || target_id.0 != self.0.id {
+            return Err(CompletionError::StaleCommand);
+        }
+        let provider = command.completion().ok_or(CompletionError::Unavailable)?;
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let producer_generation = state
+            .producers
+            .iter()
+            .find(|producer| {
+                producer.id == command.producer_id()
+                    && producer
+                        .records
+                        .iter()
+                        .any(|record| record.command_id == command.command_id())
+            })
+            .map(|producer| producer.generation)
+            .ok_or(CompletionError::StaleCommand)?;
+        let id = CompletionSessionId::new(self.0.id, state.take_id());
+        let core = Arc::new(CompletionSessionCore {
+            id,
+            producer_id: command.producer_id(),
+            registry: Arc::downgrade(&self.0),
+            state: Mutex::new(CompletionSessionState {
+                command: command.clone(),
+                provider,
+                target_id,
+                producer_generation,
+                next_request: 0,
+                current_request: None,
+                callback_in_flight: false,
+                pending_callbacks: VecDeque::new(),
+                closed: false,
+            }),
+            #[cfg(test)]
+            commit_gate: Mutex::new(None),
+            #[cfg(test)]
+            lifecycle_gate: Mutex::new(None),
+        });
+        state.completion_sessions.insert(id, Arc::downgrade(&core));
+        Ok(CompletionSession {
+            command,
+            target_id,
+            core,
+        })
     }
 
     pub fn resolve(&self, spelling: &str) -> Result<ResolvedCommand, ResolutionError> {
@@ -238,6 +371,7 @@ impl CommandRegistry {
             .winners
             .get(&normalized)
             .map(|winner| ResolvedCommand {
+                registry_id: self.0.id,
                 record: Arc::clone(&winner.record),
                 invoked_name: Arc::from(spelling),
             })
@@ -408,14 +542,18 @@ impl Producer {
             .map(|registration| {
                 Arc::new(RegistrationRecord {
                     producer_id: self.id,
-                    command_id: CommandId::new(state.take_id()),
+                    command_id: CommandId::new(registry.id, state.take_id()),
                     registration,
                 })
             })
             .collect();
         state.producers[position].records = records;
+        state.producers[position].generation += 1;
         state.generation += 1;
         state.rebuild();
+        let callbacks = state.invalidate_completion_sessions(self.id);
+        drop(state);
+        invoke_invalidated_sessions(callbacks);
         Ok(())
     }
 
@@ -437,6 +575,9 @@ impl Producer {
         state.producers.remove(position);
         state.generation += 1;
         state.rebuild();
+        let callbacks = state.invalidate_completion_sessions(self.id);
+        drop(state);
+        invoke_invalidated_sessions(callbacks);
         true
     }
 }
@@ -446,6 +587,41 @@ impl RegistryState {
         let id = self.next_id;
         self.next_id += 1;
         id
+    }
+
+    fn invalidate_completion_sessions(
+        &mut self,
+        producer_id: ProducerId,
+    ) -> Vec<InvalidatedSession> {
+        let sessions = self
+            .completion_sessions
+            .iter()
+            .filter_map(|(id, session)| session.upgrade().map(|session| (*id, session)))
+            .filter(|(_, session)| session.producer_id == producer_id)
+            .collect::<Vec<_>>();
+        #[cfg(test)]
+        if let Some(gate) = self.invalidation_gate.take() {
+            gate.wait();
+        }
+        let mut invalidated = Vec::new();
+        for (id, session) in sessions {
+            self.completion_sessions.remove(&id);
+            let callback = {
+                let mut state = session
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if state.closed {
+                    None
+                } else {
+                    state.closed = true;
+                    take_cancel_callback(&mut state)
+                        .and_then(|callback| start_or_queue_callback(&mut state, callback))
+                }
+            };
+            invalidated.push(InvalidatedSession { session, callback });
+        }
+        invalidated
     }
 
     fn rebuild(&mut self) {
@@ -486,6 +662,7 @@ impl RegistryState {
                         .is_some_and(|winner| winner.record.command_id == record.command_id)
                     {
                         projection.push(ResolvedCommand {
+                            registry_id: record.command_id.0,
                             record: Arc::clone(record),
                             invoked_name: Arc::clone(spelling),
                         });
@@ -596,6 +773,7 @@ impl<'a> ParsedInput<'a> {
 
 #[derive(Clone)]
 pub struct ResolvedCommand {
+    registry_id: RegistryId,
     record: Arc<RegistrationRecord>,
     invoked_name: Arc<str>,
 }
@@ -873,11 +1051,11 @@ pub trait CommandCompletion: Send + Sync + 'static {
 
     fn lifecycle(
         &self,
-        _context: CompletionContext,
-        _event: CompletionLifecycleEvent,
-        _cancellation: CancellationToken,
-    ) -> CommandFuture<Result<(), CompletionError>> {
-        Box::pin(async { Ok(()) })
+        _context: &CompletionContext,
+        _event: &CompletionLifecycleEvent,
+        _cancellation: &CancellationToken,
+    ) -> Result<(), CompletionError> {
+        Ok(())
     }
 }
 
@@ -902,6 +1080,19 @@ pub struct CompletionItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionCandidate {
+    item: CompletionItem,
+    session_id: CompletionSessionId,
+    request_id: u64,
+}
+
+impl CompletionCandidate {
+    pub fn item(&self) -> &CompletionItem {
+        &self.item
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompletionLifecycleEvent {
     Highlight(CompletionItem),
     Accept(CompletionItem),
@@ -922,16 +1113,16 @@ impl CancellationToken {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CompletionSession {
-    id: CompletionSessionId,
     command: ResolvedCommand,
     target_id: InvocationTargetId,
+    core: Arc<CompletionSessionCore>,
 }
 
 impl CompletionSession {
     pub fn id(&self) -> CompletionSessionId {
-        self.id
+        self.core.id
     }
 
     pub fn command(&self) -> &ResolvedCommand {
@@ -940,6 +1131,318 @@ impl CompletionSession {
 
     pub fn target_id(&self) -> InvocationTargetId {
         self.target_id
+    }
+
+    pub fn complete(
+        &self,
+        arguments: Arc<str>,
+        argument: Arc<str>,
+        argument_index: usize,
+        mode: Arc<str>,
+    ) -> CommandFuture<CompletionResult> {
+        let (provider, context, cancellation, request_id, producer_generation) = {
+            let mut state = self
+                .core
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if state.closed {
+                return Box::pin(async { CompletionResult::Stale });
+            }
+            let superseded = take_cancel_callback(&mut state);
+            state.next_request += 1;
+            let request_id = state.next_request;
+            let cancellation = CancellationToken::default();
+            let context = CompletionContext {
+                command_id: state.command.command_id(),
+                canonical_name: Arc::clone(&state.command.spec().name),
+                invoked_name: Arc::from(state.command.invoked_name()),
+                arguments,
+                argument,
+                argument_index,
+                mode,
+                target_id: state.target_id,
+                session_id: self.core.id,
+            };
+            state.current_request = Some(CurrentCompletionRequest {
+                id: request_id,
+                context: context.clone(),
+                cancellation: cancellation.clone(),
+                items: None,
+            });
+            let request = (
+                Arc::clone(&state.provider),
+                context,
+                cancellation,
+                request_id,
+                state.producer_generation,
+            );
+            let superseded =
+                superseded.and_then(|callback| start_or_queue_callback(&mut state, callback));
+            drop(state);
+            let _ = self.core.invoke_lifecycle(superseded);
+            request
+        };
+        let core = Arc::clone(&self.core);
+        let request = provider.complete(context, cancellation.clone());
+        let guard = PendingRequestGuard {
+            core: Arc::clone(&core),
+            request_id,
+            active: true,
+        };
+        Box::pin(async move {
+            let mut guard = guard;
+            let result = request.await;
+            #[cfg(test)]
+            if let Some(gate) = core.commit_gate.lock().unwrap().take() {
+                gate.wait();
+            }
+            let Some(registry) = core.registry.upgrade() else {
+                return CompletionResult::Stale;
+            };
+            let registry_state = registry
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let generation_matches = registry_state.producers.iter().any(|producer| {
+                producer.id == core.producer_id && producer.generation == producer_generation
+            });
+            let registered = registry_state
+                .completion_sessions
+                .get(&core.id)
+                .and_then(Weak::upgrade)
+                .is_some_and(|session| Arc::ptr_eq(&session, &core));
+            let mut state = core.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.closed || !generation_matches || !registered {
+                return CompletionResult::Stale;
+            }
+            let Some(current) = state.current_request.as_mut() else {
+                return CompletionResult::Stale;
+            };
+            if current.id != request_id {
+                return CompletionResult::Stale;
+            }
+            if cancellation.is_cancelled() {
+                return CompletionResult::Cancelled;
+            }
+            guard.active = false;
+            match result {
+                Ok(items) => {
+                    current.items = Some(items.clone());
+                    CompletionResult::Items(
+                        items
+                            .into_iter()
+                            .map(|item| CompletionCandidate {
+                                item,
+                                session_id: core.id,
+                                request_id,
+                            })
+                            .collect(),
+                    )
+                }
+                Err(error) => CompletionResult::Failed(error),
+            }
+        })
+    }
+
+    pub fn highlight(&self, candidate: &CompletionCandidate) -> Result<(), CompletionError> {
+        self.core.lifecycle(candidate, false)
+    }
+
+    pub fn accept(&self, candidate: CompletionCandidate) -> Result<(), CompletionError> {
+        self.core.lifecycle(&candidate, true)
+    }
+
+    pub fn cancel(&self) -> Result<(), CompletionError> {
+        self.core.close(true)
+    }
+}
+
+impl CompletionSessionCore {
+    fn lifecycle(
+        &self,
+        candidate: &CompletionCandidate,
+        terminal: bool,
+    ) -> Result<(), CompletionError> {
+        #[cfg(test)]
+        if let Some(gate) = self.lifecycle_gate.lock().unwrap().take() {
+            gate.wait();
+        }
+        let registry = self
+            .registry
+            .upgrade()
+            .ok_or(CompletionError::StaleSession)?;
+        let mut registry_state = registry
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let registered = registry_state
+            .completion_sessions
+            .get(&self.id)
+            .and_then(Weak::upgrade)
+            .is_some_and(|session| std::ptr::eq(session.as_ref(), self));
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let generation_matches = registry_state.producers.iter().any(|producer| {
+            producer.id == self.producer_id && producer.generation == state.producer_generation
+        });
+        if !registered || !generation_matches {
+            return Err(CompletionError::StaleSession);
+        }
+        if state.closed || candidate.session_id != self.id {
+            return Err(CompletionError::StaleSession);
+        }
+        let request = state
+            .current_request
+            .as_ref()
+            .filter(|request| request.id == candidate.request_id)
+            .ok_or(CompletionError::StaleRequest)?;
+        let callback = LifecycleCallback {
+            provider: Arc::clone(&state.provider),
+            context: request.context.clone(),
+            event: if terminal {
+                CompletionLifecycleEvent::Accept(candidate.item.clone())
+            } else {
+                CompletionLifecycleEvent::Highlight(candidate.item.clone())
+            },
+            cancellation: request.cancellation.clone(),
+        };
+        if terminal {
+            state.closed = true;
+            state.current_request = None;
+            registry_state.completion_sessions.remove(&self.id);
+        }
+        let callback = start_or_queue_callback(&mut state, callback);
+        drop(state);
+        drop(registry_state);
+        self.invoke_lifecycle(callback)
+    }
+
+    fn close(&self, notify: bool) -> Result<(), CompletionError> {
+        let callback = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.closed {
+                return Err(CompletionError::StaleSession);
+            }
+            state.closed = true;
+            let callback = take_cancel_callback(&mut state);
+            notify
+                .then_some(callback)
+                .flatten()
+                .and_then(|callback| start_or_queue_callback(&mut state, callback))
+        };
+        self.unregister();
+        self.invoke_lifecycle(callback)
+    }
+
+    fn invoke_lifecycle(&self, callback: Option<LifecycleCallback>) -> Result<(), CompletionError> {
+        let Some(mut callback) = callback else {
+            return Ok(());
+        };
+        let mut result = Ok(());
+        loop {
+            let callback_result = callback.provider.lifecycle(
+                &callback.context,
+                &callback.event,
+                &callback.cancellation,
+            );
+            if result.is_ok() {
+                result = callback_result;
+            }
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(next) = state.pending_callbacks.pop_front() else {
+                state.callback_in_flight = false;
+                return result;
+            };
+            callback = next;
+        }
+    }
+
+    fn unregister(&self) {
+        if let Some(registry) = self.registry.upgrade() {
+            registry
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .completion_sessions
+                .remove(&self.id);
+        }
+    }
+}
+
+impl Drop for CompletionSessionCore {
+    fn drop(&mut self) {
+        self.unregister();
+        let callback = take_cancel_callback(
+            self.state
+                .get_mut()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        if let Some(callback) = callback {
+            let _ = callback.provider.lifecycle(
+                &callback.context,
+                &callback.event,
+                &callback.cancellation,
+            );
+        }
+    }
+}
+
+struct PendingRequestGuard {
+    core: Arc<CompletionSessionCore>,
+    request_id: u64,
+    active: bool,
+}
+
+impl Drop for PendingRequestGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let callback = {
+            let mut state = self
+                .core
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            state
+                .current_request
+                .as_ref()
+                .is_some_and(|request| request.id == self.request_id)
+                .then(|| take_cancel_callback(&mut state))
+                .flatten()
+                .and_then(|callback| start_or_queue_callback(&mut state, callback))
+        };
+        let _ = self.core.invoke_lifecycle(callback);
+    }
+}
+
+fn take_cancel_callback(state: &mut CompletionSessionState) -> Option<LifecycleCallback> {
+    let request = state.current_request.take()?;
+    request.cancellation.cancel();
+    Some(LifecycleCallback {
+        provider: Arc::clone(&state.provider),
+        context: request.context,
+        event: CompletionLifecycleEvent::Cancel,
+        cancellation: request.cancellation,
+    })
+}
+
+fn start_or_queue_callback(
+    state: &mut CompletionSessionState,
+    callback: LifecycleCallback,
+) -> Option<LifecycleCallback> {
+    if state.callback_in_flight {
+        state.pending_callbacks.push_back(callback);
+        None
+    } else {
+        state.callback_in_flight = true;
+        Some(callback)
+    }
+}
+
+fn invoke_invalidated_sessions(sessions: Vec<InvalidatedSession>) {
+    for InvalidatedSession { session, callback } in sessions {
+        let _ = session.invoke_lifecycle(callback);
     }
 }
 
@@ -951,7 +1454,7 @@ pub struct PendingCompletionRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompletionResult {
-    Items(Vec<CompletionItem>),
+    Items(Vec<CompletionCandidate>),
     Stale,
     Cancelled,
     Failed(CompletionError),
@@ -963,6 +1466,14 @@ pub enum CompletionError {
     Producer(Arc<str>),
     #[error("the completion target is no longer available")]
     StaleTarget,
+    #[error("the command has no completion provider")]
+    Unavailable,
+    #[error("the resolved command is no longer registered")]
+    StaleCommand,
+    #[error("the completion session is closed")]
+    StaleSession,
+    #[error("the completion request is stale")]
+    StaleRequest,
 }
 
 #[cfg(test)]
@@ -1040,10 +1551,11 @@ mod tests {
 
     #[test]
     fn opaque_ids_are_distinct_types() {
-        let producer = super::ProducerId::new(1);
-        let command = super::CommandId::new(1);
-        assert_eq!(producer, super::ProducerId::new(1));
-        assert_eq!(command, super::CommandId::new(1));
+        let registry = super::RegistryId(1);
+        let producer = super::ProducerId::new(registry, 1);
+        let command = super::CommandId::new(registry, 1);
+        assert_eq!(producer, super::ProducerId::new(registry, 1));
+        assert_eq!(command, super::CommandId::new(registry, 1));
     }
 
     fn registration(name: &str, aliases: &[&str], arity: ArgumentArity) -> Registration {
@@ -1346,6 +1858,751 @@ mod tests {
             futures_lite::future::block_on(registry.dispatch_input("/unknown text", 0, target))
                 .unwrap(),
             super::InputDispatch::UnknownCommandInput
+        ));
+    }
+
+    fn completion_item(label: &str) -> CompletionItem {
+        CompletionItem {
+            label: Arc::from(label),
+            insertion: Arc::from(label),
+            description: None,
+        }
+    }
+
+    struct ControlledCompletion {
+        requests: std::sync::mpsc::Sender<(Arc<str>, CancellationToken)>,
+        responses: std::sync::Mutex<
+            std::collections::HashMap<String, std::sync::mpsc::Receiver<Vec<CompletionItem>>>,
+        >,
+        events: std::sync::mpsc::Sender<super::CompletionLifecycleEvent>,
+        on_lifecycle: Option<Arc<dyn Fn() + Send + Sync>>,
+    }
+
+    impl CommandCompletion for ControlledCompletion {
+        fn complete(
+            &self,
+            context: CompletionContext,
+            cancellation: CancellationToken,
+        ) -> CommandFuture<Result<Vec<CompletionItem>, super::CompletionError>> {
+            let response = self
+                .responses
+                .lock()
+                .unwrap()
+                .remove(context.argument.as_ref())
+                .unwrap();
+            self.requests
+                .send((context.argument, cancellation))
+                .unwrap();
+            Box::pin(async move { Ok(response.recv().unwrap()) })
+        }
+
+        fn lifecycle(
+            &self,
+            _context: &CompletionContext,
+            event: &super::CompletionLifecycleEvent,
+            _cancellation: &CancellationToken,
+        ) -> Result<(), super::CompletionError> {
+            self.events.send(event.clone()).unwrap();
+            if let Some(callback) = &self.on_lifecycle {
+                callback();
+            }
+            Ok(())
+        }
+    }
+
+    fn completion_registration(completion: Arc<dyn CommandCompletion>) -> Registration {
+        let mut registration = registration("/complete", &[], ArgumentArity::ANY);
+        registration.completion = Some(completion);
+        registration
+    }
+
+    #[test]
+    fn superseded_completion_is_stale() {
+        let (requests_tx, requests_rx) = std::sync::mpsc::channel();
+        let (events_tx, _events_rx) = std::sync::mpsc::channel();
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        let (second_tx, second_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(ControlledCompletion {
+            requests: requests_tx,
+            responses: std::sync::Mutex::new(std::collections::HashMap::from([
+                ("first".to_owned(), first_rx),
+                ("second".to_owned(), second_rx),
+            ])),
+            events: events_tx,
+            on_lifecycle: None,
+        });
+        let registry = super::CommandRegistry::new();
+        let producer = registry.create_producer(super::ProducerPrecedence::Builtin);
+        producer
+            .replace(vec![completion_registration(provider)])
+            .unwrap();
+        let session = registry
+            .open_completion(
+                registry.resolve("/complete").unwrap(),
+                registry.create_target(),
+            )
+            .unwrap();
+        let first_session = session.clone();
+        let first = std::thread::spawn(move || {
+            futures_lite::future::block_on(first_session.complete(
+                Arc::from("first"),
+                Arc::from("first"),
+                0,
+                Arc::from("test"),
+            ))
+        });
+        let (_, first_cancellation) = requests_rx.recv().unwrap();
+        let second_session = session.clone();
+        let second = std::thread::spawn(move || {
+            futures_lite::future::block_on(second_session.complete(
+                Arc::from("second"),
+                Arc::from("second"),
+                0,
+                Arc::from("test"),
+            ))
+        });
+        requests_rx.recv().unwrap();
+        assert!(first_cancellation.is_cancelled());
+        first_tx.send(vec![completion_item("old")]).unwrap();
+        second_tx.send(vec![completion_item("new")]).unwrap();
+        assert_eq!(first.join().unwrap(), super::CompletionResult::Stale);
+        let super::CompletionResult::Items(items) = second.join().unwrap() else {
+            panic!("expected completion items");
+        };
+        assert_eq!(items[0].item(), &completion_item("new"));
+        assert!(session.accept(items[0].clone()).is_ok());
+    }
+
+    #[test]
+    fn dropping_pending_request_cancels_once() {
+        let (requests_tx, requests_rx) = std::sync::mpsc::channel();
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let (_response_tx, response_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(ControlledCompletion {
+            requests: requests_tx,
+            responses: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "value".to_owned(),
+                response_rx,
+            )])),
+            events: events_tx,
+            on_lifecycle: None,
+        });
+        let registry = super::CommandRegistry::new();
+        let producer = registry.create_producer(super::ProducerPrecedence::Builtin);
+        producer
+            .replace(vec![completion_registration(provider)])
+            .unwrap();
+        let session = registry
+            .open_completion(
+                registry.resolve("/complete").unwrap(),
+                registry.create_target(),
+            )
+            .unwrap();
+        let request =
+            session.complete(Arc::from("value"), Arc::from("value"), 0, Arc::from("test"));
+        let (_, cancellation) = requests_rx.recv().unwrap();
+        drop(request);
+        assert!(cancellation.is_cancelled());
+        assert_eq!(
+            events_rx.recv().unwrap(),
+            super::CompletionLifecycleEvent::Cancel
+        );
+        assert!(events_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn superseded_candidate_cannot_be_highlighted() {
+        let (requests_tx, requests_rx) = std::sync::mpsc::channel();
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        let (_second_tx, second_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(ControlledCompletion {
+            requests: requests_tx,
+            responses: std::sync::Mutex::new(std::collections::HashMap::from([
+                ("first".to_owned(), first_rx),
+                ("second".to_owned(), second_rx),
+            ])),
+            events: events_tx,
+            on_lifecycle: None,
+        });
+        let registry = super::CommandRegistry::new();
+        let producer = registry.create_producer(super::ProducerPrecedence::Builtin);
+        producer
+            .replace(vec![completion_registration(provider)])
+            .unwrap();
+        let session = registry
+            .open_completion(
+                registry.resolve("/complete").unwrap(),
+                registry.create_target(),
+            )
+            .unwrap();
+        let first = session.complete(Arc::from("first"), Arc::from("first"), 0, Arc::from("test"));
+        requests_rx.recv().unwrap();
+        first_tx.send(vec![completion_item("same")]).unwrap();
+        let super::CompletionResult::Items(items) = futures_lite::future::block_on(first) else {
+            panic!("expected completion items");
+        };
+        let second = session.complete(
+            Arc::from("second"),
+            Arc::from("second"),
+            0,
+            Arc::from("test"),
+        );
+        requests_rx.recv().unwrap();
+        assert_eq!(
+            session.highlight(&items[0]),
+            Err(super::CompletionError::StaleRequest)
+        );
+        assert_eq!(
+            events_rx.recv().unwrap(),
+            super::CompletionLifecycleEvent::Cancel
+        );
+        drop(second);
+    }
+
+    #[test]
+    fn candidate_is_bound_to_its_session() {
+        let (requests_tx, requests_rx) = std::sync::mpsc::channel();
+        let (events_tx, _events_rx) = std::sync::mpsc::channel();
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(ControlledCompletion {
+            requests: requests_tx,
+            responses: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "value".to_owned(),
+                first_rx,
+            )])),
+            events: events_tx,
+            on_lifecycle: None,
+        });
+        let registry = super::CommandRegistry::new();
+        let producer = registry.create_producer(super::ProducerPrecedence::Builtin);
+        producer
+            .replace(vec![completion_registration(provider)])
+            .unwrap();
+        let command = registry.resolve("/complete").unwrap();
+        let first_session = registry
+            .open_completion(command.clone(), registry.create_target())
+            .unwrap();
+        let second_session = registry
+            .open_completion(command, registry.create_target())
+            .unwrap();
+        let request =
+            first_session.complete(Arc::from("value"), Arc::from("value"), 0, Arc::from("test"));
+        requests_rx.recv().unwrap();
+        first_tx.send(vec![completion_item("same")]).unwrap();
+        let super::CompletionResult::Items(items) = futures_lite::future::block_on(request) else {
+            panic!("expected completion items");
+        };
+        assert_eq!(
+            second_session.accept(items[0].clone()),
+            Err(super::CompletionError::StaleSession)
+        );
+    }
+
+    #[test]
+    fn dropped_session_does_not_retain_provider() {
+        let (requests_tx, _requests_rx) = std::sync::mpsc::channel();
+        let (events_tx, _events_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(ControlledCompletion {
+            requests: requests_tx,
+            responses: std::sync::Mutex::new(std::collections::HashMap::new()),
+            events: events_tx,
+            on_lifecycle: None,
+        });
+        let registry = super::CommandRegistry::new();
+        let producer = registry.create_producer(super::ProducerPrecedence::Builtin);
+        producer
+            .replace(vec![completion_registration(provider.clone())])
+            .unwrap();
+        let session = registry
+            .open_completion(
+                registry.resolve("/complete").unwrap(),
+                registry.create_target(),
+            )
+            .unwrap();
+        drop(session);
+        producer.replace(Vec::new()).unwrap();
+        assert_eq!(Arc::strong_count(&provider), 1);
+    }
+
+    #[test]
+    fn replacement_cancels_session_once() {
+        let (requests_tx, requests_rx) = std::sync::mpsc::channel();
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let (response_tx, response_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(ControlledCompletion {
+            requests: requests_tx,
+            responses: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "value".to_owned(),
+                response_rx,
+            )])),
+            events: events_tx,
+            on_lifecycle: None,
+        });
+        let registry = super::CommandRegistry::new();
+        let producer = registry.create_producer(super::ProducerPrecedence::Builtin);
+        producer
+            .replace(vec![completion_registration(provider)])
+            .unwrap();
+        let session = registry
+            .open_completion(
+                registry.resolve("/complete").unwrap(),
+                registry.create_target(),
+            )
+            .unwrap();
+        let request =
+            session.complete(Arc::from("value"), Arc::from("value"), 0, Arc::from("test"));
+        let request_thread = std::thread::spawn(move || futures_lite::future::block_on(request));
+        let (_, cancellation) = requests_rx.recv().unwrap();
+        producer.replace(Vec::new()).unwrap();
+        assert!(cancellation.is_cancelled());
+        response_tx.send(Vec::new()).unwrap();
+        assert_eq!(
+            events_rx.recv().unwrap(),
+            super::CompletionLifecycleEvent::Cancel
+        );
+        assert!(events_rx.try_recv().is_err());
+        assert_eq!(
+            request_thread.join().unwrap(),
+            super::CompletionResult::Stale
+        );
+    }
+
+    #[test]
+    fn invalidation_retains_final_session_arc_until_registry_unlock() {
+        let registry = super::CommandRegistry::new();
+        let producer = registry.create_producer(super::ProducerPrecedence::Builtin);
+        let (requests_tx, _requests_rx) = std::sync::mpsc::channel();
+        let (events_tx, _events_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(ControlledCompletion {
+            requests: requests_tx,
+            responses: std::sync::Mutex::new(std::collections::HashMap::new()),
+            events: events_tx,
+            on_lifecycle: None,
+        });
+        producer
+            .replace(vec![completion_registration(provider)])
+            .unwrap();
+        let session = registry
+            .open_completion(
+                registry.resolve("/complete").unwrap(),
+                registry.create_target(),
+            )
+            .unwrap();
+        let gate = Arc::new(super::TestRaceGate::new());
+        registry.0.state.lock().unwrap().invalidation_gate = Some(Arc::clone(&gate));
+        let replacing_producer = producer.clone();
+        let replacement = std::thread::spawn(move || replacing_producer.replace(Vec::new()));
+
+        gate.reached.wait();
+        drop(session);
+        gate.resume.wait();
+
+        replacement.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn replacement_waits_for_started_highlight_before_cancel() {
+        let (requests_tx, requests_rx) = std::sync::mpsc::channel();
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let (response_tx, response_rx) = std::sync::mpsc::channel();
+        let gate = Arc::new(super::TestRaceGate::new());
+        let callback_gate = Arc::clone(&gate);
+        let first_callback = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let callback_first = Arc::clone(&first_callback);
+        let provider = Arc::new(ControlledCompletion {
+            requests: requests_tx,
+            responses: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "value".to_owned(),
+                response_rx,
+            )])),
+            events: events_tx,
+            on_lifecycle: Some(Arc::new(move || {
+                if callback_first.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                    callback_gate.wait();
+                }
+            })),
+        });
+        let registry = super::CommandRegistry::new();
+        let producer = registry.create_producer(super::ProducerPrecedence::Builtin);
+        producer
+            .replace(vec![completion_registration(provider)])
+            .unwrap();
+        let session = registry
+            .open_completion(
+                registry.resolve("/complete").unwrap(),
+                registry.create_target(),
+            )
+            .unwrap();
+        let request =
+            session.complete(Arc::from("value"), Arc::from("value"), 0, Arc::from("test"));
+        requests_rx.recv().unwrap();
+        response_tx.send(vec![completion_item("item")]).unwrap();
+        let super::CompletionResult::Items(items) = futures_lite::future::block_on(request) else {
+            panic!("expected completion items");
+        };
+        let highlighting_session = session.clone();
+        let candidate = items[0].clone();
+        let highlight = std::thread::spawn(move || highlighting_session.highlight(&candidate));
+
+        gate.reached.wait();
+        assert_eq!(
+            events_rx.recv().unwrap(),
+            super::CompletionLifecycleEvent::Highlight(completion_item("item"))
+        );
+        producer.replace(Vec::new()).unwrap();
+        assert!(events_rx.try_recv().is_err());
+        gate.resume.wait();
+
+        highlight.join().unwrap().unwrap();
+        assert_eq!(
+            events_rx.recv().unwrap(),
+            super::CompletionLifecycleEvent::Cancel
+        );
+        assert!(events_rx.try_recv().is_err());
+        assert_eq!(
+            session.highlight(&items[0]),
+            Err(super::CompletionError::StaleSession)
+        );
+    }
+
+    #[test]
+    fn highlight_callback_can_replace_producer_before_queued_cancel() {
+        let (requests_tx, requests_rx) = std::sync::mpsc::channel();
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let (response_tx, response_rx) = std::sync::mpsc::channel();
+        let registry = super::CommandRegistry::new();
+        let producer = registry.create_producer(super::ProducerPrecedence::Builtin);
+        let callback_producer = producer.clone();
+        let replaced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_replaced = Arc::clone(&replaced);
+        let provider = Arc::new(ControlledCompletion {
+            requests: requests_tx,
+            responses: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "value".to_owned(),
+                response_rx,
+            )])),
+            events: events_tx,
+            on_lifecycle: Some(Arc::new(move || {
+                if !callback_replaced.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                    callback_producer.replace(Vec::new()).unwrap();
+                }
+            })),
+        });
+        producer
+            .replace(vec![completion_registration(provider)])
+            .unwrap();
+        let session = registry
+            .open_completion(
+                registry.resolve("/complete").unwrap(),
+                registry.create_target(),
+            )
+            .unwrap();
+        let request =
+            session.complete(Arc::from("value"), Arc::from("value"), 0, Arc::from("test"));
+        requests_rx.recv().unwrap();
+        response_tx.send(vec![completion_item("item")]).unwrap();
+        let super::CompletionResult::Items(items) = futures_lite::future::block_on(request) else {
+            panic!("expected completion items");
+        };
+
+        session.highlight(&items[0]).unwrap();
+
+        assert_eq!(
+            events_rx.recv().unwrap(),
+            super::CompletionLifecycleEvent::Highlight(completion_item("item"))
+        );
+        assert_eq!(
+            events_rx.recv().unwrap(),
+            super::CompletionLifecycleEvent::Cancel
+        );
+        assert!(events_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn replacement_wins_before_result_commit() {
+        let (requests_tx, requests_rx) = std::sync::mpsc::channel();
+        let (events_tx, _events_rx) = std::sync::mpsc::channel();
+        let (response_tx, response_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(ControlledCompletion {
+            requests: requests_tx,
+            responses: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "value".to_owned(),
+                response_rx,
+            )])),
+            events: events_tx,
+            on_lifecycle: None,
+        });
+        let registry = super::CommandRegistry::new();
+        let producer = registry.create_producer(super::ProducerPrecedence::Builtin);
+        producer
+            .replace(vec![completion_registration(provider)])
+            .unwrap();
+        let session = registry
+            .open_completion(
+                registry.resolve("/complete").unwrap(),
+                registry.create_target(),
+            )
+            .unwrap();
+        let gate = Arc::new(super::TestRaceGate::new());
+        *session.core.commit_gate.lock().unwrap() = Some(Arc::clone(&gate));
+        let request =
+            session.complete(Arc::from("value"), Arc::from("value"), 0, Arc::from("test"));
+        let request_thread = std::thread::spawn(move || futures_lite::future::block_on(request));
+        requests_rx.recv().unwrap();
+        response_tx.send(vec![completion_item("old")]).unwrap();
+        gate.reached.wait();
+        producer.replace(Vec::new()).unwrap();
+        gate.resume.wait();
+
+        assert_eq!(
+            request_thread.join().unwrap(),
+            super::CompletionResult::Stale
+        );
+    }
+
+    #[test]
+    fn removal_or_replacement_wins_before_candidate_acceptance() {
+        for remove in [false, true] {
+            let (requests_tx, requests_rx) = std::sync::mpsc::channel();
+            let (events_tx, events_rx) = std::sync::mpsc::channel();
+            let (response_tx, response_rx) = std::sync::mpsc::channel();
+            let provider = Arc::new(ControlledCompletion {
+                requests: requests_tx,
+                responses: std::sync::Mutex::new(std::collections::HashMap::from([(
+                    "value".to_owned(),
+                    response_rx,
+                )])),
+                events: events_tx,
+                on_lifecycle: None,
+            });
+            let registry = super::CommandRegistry::new();
+            let producer = registry.create_producer(super::ProducerPrecedence::Builtin);
+            producer
+                .replace(vec![completion_registration(provider)])
+                .unwrap();
+            let session = registry
+                .open_completion(
+                    registry.resolve("/complete").unwrap(),
+                    registry.create_target(),
+                )
+                .unwrap();
+            let request =
+                session.complete(Arc::from("value"), Arc::from("value"), 0, Arc::from("test"));
+            requests_rx.recv().unwrap();
+            response_tx.send(vec![completion_item("item")]).unwrap();
+            let super::CompletionResult::Items(items) = futures_lite::future::block_on(request)
+            else {
+                panic!("expected completion items");
+            };
+            let gate = Arc::new(super::TestRaceGate::new());
+            *session.core.lifecycle_gate.lock().unwrap() = Some(Arc::clone(&gate));
+            let accepting_session = session.clone();
+            let candidate = items[0].clone();
+            let accept_thread = std::thread::spawn(move || accepting_session.accept(candidate));
+            gate.reached.wait();
+            if remove {
+                assert!(producer.remove());
+            } else {
+                producer.replace(Vec::new()).unwrap();
+            }
+            gate.resume.wait();
+
+            assert_eq!(
+                accept_thread.join().unwrap(),
+                Err(super::CompletionError::StaleSession)
+            );
+            assert_eq!(
+                events_rx.recv().unwrap(),
+                super::CompletionLifecycleEvent::Cancel
+            );
+            assert!(events_rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn accept_and_cancel_are_terminal() {
+        let (requests_tx, requests_rx) = std::sync::mpsc::channel();
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let (response_tx, response_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(ControlledCompletion {
+            requests: requests_tx,
+            responses: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "value".to_owned(),
+                response_rx,
+            )])),
+            events: events_tx,
+            on_lifecycle: None,
+        });
+        let registry = super::CommandRegistry::new();
+        let producer = registry.create_producer(super::ProducerPrecedence::Builtin);
+        producer
+            .replace(vec![completion_registration(provider)])
+            .unwrap();
+        let session = registry
+            .open_completion(
+                registry.resolve("/complete").unwrap(),
+                registry.create_target(),
+            )
+            .unwrap();
+        let request =
+            session.complete(Arc::from("value"), Arc::from("value"), 0, Arc::from("test"));
+        let request_thread = std::thread::spawn(move || futures_lite::future::block_on(request));
+        requests_rx.recv().unwrap();
+        response_tx.send(vec![completion_item("item")]).unwrap();
+        let super::CompletionResult::Items(items) = request_thread.join().unwrap() else {
+            panic!("expected completion items");
+        };
+        session.highlight(&items[0]).unwrap();
+        session.accept(items[0].clone()).unwrap();
+        assert_eq!(
+            events_rx.recv().unwrap(),
+            super::CompletionLifecycleEvent::Highlight(completion_item("item"))
+        );
+        assert_eq!(
+            events_rx.recv().unwrap(),
+            super::CompletionLifecycleEvent::Accept(completion_item("item"))
+        );
+        assert!(session.cancel().is_err());
+        assert!(events_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn supersession_callback_can_reenter_session() {
+        let (requests_tx, requests_rx) = std::sync::mpsc::channel();
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let (_first_tx, first_rx) = std::sync::mpsc::channel();
+        let (_second_tx, second_rx) = std::sync::mpsc::channel();
+        let reentrant_session = Arc::new(std::sync::Mutex::new(None::<super::CompletionSession>));
+        let callback_session = Arc::clone(&reentrant_session);
+        let provider = Arc::new(ControlledCompletion {
+            requests: requests_tx,
+            responses: std::sync::Mutex::new(std::collections::HashMap::from([
+                ("first".to_owned(), first_rx),
+                ("second".to_owned(), second_rx),
+            ])),
+            events: events_tx,
+            on_lifecycle: Some(Arc::new(move || {
+                let session = callback_session.lock().unwrap().as_ref().unwrap().clone();
+                let _ = session.cancel();
+            })),
+        });
+        let registry = super::CommandRegistry::new();
+        let producer = registry.create_producer(super::ProducerPrecedence::Builtin);
+        producer
+            .replace(vec![completion_registration(provider)])
+            .unwrap();
+        let session = registry
+            .open_completion(
+                registry.resolve("/complete").unwrap(),
+                registry.create_target(),
+            )
+            .unwrap();
+        *reentrant_session.lock().unwrap() = Some(session.clone());
+        let first = session.complete(Arc::from("first"), Arc::from("first"), 0, Arc::from("test"));
+        requests_rx.recv().unwrap();
+        let second = session.complete(
+            Arc::from("second"),
+            Arc::from("second"),
+            0,
+            Arc::from("test"),
+        );
+
+        assert_eq!(
+            events_rx.recv().unwrap(),
+            super::CompletionLifecycleEvent::Cancel
+        );
+        let (_, second_cancellation) = requests_rx.recv().unwrap();
+        assert!(second_cancellation.is_cancelled());
+        drop(second);
+        drop(first);
+    }
+
+    #[test]
+    fn callbacks_run_outside_registry_lock() {
+        let (requests_tx, requests_rx) = std::sync::mpsc::channel();
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let (response_tx, response_rx) = std::sync::mpsc::channel();
+        let registry = super::CommandRegistry::new();
+        let callback_registry = registry.clone();
+        let provider = Arc::new(ControlledCompletion {
+            requests: requests_tx,
+            responses: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "value".to_owned(),
+                response_rx,
+            )])),
+            events: events_tx,
+            on_lifecycle: Some(Arc::new(move || {
+                callback_registry.snapshot();
+            })),
+        });
+        let producer = registry.create_producer(super::ProducerPrecedence::Builtin);
+        producer
+            .replace(vec![completion_registration(provider)])
+            .unwrap();
+        let session = registry
+            .open_completion(
+                registry.resolve("/complete").unwrap(),
+                registry.create_target(),
+            )
+            .unwrap();
+        let request =
+            session.complete(Arc::from("value"), Arc::from("value"), 0, Arc::from("test"));
+        let request_thread = std::thread::spawn(move || futures_lite::future::block_on(request));
+        requests_rx.recv().unwrap();
+        producer.replace(Vec::new()).unwrap();
+        response_tx.send(Vec::new()).unwrap();
+        assert_eq!(
+            events_rx.recv().unwrap(),
+            super::CompletionLifecycleEvent::Cancel
+        );
+        assert_eq!(
+            request_thread.join().unwrap(),
+            super::CompletionResult::Stale
+        );
+    }
+
+    #[test]
+    fn opaque_ids_do_not_collide_across_registries() {
+        let first = super::CommandRegistry::new();
+        let second = super::CommandRegistry::new();
+        let first_producer = first.create_producer(super::ProducerPrecedence::Builtin);
+        let second_producer = second.create_producer(super::ProducerPrecedence::Builtin);
+        first_producer
+            .replace(vec![registration("/run", &[], ArgumentArity::ANY)])
+            .unwrap();
+        second_producer
+            .replace(vec![registration("/run", &[], ArgumentArity::ANY)])
+            .unwrap();
+
+        assert_ne!(first_producer.id(), second_producer.id());
+        assert_ne!(first.create_target(), second.create_target());
+        assert_ne!(
+            first.resolve("/run").unwrap().command_id(),
+            second.resolve("/run").unwrap().command_id()
+        );
+    }
+
+    #[test]
+    fn foreign_command_cannot_open_completion() {
+        let (requests_tx, _requests_rx) = std::sync::mpsc::channel();
+        let (events_tx, _events_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(ControlledCompletion {
+            requests: requests_tx,
+            responses: std::sync::Mutex::new(std::collections::HashMap::new()),
+            events: events_tx,
+            on_lifecycle: None,
+        });
+        let first = super::CommandRegistry::new();
+        let producer = first.create_producer(super::ProducerPrecedence::Builtin);
+        producer
+            .replace(vec![completion_registration(provider)])
+            .unwrap();
+        let second = super::CommandRegistry::new();
+
+        assert!(matches!(
+            second.open_completion(first.resolve("/complete").unwrap(), second.create_target()),
+            Err(super::CompletionError::StaleCommand)
         ));
     }
 
