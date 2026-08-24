@@ -7,7 +7,7 @@ group = "Concepts"
 
 # Modes
 
-Maki ships with two agent modes: **build** and **plan**. A mode bundles a badge
+Makima ships with two agent modes: **build** and **plan**. A mode bundles a badge
 in the input bar, a system-prompt snippet the model follows, and, optionally, a
 write restriction and its own visible toolset. This page shows what the built-in
 modes do, and how a Lua plugin defines a new mode or overrides a built-in one.

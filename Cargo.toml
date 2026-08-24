@@ -5,15 +5,15 @@ edition = "2024"
 authors = ["Tony Solomonik <tony.solomonik@gmail.com>"]
 description = "AI coding agent. Native Rust TUI. Immediate startup, 60 FPS, low memory."
 license = "MIT"
-repository = "https://github.com/lun-4/maki"
-homepage = "https://maki.sh"
+repository = "https://github.com/lun-4/makima"
+homepage = "https://makima.ln4.net"
 readme = "README.md"
 keywords = ["ai", "agent", "cli", "tui", "coding"]
 categories = ["command-line-utilities", "development-tools"]
 rust-version = "1.88"
 
 [[bin]]
-name = "maki"
+name = "makima"
 path = "src/main.rs"
 
 [dependencies]
@@ -69,7 +69,7 @@ version = "0.4.11-luna"
 edition = "2024"
 authors = ["Luna <luna@l4.pm", "Tony Solomonik <tony.solomonik@gmail.com>"]
 license = "MIT"
-repository = "https://github.com/lun-4/maki"
+repository = "https://github.com/lun-4/makima"
 rust-version = "1.88"
 
 [workspace.dependencies]

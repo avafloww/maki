@@ -304,7 +304,7 @@ pub fn generate() -> String {
     let default_n = total - opt_in_n;
     writeln!(
         out,
-        "Maki ships with {total} built-in tools in this reference \
+        "Makima ships with {total} built-in tools in this reference \
          ({default_n} on by default, {opt_in_n} opt-in via plugin options). \
          Tools marked **opt-in** are off until you enable them under `plugins` \
          in [Configuration](/docs/configuration/)."

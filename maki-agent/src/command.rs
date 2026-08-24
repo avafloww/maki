@@ -12,7 +12,7 @@ use maki_commands::{
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-const PROJECT_COMMAND_DIRS: &[&str] = &[".maki/commands", ".claude/commands"];
+const PROJECT_COMMAND_DIRS: &[&str] = &[".makima/commands", ".claude/commands"];
 const GLOBAL_THIRD_PARTY_COMMAND_DIRS: &[&str] = &[".claude/commands"];
 const ARGUMENTS_PLACEHOLDER: &str = "$ARGUMENTS";
 
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn discover_project_overrides_global() {
         let project = TempDir::new().unwrap();
-        let cmd_dir = project.path().join(".maki/commands");
+        let cmd_dir = project.path().join(".makima/commands");
         fs::create_dir_all(&cmd_dir).unwrap();
         fs::write(
             cmd_dir.join("overlap.md"),
@@ -343,7 +343,7 @@ mod tests {
         .unwrap();
 
         let global = TempDir::new().unwrap();
-        let global_cmd_dir = global.path().join(".maki/commands");
+        let global_cmd_dir = global.path().join(".makima/commands");
         fs::create_dir_all(&global_cmd_dir).unwrap();
         fs::write(
             global_cmd_dir.join("overlap.md"),
@@ -363,7 +363,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
 
         for (cmd_dir, filename) in [
-            (".maki/commands", "a-cmd.md"),
+            (".makima/commands", "a-cmd.md"),
             (".claude/commands", "b-cmd.md"),
         ] {
             let path = dir.path().join(cmd_dir);
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn discover_ignores_non_md_files() {
         let dir = TempDir::new().unwrap();
-        let cmd_dir = dir.path().join(".maki/commands");
+        let cmd_dir = dir.path().join(".makima/commands");
         fs::create_dir_all(&cmd_dir).unwrap();
         fs::write(cmd_dir.join("valid.md"), "Content").unwrap();
         fs::write(cmd_dir.join("invalid.txt"), "Content").unwrap();

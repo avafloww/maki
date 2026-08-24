@@ -50,10 +50,6 @@ jobs:
           if grep -R --include='*.html' -nE 'https://maki\.sh' site/_build; then
             echo "residual https://maki.sh in HTML" >&2; exit 1
           fi
-          # residual upstream GitHub repo references must be rewritten to the fork.
-          if grep -R --include='*.html' -nE 'tontinton/maki' site/_build; then
-            echo "residual tontinton/maki in HTML" >&2; exit 1
-          fi
           # LLM markdown mirrors must have prefixed /docs/ cross-links and no upstream refs.
           # Scoped to *.md/*.txt only — search.json (also under _build/docs) legitimately
           # retains upstream strings in code-fence bodies and is outside this guard's scope.

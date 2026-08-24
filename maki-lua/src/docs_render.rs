@@ -33,7 +33,7 @@ A gated call without its permission raises
 `permission denied: '<name>' not granted for this plugin`.
 
 Grants come from a `plugin.toml` next to the Lua file (for
-`~/.config/maki/init.lua` that is `~/.config/maki/plugin.toml`):
+`~/.config/makima/init.lua` that is `~/.config/makima/plugin.toml`):
 
 ```toml
 [permissions]
@@ -41,7 +41,7 @@ Grants come from a `plugin.toml` next to the Lua file (for
 
 The rules:
 
-- No `plugin.toml` at all: every permission is denied, and maki logs a
+- No `plugin.toml` at all: every permission is denied, and makima logs a
   warning at load time.
 - `plugin.toml` exists: permissions default to granted; set a key to
   `false` to revoke it. An empty file grants everything.
@@ -70,9 +70,9 @@ reference is at the end of this document.
 
 Plugins live in the maki config dir. There are two of them, same layout:
 
-- `~/.config/maki/` - global, every project (if `~/.maki/` exists, maki reads
+- `~/.config/makima/` - global, every project (if `~/.makima/` exists, makima reads
   that one instead)
-- `<project>/.maki/` - this project only
+- `<project>/.makima/` - this project only
 
 ```
 init.lua        the only file maki runs; require()s plugins, calls maki.setup()
@@ -87,9 +87,9 @@ that directory, you cannot reach files outside it.
 
 ## Creating a plugin
 
-1. Write the code in `~/.config/maki/lua/<name>.lua`. The `maki` global is
+1. Write the code in `~/.config/makima/lua/<name>.lua`. The `maki` global is
    already there, nothing to import. For a project-only plugin use
-   `<project>/.maki/` here and in every step below.
+   `<project>/.makima/` here and in every step below.
 
 ```lua
 maki.api.register_tool({
@@ -102,13 +102,13 @@ maki.api.register_tool({
 })
 ```
 
-2. Load it from `~/.config/maki/init.lua`, creating that file if missing:
+2. Load it from `~/.config/makima/init.lua`, creating that file if missing:
 
 ```lua
 require("hello")
 ```
 
-3. Grant the permissions it needs in `~/.config/maki/plugin.toml`, creating
+3. Grant the permissions it needs in `~/.config/makima/plugin.toml`, creating
    that file if missing. Without the file every gated call is denied.
 
 ```toml
@@ -132,8 +132,8 @@ settings in a local table, or export a `setup(opts)` function `init.lua` calls.
 runs, an edited plugin is still the old one.
 
 To debug, add `maki.log.info|warn|error(...)` calls. They write to `maki.log`
-in the dir `maki.env.logs_dir()` returns (Linux: `~/.local/logs/maki/`). When
-a backtrace comes out useless, start maki with `--no-jit`: plugins then run on
+in the dir `maki.env.logs_dir()` returns (Linux: `~/.local/logs/makima/`). When
+a backtrace comes out useless, start makima with `--no-jit`: plugins then run on
 the interpreter, with full debug info.
 
 {AGENT_NOTES}## Conventions
@@ -162,11 +162,11 @@ const AGENT_NOTES: &str = r#"## Notes for the agent
   of the maki repo holds the plugins that ship with maki, compiled into the
   binary, so a file dropped there does nothing until maki is rebuilt. That
   holds even when the project you have open is a maki checkout.
-- Both global config dirs can exist, and `~/.maki/` wins, so look before you
+- Both global config dirs can exist, and `~/.makima/` wins, so look before you
   write.
 - The config dir sits outside the project, but it is an ordinary directory:
   create files there with the normal write and edit tools.
-- You cannot run slash commands or restart maki, so ask the user to run
+- You cannot run slash commands or restart makima, so ask the user to run
   `/reload` and to reproduce the problem, then read the log yourself.
 
 "#;
@@ -184,7 +184,7 @@ The API tries to mirror Neovim as much as possible (`maki.fs`, `maki.uv`,
 so code can be copy-pasted between the two without too many modifications.
 
 Plugins run compiled to native code (Luau JIT). If you are debugging a
-plugin and want full backtraces, start maki with `--no-jit`: it runs your
+plugin and want full backtraces, start makima with `--no-jit`: it runs your
 Lua on the interpreter with complete debug info instead.
 
 A small plugin looks like this:

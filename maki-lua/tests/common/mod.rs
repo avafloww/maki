@@ -135,9 +135,12 @@ pub fn ctx_with_replies(
 
 /// Like [`ctx_with_replies`] but with a caller-held `provider` so the test can
 /// inspect its captured opts/tools after a run.
-pub fn ctx_with_provider(
-    provider: Arc<CannedProvider>,
-) -> (ToolContext, flume::Receiver<Envelope>, CancelTrigger) {
+pub fn ctx_with_provider<P>(
+    provider: Arc<P>,
+) -> (ToolContext, flume::Receiver<Envelope>, CancelTrigger)
+where
+    P: Provider + 'static,
+{
     let (run_trigger, run_cancel) = CancelToken::new();
     let (tx, rx) = flume::unbounded::<Envelope>();
     let event_tx = EventSender::new(tx, 0);

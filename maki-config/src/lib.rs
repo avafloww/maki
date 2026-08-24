@@ -12,7 +12,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use thiserror::Error;
 use tracing::warn;
 
-const PROJECT_DIR: &str = ".maki";
+const PROJECT_DIR: &str = ".makima";
 const PERMISSIONS_FILE: &str = "permissions.toml";
 
 pub mod providers;
@@ -183,8 +183,8 @@ pub enum ConfigError {
         "invalid config: the `tools` table in maki.setup was renamed to `plugins` \
          (plugins can provide more than tools).\n\n\
          Fix your config with:\n\n    \
-         sed -i.bak 's/^\\( *\\)tools *=/\\1plugins =/' ~/.config/maki/init.lua\n\n\
-         Run it on .maki/init.lua too if you keep a project config. \
+         sed -i.bak 's/^\\( *\\)tools *=/\\1plugins =/' ~/.config/makima/init.lua\n\n\
+         Run it on .makima/init.lua too if you keep a project config. \
          A .bak backup is left next to the file."
     )]
     RenamedToolsTable,
@@ -2012,15 +2012,15 @@ fn append_project_permission(
     let content = std::fs::read_to_string(&path).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut = content
         .parse()
-        .map_err(|e| format!("failed to parse .maki/{PERMISSIONS_FILE}: {e}"))?;
+        .map_err(|e| format!("failed to parse .makima/{PERMISSIONS_FILE}: {e}"))?;
 
     insert_permission_entry(&mut doc, tool, scope, effect)?;
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create .maki dir: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create .makima dir: {e}"))?;
     }
     maki_storage::atomic_write(&path, doc.to_string().as_bytes())
-        .map_err(|e| format!("cannot write .maki/{PERMISSIONS_FILE}: {e}"))?;
+        .map_err(|e| format!("cannot write .makima/{PERMISSIONS_FILE}: {e}"))?;
     Ok(())
 }
 
@@ -2079,13 +2079,13 @@ mod tests {
     }
 
     fn write_global_permissions(dir: &Path, content: &str) {
-        let perms_dir = dir.join(".config/maki");
+        let perms_dir = dir.join(".config/makima");
         fs::create_dir_all(&perms_dir).unwrap();
         fs::write(perms_dir.join("permissions.toml"), content).unwrap();
     }
 
     fn global_config_dir(dir: &Path) -> PathBuf {
-        dir.join(".config/maki")
+        dir.join(".config/makima")
     }
 
     #[test_case("12000", CompactionBuffer::Tokens(12_000) ; "tokens_number")]
@@ -2512,7 +2512,7 @@ mod tests {
             dir.path(),
             "[bash]\nallow = [\"git *\"]\ndeny = [\"rm -rf *\"]\n",
         );
-        let maki_dir = dir.path().join(".maki");
+        let maki_dir = dir.path().join(".makima");
         fs::create_dir_all(&maki_dir).unwrap();
         fs::write(
             maki_dir.join("permissions.toml"),
@@ -2549,7 +2549,7 @@ mod tests {
     fn project_default_allow_ignored() {
         let dir = TempDir::new().unwrap();
         let global = global_config_dir(dir.path());
-        let maki_dir = dir.path().join(".maki");
+        let maki_dir = dir.path().join(".makima");
         fs::create_dir_all(&maki_dir).unwrap();
         fs::write(maki_dir.join("permissions.toml"), "default = \"allow\"\n").unwrap();
 
@@ -2664,7 +2664,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let global = global_config_dir(dir.path());
         write_global_permissions(dir.path(), "[bash]\ndefault = \"allow\"\n");
-        let maki_dir = dir.path().join(".maki");
+        let maki_dir = dir.path().join(".makima");
         fs::create_dir_all(&maki_dir).unwrap();
         fs::write(
             maki_dir.join("permissions.toml"),
@@ -2714,7 +2714,7 @@ mod tests {
     fn project_default_deny_allowed() {
         let dir = TempDir::new().unwrap();
         let global = global_config_dir(dir.path());
-        let maki_dir = dir.path().join(".maki");
+        let maki_dir = dir.path().join(".makima");
         fs::create_dir_all(&maki_dir).unwrap();
         fs::write(maki_dir.join("permissions.toml"), "default = \"deny\"\n").unwrap();
 
@@ -2772,7 +2772,7 @@ mod tests {
         )
         .unwrap();
 
-        let maki_dir = dir.path().join(".maki");
+        let maki_dir = dir.path().join(".makima");
         fs::create_dir_all(&maki_dir).unwrap();
         fs::write(
             maki_dir.join(".env"),

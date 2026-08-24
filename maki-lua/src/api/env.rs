@@ -11,8 +11,8 @@ fn utf8(p: PathBuf) -> Option<String> {
     p.into_os_string().into_string().ok()
 }
 
-/// Return the directory where maki stores runtime state (sessions, auth tokens, etc.).
-/// Typically something like `~/.local/state/maki`.
+/// Return the directory where makima stores runtime state (sessions, auth tokens, etc.).
+/// Typically something like `~/.local/state/makima`.
 ///
 /// @return (string?) State directory path, or nil if it cannot be determined.
 /// @example
@@ -25,8 +25,8 @@ fn state_dir(lua: &Lua) -> mlua::Result<Option<String>> {
     Ok(maki_storage::paths::state_dir().ok().and_then(utf8))
 }
 
-/// Return the directory where maki looks for user configuration files.
-/// Typically something like `~/.config/maki`.
+/// Return the directory where makima looks for user configuration files.
+/// Typically something like `~/.config/makima`.
 ///
 /// @return (string?) Config directory path, or nil if it cannot be determined.
 /// @example
@@ -37,7 +37,7 @@ fn config_dir(_lua: &Lua) -> mlua::Result<Option<String>> {
 }
 
 /// Return the directory where maki writes its log files (`maki.log`).
-/// Typically something like `~/.local/logs/maki`.
+/// Typically something like `~/.local/logs/makima`.
 ///
 /// @return (string?) Logs directory path, or nil if it cannot be determined.
 /// @example
@@ -47,7 +47,7 @@ fn logs_dir(_lua: &Lua) -> mlua::Result<Option<String>> {
     Ok(maki_storage::paths::logs_dir().ok().and_then(utf8))
 }
 
-/// Return the legacy config path (`~/.maki`), if it exists on disk.
+/// Return the legacy config path (`~/.makima`), if it exists on disk.
 /// Useful for migration logic. Returns nil when there is no legacy directory.
 ///
 /// @return (string?) Legacy directory path, or nil if not present.
@@ -57,7 +57,7 @@ fn legacy_dir(_lua: &Lua) -> mlua::Result<Option<String>> {
 }
 
 lua_table! {
-    /// Paths to maki's own directories (config, state, logs, legacy).
+    /// Paths to makima's own directories (config, state, logs, legacy).
     ///
     /// Use these to locate config files or persistent state without hard-coding paths.
     ///

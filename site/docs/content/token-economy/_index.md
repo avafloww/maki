@@ -7,7 +7,7 @@ group = "Concepts"
 
 # Token Economy
 
-Maki's whole design falls out of one fact about agent loops: the conversation is re-sent to the model on every turn.
+Makima's whole design falls out of one fact about agent loops: the conversation is re-sent to the model on every turn.
 
 ```
 turn 1   [system + prompt]                      ─► model ─► tool call
@@ -17,7 +17,7 @@ turn 3   [system + prompt + result 1 + 2]       ─► model ─► ...
 
 A tool result does not cost its tokens once. It costs them again on every turn until the session ends or history is compacted. `cat` a 2000-line file on turn 2 of a 40-turn session and you pay for it 38 more times. Prompt caching softens the price, not the principle: cache reads still cost, and a bloated context also makes models measurably dumber.
 
-So Maki attacks the two multipliers: how much each step adds to context, and how many steps there are.
+So Makima attacks the two multipliers: how much each step adds to context, and how many steps there are.
 
 ## Smaller results
 
@@ -40,7 +40,7 @@ task("find auth") ───────►  glob, grep ×6, read ×9, ...
 one line stays              ~20k tokens never seen
 ```
 
-**Deferred MCP tools.** An MCP server with 100 tools would ship 100 definitions in every request. Maki loads a single `tool_search` tool instead; the model searches when it actually needs something and only the matches load. See [MCP](/docs/mcp/#tool-search).
+**Deferred MCP tools.** An MCP server with 100 tools would ship 100 definitions in every request. Makima loads a single `tool_search` tool instead; the model searches when it actually needs something and only the matches load. See [MCP](/docs/mcp/#tool-search).
 
 **Truncation everywhere.** Tool output is capped (`agent.max_output_bytes`, `agent.max_output_lines`), overlong grep lines are skipped, and every builtin tool description nags the model to read only what it needs. The nagging works.
 

@@ -1,8 +1,10 @@
 //! `maki.agent` exposes subagent primitives to Lua plugins. Policy (retries,
 //! validation, concurrency) lives in the task plugin, not here.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::pin::pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -31,6 +33,7 @@ use mlua::{Function, IntoLuaMulti, Lua, Result as LuaResult, Table, Value as Lua
 use serde_json::Value as JsonValue;
 use tracing::info;
 
+use crate::api::r#async::LuaSemaphore;
 use crate::api::ui::buf::BufHandle;
 use crate::api::util::convert::{json_to_lua, lua_to_json, lua_tool_result};
 use crate::api::util::ctx::{AgentContext, LuaCtx};
@@ -39,9 +42,6 @@ use crate::runtime::CANCELLED_MSG;
 
 const SESSION_CLOSED_ERR: &str = "session closed";
 const DEFAULT_SESSION_AUDIENCE: ToolAudience = ToolAudience::GENERAL_SUB;
-
-/// A per-session structured-output commit slot.
-type CommitSlot = Arc<Mutex<Option<JsonValue>>>;
 
 /// Build the `(model, provider)` pair that backs a `maki.agent.session` spawn.
 /// `inherit_provider` (or an absent `model_spec`) reuses the parent model and
@@ -67,25 +67,6 @@ async fn build_session_provider(
             .map_err(|e| e.to_string())?;
         Ok((m, Arc::from(p)))
     }
-}
-
-/// Per-session structured-output commit slots, keyed by the session's ui_id.
-/// `maki.agent.report_task_result` routes a commit to whichever session is
-/// running the tool, so the background driver can surface it as `captured`.
-fn commit_registry() -> &'static Mutex<HashMap<String, CommitSlot>> {
-    static REG: OnceLock<Mutex<HashMap<String, CommitSlot>>> = OnceLock::new();
-    REG.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn register_commit_slot(id: &str, slot: CommitSlot) {
-    commit_registry()
-        .lock()
-        .unwrap()
-        .insert(id.to_string(), slot);
-}
-
-fn unregister_commit_slot(id: &str) {
-    commit_registry().lock().unwrap().remove(id);
 }
 
 /// Observable phase of a subagent run, read by `status()`.
@@ -231,7 +212,7 @@ async fn resolve_model(
 ///   `prompt_id` (string) - one of `"research"`, `"general"`, `"system"`.
 /// Optional fields:
 ///   `instructions` (string|boolean?) - extra text appended to the prompt.
-///     `true` loads instructions from the project `.maki/instructions` file.
+///     `true` loads instructions from the project `.makima/instructions` file.
 ///     `false` or nil omits them.
 /// @return (string?, string?) The assembled prompt string, or `(nil, err)` on failure.
 /// @example
@@ -433,7 +414,8 @@ async fn call_tool(
 ///   `local_tools` (table?) - map of `name -> spec` for Lua-backed tools. Each spec
 ///     requires `description` (string), `input_schema` (table), and
 ///     `handler` (function). The handler receives the input table and must return
-///     `(string)` or `(nil, err)`.
+///     `(string)` or `(nil, err)`. Set `capture_input` to surface a successful
+///     call's input as `captured` in the turn result.
 ///   `name` (string?) - display name for logs and UI.
 ///   `audience` (string?) - tool audience for capability gating. Default: `"general_sub"`.
 ///   `mcp` (boolean?) - give the session access to MCP tools. Their
@@ -453,6 +435,8 @@ async fn call_tool(
 ///     usage into the parent session's UI or event stream. The session still
 ///     completes and `:prompt()` still returns its result (including a commit
 ///     set via a `local_tools` handler). Use for hidden one-shot classification.
+///   `semaphore` (maki.async.Semaphore?) - concurrency limit acquired by the
+///     driver immediately before each turn and released when that turn ends.
 /// @return (Session?, string?) Session handle, or `(nil, err)` on failure.
 /// @example
 /// local tools = maki.agent.tools(ctx, { audience = "general_sub" })
@@ -492,6 +476,14 @@ async fn session(
         .unwrap_or(agent_ctx.opts.fast);
     let mcp_enabled: bool = opts.get::<Option<bool>>("mcp")?.unwrap_or(true);
     let silent: bool = opts.get::<Option<bool>>("silent")?.unwrap_or(false);
+    let semaphore = opts
+        .get::<Option<mlua::AnyUserData>>("semaphore")?
+        .map(|value| {
+            value
+                .borrow::<LuaSemaphore>()
+                .map(|semaphore| Arc::clone(&semaphore.sem))
+        })
+        .transpose()?;
 
     let (model, provider): (Model, Arc<dyn provider::Provider>) =
         try_pair!(build_session_provider(&model_spec, inherit_provider, &agent_ctx).await);
@@ -512,6 +504,7 @@ async fn session(
         None => JsonValue::Array(vec![]),
     };
 
+    let commit = Arc::new(Mutex::new(None));
     let mut local_map: HashMap<String, LocalToolFn> = HashMap::new();
     if let Some(tbl) = local_tools_tbl {
         let defs = tools_json.as_array_mut().expect("checked above");
@@ -527,16 +520,18 @@ async fn session(
                 spec.get::<Function>("handler")
                     .map_err(|_| format!("local_tools.{name}: 'handler' is required"))
             );
+            let capture_input = spec.get::<Option<bool>>("capture_input")?.unwrap_or(false);
             defs.push(serde_json::json!({
                 "name": name,
                 "description": description,
                 "input_schema": sanitized_schema,
             }));
             let weak = lua.weak();
+            let commit = Arc::clone(&commit);
             local_map.insert(
                 name,
                 maki_agent::tools::local_tool(move |input, _ctx| {
-                    let result = call_local_tool(&weak, &handler, &input);
+                    let result = call_local_tool(&weak, &handler, &input, &commit, capture_input);
                     Box::pin(async move { result })
                 }),
             );
@@ -604,12 +599,12 @@ async fn session(
     let name = name.unwrap_or_default();
     info!(name = %name, model = %model.id, "subagent session opened");
 
-    let commit = Arc::new(Mutex::new(None));
-    register_commit_slot(&ui_id, Arc::clone(&commit));
-
-    let (input_tx, input_rx) = flume::unbounded::<String>();
+    let (input_tx, input_rx) = flume::unbounded::<TurnInput>();
+    let (ui_input_tx, ui_input_rx) = flume::unbounded::<String>();
     let status = Arc::new(Mutex::new(SubagentStatus::Running));
-    let (done_tx, done_rx) = flume::unbounded::<SubagentRunResult>();
+    let pending = Arc::new(AtomicUsize::new(0));
+    let closed = Arc::new(AtomicBool::new(false));
+    let admission = Arc::new(Mutex::new(()));
 
     let driver = SubagentDriver {
         params: AgentParams {
@@ -649,22 +644,31 @@ async fn session(
         cancel_slot,
         parent_event_tx: parent_tx.clone(),
         subagent_info: Arc::clone(&subagent_info),
+        ui_input_tx: ui_input_tx.clone(),
         local_tools: Arc::new(local_map),
         name: name.clone(),
         usage: TokenUsage::default(),
         usage_rx,
         start: Instant::now(),
         commit,
-        input_tx: Some(input_tx.clone()),
+        semaphore,
         replied: false,
         closed: false,
     };
 
+    let driver_input_tx = input_tx.clone();
+    smol::spawn(subagent_ui_input_relay(
+        ui_input_rx,
+        driver_input_tx,
+        Arc::clone(&pending),
+    ))
+    .detach();
     smol::spawn(subagent_driver(
         driver,
         input_rx,
         Arc::clone(&status),
-        done_tx,
+        Arc::clone(&pending),
+        Arc::clone(&closed),
     ))
     .detach();
 
@@ -672,7 +676,9 @@ async fn session(
         id: ui_id,
         input_tx,
         status,
-        done_rx,
+        pending,
+        closed,
+        admission,
         parent_cancels: Arc::clone(&agent_ctx.subagent_cancels),
         cancel_slot,
     })?;
@@ -774,6 +780,11 @@ async fn dispatch_racing_live(
 /// Owns a subagent's history and run loop, driven in the background.
 /// The driver lives off the main agent's call stack so the main agent can
 /// keep working while a subagent runs, and can queue more messages to it.
+struct TurnInput {
+    message: String,
+    reply_tx: Option<flume::Sender<SubagentRunResult>>,
+}
+
 struct SubagentDriver {
     params: AgentParams,
     system: String,
@@ -797,6 +808,7 @@ struct SubagentDriver {
     cancel_slot: CancelSlot,
     parent_event_tx: EventSender,
     subagent_info: Arc<OnceLock<SubagentInfo>>,
+    ui_input_tx: flume::Sender<String>,
     local_tools: LocalTools,
     name: String,
     usage: TokenUsage,
@@ -804,9 +816,7 @@ struct SubagentDriver {
     start: Instant,
     /// Structured-output commit slot, surfaced as `captured` on completion.
     commit: Arc<Mutex<Option<JsonValue>>>,
-    /// Queue used to submit further messages to this subagent (also carried
-    /// on `SubagentInfo` so the UI can route tab submits to it).
-    input_tx: Option<flume::Sender<String>>,
+    semaphore: Option<Arc<async_lock::Semaphore>>,
     /// Whether a completed run has already surfaced its history to the parent,
     /// so `close` does not re-emit a duplicate reply to the main agent.
     replied: bool,
@@ -863,7 +873,7 @@ impl SubagentDriver {
                 prompt: Some(message.clone()),
                 model: Some(self.params.model.spec()),
                 answer_tx: self.answer_tx.take(),
-                input_tx: self.input_tx.clone(),
+                input_tx: Some(self.ui_input_tx.clone()),
             });
         }
         self.run_agent(message).await
@@ -871,10 +881,7 @@ impl SubagentDriver {
 
     async fn run_agent(&mut self, message: String) -> SubagentRunResult {
         let history_len = self.history.len();
-        set_active_commit(Some(Arc::clone(&self.commit)));
-        let result = self.run_agent_inner(message, history_len).await;
-        set_active_commit(None);
-        result
+        self.run_agent_inner(message, history_len).await
     }
 
     async fn run_agent_inner(&mut self, message: String, history_len: usize) -> SubagentRunResult {
@@ -941,54 +948,93 @@ impl SubagentDriver {
     }
 }
 
+async fn subagent_ui_input_relay(
+    input_rx: flume::Receiver<String>,
+    input_tx: flume::Sender<TurnInput>,
+    pending: Arc<AtomicUsize>,
+) {
+    while let Ok(message) = input_rx.recv_async().await {
+        pending.fetch_add(1, Ordering::AcqRel);
+        if input_tx
+            .send(TurnInput {
+                message,
+                reply_tx: None,
+            })
+            .is_err()
+        {
+            pending.fetch_sub(1, Ordering::AcqRel);
+            break;
+        }
+    }
+}
+
 /// Background driver: owns the run loop so one message no longer blocks the
 /// main agent. The status slot is the single source of truth for `status()`.
 async fn subagent_driver(
     mut driver: SubagentDriver,
-    input_rx: flume::Receiver<String>,
+    input_rx: flume::Receiver<TurnInput>,
     status: Arc<Mutex<SubagentStatus>>,
-    done_tx: flume::Sender<SubagentRunResult>,
+    pending: Arc<AtomicUsize>,
+    closed: Arc<AtomicBool>,
 ) {
     loop {
         let cancel = driver.child_cancel.clone();
         let recv_fut = input_rx.recv_async();
         let cancel_fut = async move { cancel.cancelled().await };
         let next = select(Box::pin(recv_fut), Box::pin(cancel_fut)).await;
-        let message = match next {
-            Either::Left((Ok(message), _)) => message,
+        let input = match next {
+            Either::Left((Ok(input), _)) => input,
             Either::Left((Err(_), _)) | Either::Right(((), _)) => break,
         };
         if driver.child_cancel.is_cancelled() {
             break;
         }
         *status.lock().unwrap() = SubagentStatus::Running;
-        let result = driver.run_one(message).await;
+        let permit = match &driver.semaphore {
+            Some(semaphore) => {
+                let cancel = driver.child_cancel.clone();
+                match cancel.race(Arc::clone(semaphore).acquire_arc()).await {
+                    Ok(permit) => Some(permit),
+                    Err(_) => break,
+                }
+            }
+            None => None,
+        };
+        let result = driver.run_one(input.message).await;
+        drop(permit);
         if driver.child_cancel.is_cancelled() {
             break;
         }
-        *status.lock().unwrap() = SubagentStatus::Done(result.clone());
-        let _ = done_tx.send(result);
+        if let Some(reply_tx) = input.reply_tx {
+            let _ = reply_tx.send(result.clone());
+        }
+        *status.lock().unwrap() = if pending.fetch_sub(1, Ordering::AcqRel) == 1 {
+            SubagentStatus::Done(result)
+        } else {
+            SubagentStatus::Running
+        };
         driver.emit_history();
     }
-    unregister_commit_slot(&driver.ui_id);
+    closed.store(true, Ordering::Release);
     driver.close();
     *status.lock().unwrap() = SubagentStatus::Closed;
 }
 
 struct LuaSession {
     id: String,
-    input_tx: flume::Sender<String>,
+    input_tx: flume::Sender<TurnInput>,
     status: Arc<Mutex<SubagentStatus>>,
-    done_rx: flume::Receiver<SubagentRunResult>,
+    pending: Arc<AtomicUsize>,
+    closed: Arc<AtomicBool>,
+    admission: Arc<Mutex<()>>,
     parent_cancels: Arc<CancelMap<String>>,
     cancel_slot: CancelSlot,
 }
 
 impl Drop for LuaSession {
     fn drop(&mut self) {
-        // Firing the child cancel token (by retiring the still-active slot)
-        // wakes the driver even if it is parked on the input queue, so it
-        // flushes history and retires its own side of the entry.
+        let _admission = self.admission.lock().unwrap();
+        self.closed.store(true, Ordering::Release);
         self.parent_cancels.retire(&self.id, self.cancel_slot);
     }
 }
@@ -1020,12 +1066,32 @@ async fn prompt(
     message: String,
 ) -> LuaResult<Pair<Table>> {
     let input_tx = this.input_tx.clone();
-    let done_rx = this.done_rx.clone();
+    let status = Arc::clone(&this.status);
+    let pending = Arc::clone(&this.pending);
+    let closed = Arc::clone(&this.closed);
+    let admission = Arc::clone(&this.admission);
     drop(this);
-    if input_tx.send(message).is_err() {
-        return Ok((None, Some(SESSION_CLOSED_ERR.to_owned())));
+    let (reply_tx, reply_rx) = flume::bounded(1);
+    {
+        let _admission = admission.lock().unwrap();
+        if closed.load(Ordering::Acquire) {
+            return Ok((None, Some(SESSION_CLOSED_ERR.to_owned())));
+        }
+        pending.fetch_add(1, Ordering::AcqRel);
+        *status.lock().unwrap() = SubagentStatus::Running;
+        if input_tx
+            .send(TurnInput {
+                message,
+                reply_tx: Some(reply_tx),
+            })
+            .is_err()
+        {
+            pending.fetch_sub(1, Ordering::AcqRel);
+            *status.lock().unwrap() = SubagentStatus::Closed;
+            return Ok((None, Some(SESSION_CLOSED_ERR.to_owned())));
+        }
     }
-    match done_rx.recv_async().await {
+    match reply_rx.recv_async().await {
         Err(_) => Ok((None, Some(SESSION_CLOSED_ERR.to_owned()))),
         Ok(result) => build_prompt_result(&lua, result),
     }
@@ -1065,13 +1131,27 @@ async fn send(
 ) -> LuaResult<Pair<bool>> {
     let input_tx = this.input_tx.clone();
     let status = Arc::clone(&this.status);
+    let pending = Arc::clone(&this.pending);
+    let closed = Arc::clone(&this.closed);
+    let admission = Arc::clone(&this.admission);
     drop(this);
-    if matches!(*status.lock().unwrap(), SubagentStatus::Closed) {
+    let _admission = admission.lock().unwrap();
+    if closed.load(Ordering::Acquire) {
         return Ok((None, Some(SESSION_CLOSED_ERR.to_owned())));
     }
-    input_tx
-        .send(message)
-        .map_err(|_| mlua::Error::runtime(SESSION_CLOSED_ERR))?;
+    pending.fetch_add(1, Ordering::AcqRel);
+    *status.lock().unwrap() = SubagentStatus::Running;
+    if input_tx
+        .send(TurnInput {
+            message,
+            reply_tx: None,
+        })
+        .is_err()
+    {
+        pending.fetch_sub(1, Ordering::AcqRel);
+        *status.lock().unwrap() = SubagentStatus::Closed;
+        return Ok((None, Some(SESSION_CLOSED_ERR.to_owned())));
+    }
     Ok((Some(true), None))
 }
 
@@ -1118,6 +1198,9 @@ async fn status(lua: Lua, this: mlua::UserDataRef<LuaSession>) -> LuaResult<Pair
 /// @return
 #[lua_fn]
 async fn close(_lua: Lua, this: mlua::UserDataRef<LuaSession>) -> LuaResult<()> {
+    let _admission = this.admission.lock().unwrap();
+    this.closed.store(true, Ordering::Release);
+    *this.status.lock().unwrap() = SubagentStatus::Closed;
     this.parent_cancels.retire(&this.id, this.cancel_slot);
     Ok(())
 }
@@ -1141,39 +1224,24 @@ lua_class! {
     "maki.agent.Session" => LuaSession, SESSION_DOCS [prompt, send, status, close, session_id]
 }
 
-/// Commit a structured-output result from the currently-running subagent
-/// driver. The task plugin's `structured_output` local tool validates the
-/// value in Lua, then routes it here so the background driver can surface it
-/// as `captured` on completion.
+/// Commit a result to the session whose local tool is currently executing.
 ///
-/// @param value table The validated result to commit.
-/// @return (boolean?, string?) `true` when a session is active, else `(nil, err)`.
+/// @param value table The result to commit.
+/// @return (boolean?, string?) `true` while a session-local tool is active.
 #[lua_fn]
 fn report_task_result(lua: &Lua, value: LuaValue) -> LuaResult<Pair<bool>> {
-    with_active_commit(|slot| {
+    ACTIVE_COMMIT.with_borrow(|active| {
+        let Some(slot) = active else {
+            return Ok((None, Some(SESSION_CLOSED_ERR.to_owned())));
+        };
         let json = lua_to_json(lua, &value).map_err(|e| mlua::Error::runtime(e.to_string()))?;
         *slot.lock().unwrap() = Some(json);
         Ok((Some(true), None))
     })
-    .unwrap_or(Ok((None, Some(SESSION_CLOSED_ERR.to_owned()))))
 }
 
-static ACTIVE_COMMIT: OnceLock<Mutex<Option<CommitSlot>>> = OnceLock::new();
-
-fn with_active_commit<R>(f: impl FnOnce(&CommitSlot) -> R) -> Option<R> {
-    let guard = ACTIVE_COMMIT
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap();
-    guard.as_ref().map(f)
-}
-
-fn set_active_commit(slot: Option<CommitSlot>) {
-    let mut guard = ACTIVE_COMMIT
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap();
-    *guard = slot;
+thread_local! {
+    static ACTIVE_COMMIT: RefCell<Option<Arc<Mutex<Option<JsonValue>>>>> = const { RefCell::new(None) };
 }
 
 /// Weak Lua ref avoids a reference cycle when the session is stored in userdata.
@@ -1181,11 +1249,19 @@ fn call_local_tool(
     weak: &mlua::WeakLua,
     f: &Function,
     input: &JsonValue,
+    commit: &Arc<Mutex<Option<JsonValue>>>,
+    capture_input: bool,
 ) -> Result<String, String> {
     let lua = weak.try_upgrade().ok_or("Lua runtime shut down")?;
     let arg = json_to_lua(&lua, input).map_err(|e| e.to_string())?;
-    let values = f.call::<mlua::MultiValue>(arg).map_err(|e| e.to_string())?;
-    lua_tool_result(values)
+    let previous = ACTIVE_COMMIT.replace(Some(Arc::clone(commit)));
+    let values = f.call::<mlua::MultiValue>(arg);
+    ACTIVE_COMMIT.replace(previous);
+    let result = lua_tool_result(values.map_err(|e| e.to_string())?);
+    if result.is_ok() && capture_input {
+        *commit.lock().unwrap() = Some(input.clone());
+    }
+    result
 }
 
 #[cfg(test)]
@@ -1235,7 +1311,8 @@ mod tests {
     fn call(src: &str, input: JsonValue) -> Result<String, String> {
         let lua = Lua::new();
         let f: Function = lua.load(src).eval().unwrap();
-        call_local_tool(&lua.weak(), &f, &input)
+        let commit = Arc::new(Mutex::new(None));
+        call_local_tool(&lua.weak(), &f, &input, &commit, false)
     }
 
     #[test]
@@ -1358,33 +1435,5 @@ mod tests {
                     .as_ref()
                     .is_some_and(|info| info.parent_tool_use_id == PARENT_ID)
         }));
-    }
-
-    #[test]
-    fn commit_slot_is_reachable_while_active() {
-        let lua = Lua::new();
-        let slot: Arc<Mutex<Option<JsonValue>>> = Arc::new(Mutex::new(None));
-        // No active session yet: report_task_result fails.
-        let (res, err) = report_task_result(&lua, LuaValue::Integer(1))
-            .map_err(|e| e.to_string())
-            .unwrap();
-        assert!(err.is_some(), "no active commit slot must error");
-        let _ = res;
-
-        set_active_commit(Some(Arc::clone(&slot)));
-        let (ok, err) = report_task_result(&lua, LuaValue::Integer(42)).unwrap();
-        assert!(ok == Some(true), "commit must succeed while active");
-        assert!(err.is_none());
-        assert_eq!(*slot.lock().unwrap(), Some(json!(42)));
-        set_active_commit(None);
-    }
-
-    #[test]
-    fn commit_registry_registers_and_unregisters_by_id() {
-        let slot: Arc<Mutex<Option<JsonValue>>> = Arc::new(Mutex::new(None));
-        register_commit_slot("session-1", Arc::clone(&slot));
-        assert!(commit_registry().lock().unwrap().contains_key("session-1"));
-        unregister_commit_slot("session-1");
-        assert!(!commit_registry().lock().unwrap().contains_key("session-1"));
     }
 }

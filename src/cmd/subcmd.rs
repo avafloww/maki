@@ -123,11 +123,11 @@ fn login_provider(slug: &str, storage: &StateDir) -> Result<()> {
         println!("  Default model: {}", model);
     }
     if has_key {
-        println!("  Credentials: ~/.local/state/maki/auth/{}.json", slug);
+        println!("  Credentials: ~/.local/state/makima/auth/{}.json", slug);
     } else {
         let env_var = resolve_api_key_env(slug, config.get(slug));
         println!(
-            "  Set API key via: {} or run: maki auth login {}",
+            "  Set API key via: {} or run: makima auth login {}",
             env_var, slug
         );
     }
@@ -239,7 +239,7 @@ fn login_catalog_provider(provider: &ProviderData, storage: &StateDir) -> Result
     save_provider_credentials(storage, &provider.slug, &creds).context("save credentials")?;
     println!("  \x1b[32m✓\x1b[0m Saved credentials for {}", provider.slug);
     println!(
-        "  Credentials: ~/.local/state/maki/auth/{}.json",
+        "  Credentials: ~/.local/state/makima/auth/{}.json",
         provider.slug
     );
     println!(
@@ -326,14 +326,14 @@ fn login_custom(storage: &StateDir) -> Result<()> {
     println!("  \x1b[32m✓\x1b[0m Configured: {}", slug);
     println!("  Endpoint: {}", base_url);
     if has_key {
-        println!("  Credentials: ~/.local/state/maki/auth/{}.json", slug);
+        println!("  Credentials: ~/.local/state/makima/auth/{}.json", slug);
     } else {
         println!(
-            "  Set API key via: {} or run: maki auth login {}",
+            "  Set API key via: {} or run: makima auth login {}",
             api_key_env, slug
         );
     }
-    println!("  Use with: maki -m {}/<model>", slug);
+    println!("  Use with: makima -m {}/<model>", slug);
 
     Ok(())
 }
@@ -470,7 +470,7 @@ pub fn auth_status(storage: &StateDir) -> Result<()> {
             println!("  \x1b[34m●\x1b[0m {:<14} {} (configured)", b.slug, display);
         } else {
             println!(
-                "  \x1b[31m✗\x1b[0m {:<14} {} (run: maki auth login {})",
+                "  \x1b[31m✗\x1b[0m {:<14} {} (run: makima auth login {})",
                 b.slug, display, b.slug
             );
         }
@@ -501,7 +501,7 @@ pub fn auth_status(storage: &StateDir) -> Result<()> {
                 );
             } else {
                 println!(
-                    "  \x1b[31m✗\x1b[0m {:<14} {} (run: maki auth login {})",
+                    "  \x1b[31m✗\x1b[0m {:<14} {} (run: makima auth login {})",
                     slug, display, slug
                 );
             }
@@ -526,7 +526,7 @@ pub fn auth_status(storage: &StateDir) -> Result<()> {
                 );
             } else {
                 println!(
-                    "  \x1b[31m✗\x1b[0m {:<14} {} (run: maki auth login {})",
+                    "  \x1b[31m✗\x1b[0m {:<14} {} (run: makima auth login {})",
                     entry.slug, entry.display_name, entry.slug
                 );
             }

@@ -1,4 +1,4 @@
-//! Non-interactive (headless) mode: `maki "prompt" --print`.
+//! Non-interactive (headless) mode: `makima "prompt" --print`.
 //!
 //! Wire format intentionally matches Claude Code so existing scripts work
 //! unchanged. Keep `PrintResult` fields a strict subset of theirs. `StreamJson`

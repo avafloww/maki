@@ -7,31 +7,31 @@ group = "Guides"
 
 # ACP (Agent Client Protocol)
 
-Run Maki inside your editor. `maki acp` starts an [ACP](https://agentclientprotocol.com/) server over stdio, so any ACP-capable editor (like [Zed](https://zed.dev/)) can drive Maki as its coding agent.
+Run Makima inside your editor. `makima acp` starts an [ACP](https://agentclientprotocol.com/) server over stdio, so any ACP-capable editor (like [Zed](https://zed.dev/)) can drive Makima as its coding agent.
 
 ```bash
-maki acp
+makima acp
 ```
 
 ## Zed setup
 
-Add Maki as a custom agent in Zed's `settings.json`:
+Add Makima as a custom agent in Zed's `settings.json`:
 
 ```json
 "agent_servers": {
-  "Maki": {
+  "Makima": {
     "default_config_options": {
       "model": "deepseek/deepseek-v4-flash"
     },
     "type": "custom",
-    "command": "maki",
+    "command": "makima",
     "args": ["acp"],
     "env": {}
   }
 }
 ```
 
-The `model` value is a `provider/model-id` spec, same format as `maki --model`.
+The `model` value is a `provider/model-id` spec, same format as `makima --model`.
 
 ## What works
 
@@ -46,15 +46,15 @@ The `model` value is a `provider/model-id` spec, same format as `maki --model`.
 
 ACP supports `/model <spec>` through its model-control path. TUI-only built-ins remain visible but return an unsupported-frontend error when invoked. Custom Markdown commands, MCP prompts, and Lua commands use the same registry and collision rules as the TUI. See [Commands](/docs/commands/).
 
-Authentication, providers, and permissions come from your normal Maki config. Set up [providers](/docs/providers/) first and ACP sessions just work.
+Authentication, providers, and permissions come from your normal Makima config. Set up [providers](/docs/providers/) first and ACP sessions just work.
 
 ```bash
-maki acp
-maki acp -m anthropic/claude-sonnet-4-6
-maki acp --yolo
-maki --no-jit acp
+makima acp
+makima acp -m anthropic/claude-sonnet-4-6
+makima acp --yolo
+makima --no-jit acp
 ```
 
-`maki acp` only takes `-m` / `--model` and `--yolo` as subcommand flags. Global flags like `--no-jit` must come before the subcommand (`maki --no-jit acp`, not `maki acp --no-jit`).
+`makima acp` only takes `-m` / `--model` and `--yolo` as subcommand flags. Global flags like `--no-jit` must come before the subcommand (`makima --no-jit acp`, not `makima acp --no-jit`).
 
 Plan mode in ACP uses the same state-directory plan files as the TUI (`…/plans/<slug>.md`), not the SDK's `./plan.md`.

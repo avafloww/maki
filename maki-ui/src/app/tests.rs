@@ -6386,7 +6386,7 @@ fn test_idle_splash_pulls_lua_frame() {
             continue;
         };
         let all: String = frame.rows.iter().map(|r| r.glyphs.as_str()).collect();
-        if all.contains("luna-maki") {
+        if all.contains("makima") {
             break all;
         }
         assert!(
@@ -6395,7 +6395,7 @@ fn test_idle_splash_pulls_lua_frame() {
         );
     };
     assert!(
-        all.contains("luna-maki"),
+        all.contains("makima"),
         "idle splash renders the bundled logo"
     );
 }
@@ -6490,7 +6490,7 @@ fn test_splash_survives_reset_to_empty_session() {
             continue;
         };
         let all: String = frame.rows.iter().map(|r| r.glyphs.as_str()).collect();
-        if all.contains("luna-maki") {
+        if all.contains("makima") {
             break;
         }
         assert!(
@@ -6538,7 +6538,7 @@ fn test_splash_survives_reset_to_empty_session() {
             .map(|f| f.rows.iter().map(|r| r.glyphs.as_str()).collect())
             .unwrap_or_default();
         assert!(
-            all.contains("luna-maki"),
+            all.contains("makima"),
             "splash vanished {}s after the reset to an empty session\n{timeline:?}",
             reset_at.elapsed().as_secs_f32()
         );
@@ -6624,7 +6624,7 @@ fn test_splash_still_repulls_once_on_version_change() {
         let all: String = frame
             .map(|f| f.rows.iter().map(|r| r.glyphs.as_str()).collect())
             .unwrap_or_default();
-        if all.contains("run maki update to get v9.9.9") {
+        if all.contains("run makima update to get v9.9.9") {
             break;
         }
         assert!(

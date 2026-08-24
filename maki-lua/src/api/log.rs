@@ -62,7 +62,7 @@ lua_table! {
     /// Structured logging for plugins.
     ///
     /// Each call emits a tracing event tagged with the calling plugin's name.
-    /// Messages show up in maki's log output, which you can view with `maki --log`.
+    /// Messages show up in makima's log output, which you can view with `makima --log`.
     ///
     /// ```lua
     /// maki.log.info("ready")

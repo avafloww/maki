@@ -199,9 +199,9 @@ impl SplashPull {
 pub(crate) const version__doc: FnDoc = FnDoc {
     name: "version",
     args: "",
-    desc: "Read the current maki version and, if the built-in update check found one, the newer version. Rust owns the update check; plugins only mirror it, so the version text and update notice belong to whoever draws them.",
+    desc: "Read the current makima version and, if the built-in update check found one, the newer version. Rust owns the update check; plugins only mirror it, so the version text and update notice belong to whoever draws them.",
     params: &[],
     returns: "(table) { current = string, latest = string|nil, update_available = boolean }",
-    example: "local v = maki.version()\nif v.update_available then\n  print(\"run maki update to get v\" .. v.latest)\nend",
+    example: "local v = maki.version()\nif v.update_available then\n  print(\"run makima update to get v\" .. v.latest)\nend",
     guard: None,
 };

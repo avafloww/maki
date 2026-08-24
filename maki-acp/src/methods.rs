@@ -23,7 +23,7 @@ pub fn initialize_response() -> InitializeResponse {
                 .mcp_capabilities(McpCapabilities::new().http(true)),
         )
         .auth_methods(vec![])
-        .agent_info(Implementation::new("maki", VERSION))
+        .agent_info(Implementation::new("makima", VERSION))
 }
 
 pub fn mode_state(current: &str, modes: &ModeRegistry) -> SessionModeState {
@@ -84,5 +84,16 @@ pub fn mode_id_to_agent_mode(mode_id: &str, modes: &ModeRegistry) -> Option<maki
             Some(maki_agent::AgentMode::Custom(ModeId::Custom(name.into())))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_info_names_makima() {
+        let info = initialize_response().agent_info.unwrap();
+        assert_eq!(info.name, "makima");
     }
 }

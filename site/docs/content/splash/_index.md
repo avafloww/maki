@@ -7,7 +7,7 @@ group = "Guides"
 
 # Home-screen splash
 
-When maki starts with no conversation, it shows the home screen: an animated starfield, the logo, a tagline, a tip, the help line, and the version in the top-right corner. All of it is drawn by the bundled `splashes_default` plugin (`plugins/splashes_default/splash/default.lua`, enabled by default), so you can replace or tweak any of it from your `init.lua` with no Rust rebuild and no new config.
+When makima starts with no conversation, it shows the home screen: an animated starfield, the logo, a tagline, a tip, the help line, and the version in the top-right corner. All of it is drawn by the bundled `splashes_default` plugin (`plugins/splashes_default/splash/default.lua`, enabled by default), so you can replace or tweak any of it from your `init.lua` with no Rust rebuild and no new config.
 
 Rust keeps the operationally sensitive pieces a plugin should not own: the frame clock, the repaint cadence, the entry-fade value, and the version/update check. The plugin answers a per-frame question with the pixels for the whole screen.
 
@@ -54,7 +54,7 @@ local v = maki.version()
 -- v.update_available  boolean
 ```
 
-The default plugin draws the top-right version text and, when an update exists, appends ` run maki update to get v<latest>`. It queries `maki.version()` inside `splash.render`, so the version UI is fully plugin-owned.
+The default plugin draws the top-right version text and, when an update exists, appends ` run makima update to get v<latest>`. It queries `maki.version()` inside `splash.render`, so the version UI is fully plugin-owned.
 
 ## Bundled splashes
 
@@ -117,7 +117,7 @@ The picker validates a selection before it persists the selection. If an active 
 
 ## Choosing a splash at startup
 
-The picker takes a `splash` option: the splash to select when maki boots. It wins over the persisted selection and updates it to the option's value, so it is a declarative default that re-wins on every boot; `/splash` can still override it at runtime.
+The picker takes a `splash` option: the splash to select when makima boots. It wins over the persisted selection and updates it to the option's value, so it is a declarative default that re-wins on every boot; `/splash` can still override it at runtime.
 
 ```lua
 maki.setup({

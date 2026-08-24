@@ -9,7 +9,7 @@ const ALIASING: &str = r#"## Aliasing commands
 Prefer a different name for a command? `maki.api.run_command` runs any slash command exactly as typing it would, so an alias is a one-line handler in your `init.lua` instead of a reimplementation.
 
 ```lua
--- ~/.config/maki/init.lua
+-- ~/.config/makima/init.lua
 local aliases = {
     { name = "/clear", target = "/new", description = "Alias for /new" },
     { name = "/resume", target = "/sessions", description = "Alias for /sessions" },
@@ -98,7 +98,7 @@ pub fn generate() -> String {
     writeln!(out).unwrap();
     writeln!(
         out,
-        "Sessions run concurrently. `/new` starts a fresh session while the old one keeps working in the background, and `/sessions` shows the live status of each (working, needs input, idle) so you can jump between them. When a background session finishes or needs input, Maki flashes a note in the status bar. `/rename` renames the current session; in the session picker, `Ctrl+N` / `Ctrl+R` / `Ctrl+D` create, rename, and delete."
+        "Sessions run concurrently. `/new` starts a fresh session while the old one keeps working in the background, and `/sessions` shows the live status of each (working, needs input, idle) so you can jump between them. When a background session finishes or needs input, Makima flashes a note in the status bar. `/rename` renames the current session; in the session picker, `Ctrl+N` / `Ctrl+R` / `Ctrl+D` create, rename, and delete."
     )
     .unwrap();
 
@@ -166,13 +166,13 @@ pub fn generate() -> String {
     writeln!(out).unwrap();
     writeln!(
         out,
-        "1. User config: `~/.config/maki/commands/` (and legacy `~/.maki/commands/` if present)"
+        "1. User config: `~/.config/makima/commands/` (and legacy `~/.makima/commands/` if present)"
     )
     .unwrap();
     writeln!(out, "2. User third-party: `~/.claude/commands/`").unwrap();
     writeln!(
         out,
-        "3. Project dirs, walking from the current working directory up to the nearest `.git` root. At each level: `.maki/commands/`, then `.claude/commands/`"
+        "3. Project dirs, walking from the current working directory up to the nearest `.git` root. At each level: `.makima/commands/`, then `.claude/commands/`"
     )
     .unwrap();
     writeln!(out).unwrap();

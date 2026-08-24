@@ -1031,7 +1031,7 @@ fn get_tool(lua: &Lua, name: String) -> LuaResult<LuaValue> {
 }
 
 lua_table! {
-    /// Plugin registration. This is where you tell maki about your tools,
+    /// Plugin registration. This is where you tell makima about your tools,
     /// slash commands, and prompt contributions.
     ///
     /// Most plugins only need `register_tool` and maybe `register_prompt_hint`.

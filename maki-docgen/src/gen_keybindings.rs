@@ -187,11 +187,11 @@ fn write_overrides(out: &mut String) {
     );
     out.push_str("### Recovering from a bad keymap\n\n");
     out.push_str(
-        "If an override leaves Maki stuck (a rebound `Ctrl+C`, a modal \
+        "If an override leaves Makima stuck (a rebound `Ctrl+C`, a modal \
          that won't close, a plugin that throws on load), boot without \
          user `init.lua`:\n\n",
     );
-    out.push_str("```bash\nmaki --no-plugins\n```\n\n");
+    out.push_str("```bash\nmakima --no-plugins\n```\n\n");
     out.push_str(
         "Skips user `init.lua` files (global and project) but keeps the \
          Lua host and builtin plugins running, so tools still work. \

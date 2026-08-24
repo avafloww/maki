@@ -7,16 +7,16 @@ group = "Guides"
 
 # Headless Mode
 
-Run Maki non-interactively with `--print` / `-p`. Useful for scripts, CI, and automation.
+Run Makima non-interactively with `--print` / `-p`. Useful for scripts, CI, and automation.
 
 ```bash
-maki "explain this codebase" --print
+makima "explain this codebase" --print
 ```
 
 Pipe via stdin:
 
 ```bash
-echo "list all TODO comments" | maki -p
+echo "list all TODO comments" | makima -p
 ```
 
 ## Output Formats
@@ -28,7 +28,7 @@ echo "list all TODO comments" | maki -p
 | `stream-json` | JSONL stream, one event per line |
 
 ```bash
-maki "fix the tests" --print --output-format json
+makima "fix the tests" --print --output-format json
 ```
 
 JSON output includes `type`, `subtype`, `is_error`, `duration_ms`, `num_turns`, `result`, `stop_reason`, `session_id`, `total_cost_usd`, and `usage`.
@@ -45,14 +45,14 @@ See [Commands](/docs/commands/) for matching, collision priority, and the genera
 
 ## Claude Code Compatibility
 
-Maki's `--print` is a drop-in replacement for Claude Code:
+Makima's `--print` is a drop-in replacement for Claude Code:
 
 ```bash
 # Before
 claude "fix the bug" --print --output-format json
 
 # After
-maki "fix the bug" --print --output-format json
+makima "fix the bug" --print --output-format json
 ```
 
 Same JSON fields, same `--output-format` options, same `--verbose` behavior. Scripts that parse Claude Code output work unchanged.
@@ -62,13 +62,13 @@ Same JSON fields, same `--output-format` options, same `--verbose` behavior. Scr
 For tools like Conductor, Windsurf, or custom orchestrators that speak the Claude Code SDK wire protocol, use `--input-format stream-json`:
 
 ```bash
-maki --print --input-format stream-json
+makima --print --input-format stream-json
 ```
 
 This enters a bidirectional NDJSON loop over stdio instead of the one-shot print path:
 
 ```
-your orchestrator                     maki --print --input-format stream-json
+your orchestrator                     makima --print --input-format stream-json
         │                                             │
         │  {"type":"user",...}            (stdin)     │
         ├─────────────────────────────────────────────►
@@ -91,7 +91,7 @@ Two caveats:
 
 ```bash
 echo '{"type":"user","message":{"content":"explain this repo"}}' \
-  | maki --print --input-format stream-json --max-turns 3
+  | makima --print --input-format stream-json --max-turns 3
 ```
 
 ## Examples
@@ -99,20 +99,20 @@ echo '{"type":"user","message":{"content":"explain this repo"}}' \
 Pipe compiler errors back for a fix:
 
 ```bash
-cargo build 2>&1 | maki "Fix these compiler errors." --print --yolo
+cargo build 2>&1 | makima "Fix these compiler errors." --print --yolo
 ```
 
 Generate a changelog from recent commits:
 
 ```bash
-git log --oneline v1.2.0..HEAD | maki "Write a user-facing \
+git log --oneline v1.2.0..HEAD | makima "Write a user-facing \
   changelog grouped by: Added, Changed, Fixed. Skip chores." --print
 ```
 
 Automated PR summaries in CI:
 
 ```bash
-SUMMARY=$(git diff main..HEAD | maki "Write a 2-3 sentence \
+SUMMARY=$(git diff main..HEAD | makima "Write a 2-3 sentence \
   summary of this change for a PR description." --print)
 gh pr edit --body "$SUMMARY"
 ```
@@ -121,7 +121,7 @@ Migrate an API across many files:
 
 ```bash
 grep -rl 'old_api_call' src/ | while read file; do
-  maki "In $file, migrate old_api_call() to new_api_call(). \
+  makima "In $file, migrate old_api_call() to new_api_call(). \
     Keep behavior identical." -p --yolo --allowed-tools Read,Edit
 done
 ```
@@ -129,5 +129,5 @@ done
 Cost tracking:
 
 ```bash
-maki "refactor the database layer" -p --output-format json | jq '.total_cost_usd'
+makima "refactor the database layer" -p --output-format json | jq '.total_cost_usd'
 ```

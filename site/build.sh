@@ -4,9 +4,9 @@ set -e
 # Cloudflare Pages build script
 # Assembles the static landing page + Zola docs into a single output dir.
 
-PREFIX="${SITE_PREFIX:-}"                       # e.g. "/maki"; empty = root domain
-PAGES_URL="${SITE_BASE_URL:-https://maki.sh}"   # absolute origin for llms/meta
-REPO_SLUG="${SITE_REPO:-tontinton/maki}"        # fork's "owner/repo" for GitHub links
+PREFIX="${SITE_PREFIX:-}"                            # e.g. "/makima"; empty = root domain
+PAGES_URL="${SITE_BASE_URL:-https://makima.ln4.net}" # absolute origin for llms/meta
+REPO_SLUG="${SITE_REPO:-lun-4/makima}"               # fork's "owner/repo" for GitHub links
 
 ZOLA_VERSION="${ZOLA_VERSION:-0.22.1}"
 
@@ -159,12 +159,11 @@ if [ -n "$PREFIX" ]; then
   # webmanifest icon srcs (JSON).
   sed -i "s|\"src\":\"/|\"src\":\"${PREFIX}/|g" "$OUT/site.webmanifest"
 
-  # Rewrite upstream origin and repo to the fork in HTML and LLM mirrors.
+  # Rewrite origin in HTML and LLM mirrors (sources use makima.ln4.net directly;
+  # this normalizes any absolute /docs URLs for the git-build docs pages).
   MIRRORS=$(find "$OUT" -type f \( -name '*.md' -o -name '*.txt' \))
-  find "$OUT" -name '*.html' -exec sed -i -e "s|https://maki.sh|${PAGES_URL}|g" \
-    -e "s|tontinton/maki|${REPO_SLUG}|g" {} +
-  [ -n "$MIRRORS" ] && echo "$MIRRORS" | xargs sed -i -e "s|https://maki.sh|${PAGES_URL}|g" \
-    -e "s|tontinton/maki|${REPO_SLUG}|g" \
+  find "$OUT" -name '*.html' -exec sed -i -e "s|https://makima.ln4.net|${PAGES_URL}|g" {} +
+  [ -n "$MIRRORS" ] && echo "$MIRRORS" | xargs sed -i -e "s|https://makima.ln4.net|${PAGES_URL}|g" \
     -e "s|href=\"/docs/|href=\"${PREFIX}/docs/|g" \
     -e "s|\](/docs/|](${PREFIX}/docs/|g"
 
