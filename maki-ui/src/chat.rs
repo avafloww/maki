@@ -21,6 +21,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 
 use crate::repaint::{Cadence, Dirty};
+use crate::theme::ThemesProvider;
 use std::time::Instant;
 
 pub(crate) const DONE_TEXT: &str = "Done!";
@@ -61,7 +62,12 @@ pub struct Chat {
 }
 
 impl Chat {
-    pub fn new(name: String, ui_config: UiConfig, lua_event_handle: maki_lua::EventHandle) -> Self {
+    pub(crate) fn new(
+        name: String,
+        ui_config: UiConfig,
+        lua_event_handle: maki_lua::EventHandle,
+        theme_provider: Arc<dyn ThemesProvider>,
+    ) -> Self {
         Self {
             name,
             cost: None,
@@ -69,7 +75,7 @@ impl Chat {
             model_id: None,
             subagent_id: None,
             pending_turn_usage: None,
-            messages_panel: MessagesPanel::new(ui_config, lua_event_handle),
+            messages_panel: MessagesPanel::new(ui_config, lua_event_handle, theme_provider),
             finished: false,
             started_at: None,
         }
@@ -649,6 +655,7 @@ fn build_tool_results_map(messages: &[Message]) -> HashMap<&str, (bool, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::InMemoryThemesProvider;
     use maki_agent::{AgentEvent, ToolDoneEvent, ToolOutput, ToolStartEvent};
     use maki_config::UiConfig;
     use test_case::test_case;
@@ -712,6 +719,7 @@ mod tests {
             "Main".into(),
             UiConfig::default(),
             maki_lua::EventHandle::disconnected_for_test(),
+            Arc::new(InMemoryThemesProvider::bundled()),
         );
         chat.handle_event(tool_start("t1", "bash"), None);
         assert_eq!(chat.in_progress_count(), 1);
@@ -729,6 +737,7 @@ mod tests {
             "Main".into(),
             UiConfig::default(),
             maki_lua::EventHandle::disconnected_for_test(),
+            Arc::new(InMemoryThemesProvider::bundled()),
         );
         let dir = tempfile::tempdir().unwrap();
         let plan_path = dir.path().join("plan.md");
@@ -753,6 +762,7 @@ mod tests {
             "Main".into(),
             UiConfig::default(),
             maki_lua::EventHandle::disconnected_for_test(),
+            Arc::new(InMemoryThemesProvider::bundled()),
         );
         let plan_path = Path::new("/plans/123.md");
         chat.handle_event(tool_start("w1", "write"), Some(plan_path));
@@ -770,6 +780,7 @@ mod tests {
             "Main".into(),
             UiConfig::default(),
             maki_lua::EventHandle::disconnected_for_test(),
+            Arc::new(InMemoryThemesProvider::bundled()),
         );
         let dir = tempfile::tempdir().unwrap();
         let plan_path = dir.path().join("plan.md");
@@ -1092,6 +1103,7 @@ mod tests {
             "Main".into(),
             UiConfig::default(),
             maki_lua::EventHandle::disconnected_for_test(),
+            Arc::new(InMemoryThemesProvider::bundled()),
         );
 
         chat.handle_event(AgentEvent::AutoCompacting, None);

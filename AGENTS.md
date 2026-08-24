@@ -57,6 +57,7 @@ Rust workspace, key crates in root dir:
 - maki-storage: Persistent state across runs (e.g. sessions, auth)
 - maki-config: User config
 - maki-lua: Lua plugin system (API mirrored from neovim for plugin compatibility), built-in plugins in ./plugins dir
+- maki-match: shared fuzzy matching (nucleo): `fuzzy_match`/`fuzzy_resolve` used by command-argument resolution and the `maki.match` Lua API
 - maki-acp: ACP ndjson stdio server
 
 Built-in lua plugins in ./plugins: index (return a compact skeleton of a source file using tree-sitter), bash, glob, question, skill, memory, webfetch, websearch, todo_write, read, write, edit, task, code_execution (python sandbox), batch, splash (the home-screen renderer; it owns the version UI via `maki.version()`).

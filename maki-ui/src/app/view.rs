@@ -350,7 +350,9 @@ impl App {
 
     fn render_top_modals(&mut self, frame: &mut Frame, mut overlay_rect: Rect) -> Rect {
         let full = frame.area();
-        let r = self.btw_modal.view(frame, full);
+        let r = self
+            .btw_modal
+            .view(frame, full, self.theme_provider.generation());
         if r.width > 0 {
             overlay_rect = r;
         }

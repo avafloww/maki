@@ -34,6 +34,10 @@ const TASK_ID: &str = "task1";
 const SUB_TOOL_ID: &str = "sub_t1";
 const TOOL_OUTPUT_LINE: &str = "hello from the subagent";
 const LATE_MODEL_SPEC: &str = "zai/glm-5";
+const MODEL_SPEC_GLM4: &str = "zai/glm-4";
+const MODEL_SPEC_OPUS: &str = "anthropic/claude-opus-4-5";
+const MODEL_SPEC_GPT9: &str = "openai/gpt-9";
+const MODEL_SPEC_CLAUDE: &str = "anthropic/claude-sonnet-4-20250514";
 const HINT_PLUGIN: &str = "statusline";
 const HINT_TEXT: &str = "2/4 staged";
 const HINT_STYLE: &str = "fg";
@@ -110,6 +114,7 @@ fn build_app_with_full(
         Arc::from([]),
         handle,
         Arc::new(maki_config::ModelPolicy::default()),
+        Arc::new(crate::theme::InMemoryThemesProvider::bundled()),
     )
 }
 
@@ -690,12 +695,8 @@ fn lifecycle_app() -> (App, maki_lua::test_support::RequestProbe) {
     );
     app.input_box.set_input("/deploy a".into());
     app.command_palette.sync("/deploy a");
-    app.command_palette.sync_arguments(
-        "/deploy a",
-        9,
-        &app.lua_event_handle,
-        &app.state.mode.id_key(),
-    );
+    app.command_palette
+        .sync_arguments("/deploy a", 9, &app.state.mode.id_key());
     probe
         .try_finish_command_arguments(vec![CommandArgumentItem {
             label: "alpha".into(),
@@ -703,7 +704,7 @@ fn lifecycle_app() -> (App, maki_lua::test_support::RequestProbe) {
             description: None,
         }])
         .unwrap();
-    let _ = app.command_palette.poll_arguments(&app.lua_event_handle);
+    let _ = app.command_palette.poll_arguments();
     probe.try_finish_command_argument_lifecycle().unwrap();
     (app, probe)
 }
@@ -1475,8 +1476,8 @@ fn top_bar_shows_active_chat_running_count_and_cwd() {
     ));
     finish_subagent(&mut app, "task2", false);
 
-    let bar_h = app.top_bar_rect(Rect::new(0, 0, 80, 24)).height;
-    let rows = rendered_rows(&mut app, 80, 24);
+    let bar_h = app.top_bar_rect(Rect::new(0, 0, 120, 24)).height;
+    let rows = rendered_rows(&mut app, 120, 24);
     let bar: String = rows
         .iter()
         .take(bar_h as usize)
@@ -1514,16 +1515,16 @@ fn top_bar_shows_active_chat_running_count_and_cwd() {
 }
 
 #[test]
-fn top_bar_omits_more_hint_when_no_other_running_subagents() {
+fn top_bar_shows_task_hint_when_no_subagents_are_running() {
     let mut app = test_app();
     let rows = rendered_rows(&mut app, 80, 24);
     let bar: String = rows.first().map(|s| s.as_str()).unwrap_or("").to_string();
     assert!(bar.contains("[Main]"), "badge always present: {bar}");
     assert!(
-        bar.contains(kb::TASKS.label),
+        bar.contains("to see tasks"),
         "task hint always present: {bar}"
     );
-    assert!(bar.contains("see tasks"), "empty task hint: {bar}");
+    assert!(bar.contains(kb::TASKS.label), "ctrl-x hint: {bar}");
 }
 
 #[test]
@@ -1534,8 +1535,8 @@ fn top_bar_shows_subagent_badge_when_tabbed_into_subagent() {
     let bar: String = rows.first().map(|s| s.as_str()).unwrap_or("").to_string();
     assert!(bar.contains("↳"), "subagent badge: {bar}");
     assert!(bar.contains("research"), "subagent name: {bar}");
-    // No "more" hint: the only running subagent is the active one.
-    assert!(!bar.contains("more"), "no self-count: {bar}");
+    // The task hint includes all non-main subagents, including the active one.
+    assert!(bar.contains("1 tasks"), "running count: {bar}");
 }
 
 #[test]
@@ -2028,6 +2029,261 @@ fn model_list_arriving_in_the_background_owes_a_frame() {
     assert_owes_one_frame(&mut app, || {
         models.store(Some(Arc::new(vec![LATE_MODEL_SPEC.into()])));
     });
+}
+
+/// `/model <provider/id>` emits `ChangeModel` for the spec without the picker,
+/// even when the spec is absent from the discovered list (explicit specs
+/// bypass the list).
+#[test]
+fn model_arg_spec_emits_change_model() {
+    let (mut app, models) = app_with_model_slot();
+    models.store(Some(Arc::new(vec![LATE_MODEL_SPEC.into()])));
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: LATE_MODEL_SPEC.into(),
+        },
+        0,
+    );
+    assert!(matches!(&actions[..], [Action::ChangeModel(spec)] if spec == LATE_MODEL_SPEC));
+    assert!(!app.model_picker.is_open());
+
+    // A spec not in the discovered list still emits ChangeModel.
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: MODEL_SPEC_GPT9.into(),
+        },
+        0,
+    );
+    assert!(matches!(&actions[..], [Action::ChangeModel(spec)] if spec == MODEL_SPEC_GPT9));
+    assert!(!app.model_picker.is_open());
+}
+
+/// `/model <fragment>` that fuzzy-resolves to a unique spec emits
+/// `ChangeModel(resolved)` without the picker.
+#[test]
+fn model_arg_fuzzy_unique_emits_change_model() {
+    let (mut app, models) = app_with_model_slot();
+    models.store(Some(Arc::new(vec![
+        LATE_MODEL_SPEC.into(),
+        MODEL_SPEC_OPUS.into(),
+    ])));
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: "glm".into(),
+        },
+        0,
+    );
+    assert!(matches!(&actions[..], [Action::ChangeModel(spec)] if spec == LATE_MODEL_SPEC));
+    assert!(!app.model_picker.is_open());
+}
+
+/// `/model <fragment>` with 2+ fuzzy matches flashes, emits nothing, and leaves
+/// the session model unchanged with the picker closed.
+#[test]
+fn model_arg_ambiguous_flashes() {
+    let (mut app, models) = app_with_model_slot();
+    models.store(Some(Arc::new(vec![
+        MODEL_SPEC_GLM4.into(),
+        LATE_MODEL_SPEC.into(),
+    ])));
+    let before = app.state.model.spec();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: "glm".into(),
+        },
+        0,
+    );
+    assert!(actions.is_empty());
+    assert!(!app.model_picker.is_open());
+    assert_eq!(app.state.model.spec(), before);
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        format!("{MODEL_AMBIGUOUS_MSG}: glm")
+    );
+}
+
+/// `/model <fragment>` with zero fuzzy matches flashes, emits nothing, and
+/// leaves the session model unchanged with the picker closed.
+#[test]
+fn model_arg_no_match_flashes() {
+    let (mut app, models) = app_with_model_slot();
+    models.store(Some(Arc::new(vec![LATE_MODEL_SPEC.into()])));
+    let before = app.state.model.spec();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: "xyz".into(),
+        },
+        0,
+    );
+    assert!(actions.is_empty());
+    assert!(!app.model_picker.is_open());
+    assert_eq!(app.state.model.spec(), before);
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        format!("{MODEL_NO_MATCH_MSG}: xyz")
+    );
+}
+
+#[test]
+fn model_arg_matches_provider_section() {
+    let (mut app, models) = app_with_model_slot();
+    models.store(Some(Arc::new(vec![
+        MODEL_SPEC_CLAUDE.into(),
+        LATE_MODEL_SPEC.into(),
+    ])));
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: "anthropic".into(),
+        },
+        0,
+    );
+    assert!(matches!(&actions[..], [Action::ChangeModel(spec)] if spec == MODEL_SPEC_CLAUDE));
+}
+
+#[test]
+fn malformed_model_arg_flashes_invalid_model() {
+    let (mut app, _models) = app_with_model_slot();
+    let before = app.state.model.spec();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: "anthropic/".into(),
+        },
+        0,
+    );
+    assert!(actions.is_empty());
+    assert_eq!(app.state.model.spec(), before);
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        "Invalid model: model must be in 'provider/model' format (e.g. anthropic/claude-sonnet-4-20250514)"
+    );
+}
+
+/// `/model` with no argument still opens the picker and refreshes the list.
+#[test]
+fn model_no_arg_opens_picker_and_refreshes() {
+    let (mut app, _models) = app_with_model_slot();
+    let actions = app.execute_command(cmd("/model"), 0);
+    assert!(app.model_picker.is_open());
+    assert!(matches!(&actions[..], [Action::RefreshModels]));
+}
+
+/// `/theme <name>` (exact) applies and persists the theme on a tempdir-backed
+/// disk provider: generation bumps, the current name updates, the pick is
+/// readable back from the `StateDir`, and the flash names the theme.
+#[test]
+fn theme_arg_exact_applies_and_persists() {
+    let _guard = crate::theme::theme_test_guard();
+    let (tmp, dir, _writer, mut app) = tempdir_app();
+    app.theme_provider = Arc::new(crate::theme::DiskThemesProvider::new(
+        Some(dir.clone()),
+        tmp.path().to_path_buf(),
+    ));
+    let gen_before = app.theme_provider.generation();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/theme".into(),
+            args: "zenburn".into(),
+        },
+        0,
+    );
+    assert!(actions.is_empty());
+    assert!(!app.theme_picker.is_open());
+    assert!(app.theme_provider.generation() > gen_before);
+    assert_eq!(app.theme_provider.current_theme_name(), "zenburn");
+    assert_eq!(
+        maki_storage::theme::read_theme_name(&dir).as_deref(),
+        Some("zenburn")
+    );
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        format!("{THEME_APPLIED_PREFIX}: zenburn")
+    );
+}
+
+/// `/theme <fragment>` that fuzzy-resolves to a unique name applies it
+/// (in-memory provider, no disk write).
+#[test]
+fn theme_arg_fuzzy_unique_applies() {
+    let _guard = crate::theme::theme_test_guard();
+    let mut app = test_app();
+    let gen_before = app.theme_provider.generation();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/theme".into(),
+            args: "toky".into(),
+        },
+        0,
+    );
+    assert!(actions.is_empty());
+    assert!(!app.theme_picker.is_open());
+    assert!(app.theme_provider.generation() > gen_before);
+    assert_eq!(app.theme_provider.current_theme_name(), "tokyonight");
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        format!("{THEME_APPLIED_PREFIX}: tokyonight")
+    );
+}
+
+/// `/theme <name>` that is not in the catalog flashes `load`'s unknown-theme
+/// error and changes nothing.
+#[test]
+fn theme_arg_unknown_flashes() {
+    let _guard = crate::theme::theme_test_guard();
+    let mut app = test_app();
+    let gen_before = app.theme_provider.generation();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/theme".into(),
+            args: "nonexistent".into(),
+        },
+        0,
+    );
+    assert!(actions.is_empty());
+    assert!(!app.theme_picker.is_open());
+    assert_eq!(app.theme_provider.generation(), gen_before);
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        format!("{THEME_UNKNOWN_MSG}: nonexistent")
+    );
+}
+
+/// `/theme <fragment>` with 2+ fuzzy matches flashes and changes nothing.
+#[test]
+fn theme_arg_ambiguous_flashes() {
+    let _guard = crate::theme::theme_test_guard();
+    let mut app = test_app();
+    let gen_before = app.theme_provider.generation();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/theme".into(),
+            args: "catppuccin".into(),
+        },
+        0,
+    );
+    assert!(actions.is_empty());
+    assert!(!app.theme_picker.is_open());
+    assert_eq!(app.theme_provider.generation(), gen_before);
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        format!("{THEME_AMBIGUOUS_MSG}: catppuccin")
+    );
 }
 
 /// Tool output streams into a subagent's chat while the parent chat is the one
@@ -3363,6 +3619,9 @@ fn mcp_prompt_args_expand_references() {
             ..Default::default()
         }),
         LuaCommandReader::empty(),
+        ModelArgSource::new(Arc::clone(&app.available_models)),
+        ThemeArgSource::new(Arc::clone(&app.theme_provider)),
+        LuaArgumentSource::new(app.lua_event_handle.clone()),
     );
 
     let actions = app.execute_command(
@@ -5265,6 +5524,9 @@ fn at_completion_insertion_synchronizes_argument_completion() {
             max_args: 1,
             has_argument_completion: true,
         }]),
+        ModelArgSource::new(Arc::clone(&app.available_models)),
+        ThemeArgSource::new(Arc::clone(&app.theme_provider)),
+        LuaArgumentSource::new(app.lua_event_handle.clone()),
     );
     app.input_box.set_input("/deploy @rev".into());
     app.command_palette.sync("/deploy @rev");

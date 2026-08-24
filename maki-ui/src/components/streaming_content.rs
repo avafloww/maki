@@ -1,6 +1,5 @@
 use crate::animation::Typewriter;
 use crate::markdown::paint_semantic;
-use crate::theme;
 
 use maki_markdown::render::Renderer;
 use ratatui::style::Style;
@@ -54,6 +53,7 @@ impl StreamingCache {
     /// Returns `true` when the cache was repopulated. The caller passes a
     /// renderer so the highlighter/table-width state persists across calls
     /// for a stable streamed view.
+    #[allow(clippy::too_many_arguments)]
     fn get_or_update(
         &mut self,
         renderer: &mut Renderer,
@@ -62,8 +62,8 @@ impl StreamingCache {
         text_style: Style,
         prefix_style: Style,
         width: u16,
+        theme_gen: u64,
     ) -> bool {
-        let theme_gen = theme::generation();
         let key = CacheKey::for_text(visible, width, theme_gen);
         if self.key == Some(key) {
             return false;
@@ -137,7 +137,7 @@ impl StreamingContent {
         self.cache.invalidate();
     }
 
-    pub fn render_lines(&mut self, width: u16) -> &[Line<'static>] {
+    pub fn render_lines(&mut self, width: u16, theme_gen: u64) -> &[Line<'static>] {
         self.typewriter.tick();
         self.cache.get_or_update(
             &mut self.renderer,
@@ -146,6 +146,7 @@ impl StreamingContent {
             self.text_style,
             self.prefix_style,
             width,
+            theme_gen,
         );
         &self.cache.lines
     }
@@ -177,6 +178,8 @@ impl std::fmt::Debug for StreamingContent {
 
 #[cfg(test)]
 mod tests {
+    const GEN0: u64 = 0;
+
     use super::*;
     use crate::markdown::text_to_lines;
     use ratatui::style::Style;
@@ -252,11 +255,12 @@ mod tests {
                 style,
                 style,
                 width,
+                GEN0,
             );
             end += step;
         }
 
-        cache.get_or_update(&mut renderer, full_text, prefix, style, style, width);
+        cache.get_or_update(&mut renderer, full_text, prefix, style, style, width, GEN0);
         let incremental = cache_lines_text(&cache);
         let expected = full_render_lines(full_text, prefix, width);
         assert_eq!(
@@ -272,10 +276,10 @@ mod tests {
         let mut cache = StreamingCache::default();
         let mut renderer = fresh_renderer();
 
-        cache.get_or_update(&mut renderer, "partial text", "", style, style, width);
+        cache.get_or_update(&mut renderer, "partial text", "", style, style, width, GEN0);
 
         let text = "block1\n```py\nx=1\n```\nblock2\n```js\ny=2\n```\ntail";
-        cache.get_or_update(&mut renderer, text, "", style, style, width);
+        cache.get_or_update(&mut renderer, text, "", style, style, width, GEN0);
 
         let expected = full_render_lines(text, "", width);
         assert_eq!(cache_lines_text(&cache), expected);
@@ -288,9 +292,9 @@ mod tests {
         let mut cache = StreamingCache::default();
         let mut renderer = fresh_renderer();
         let text = "hello\n```rust\nfn x(){}\n```\nafter";
-        cache.get_or_update(&mut renderer, text, "", style, style, width);
+        cache.get_or_update(&mut renderer, text, "", style, style, width, GEN0);
         cache.invalidate();
-        cache.get_or_update(&mut renderer, text, "", style, style, width);
+        cache.get_or_update(&mut renderer, text, "", style, style, width, GEN0);
         assert_eq!(cache_lines_text(&cache), full_render_lines(text, "", width));
     }
 
@@ -305,11 +309,11 @@ mod tests {
         let second = "*italic txt*!";
         assert_eq!(first.len(), second.len());
 
-        cache.get_or_update(&mut renderer, first, "", style, style, width);
+        cache.get_or_update(&mut renderer, first, "", style, style, width, GEN0);
         let first_lines = cache_lines_text(&cache);
         assert_eq!(first_lines, full_render_lines(first, "", width));
 
-        cache.get_or_update(&mut renderer, second, "", style, style, width);
+        cache.get_or_update(&mut renderer, second, "", style, style, width, GEN0);
         let second_lines = cache_lines_text(&cache);
         assert_eq!(second_lines, full_render_lines(second, "", width));
         assert_ne!(
@@ -325,9 +329,9 @@ mod tests {
         let mut renderer = fresh_renderer();
         let text = "```rust\nfn extremely_long_function_name_that_definitely_will_not_fit(arg_one: &str, arg_two: usize) {}\n```";
 
-        cache.get_or_update(&mut renderer, text, "", style, style, 200);
+        cache.get_or_update(&mut renderer, text, "", style, style, 200, GEN0);
         let wide = cache.lines.len();
-        cache.get_or_update(&mut renderer, text, "", style, style, 30);
+        cache.get_or_update(&mut renderer, text, "", style, style, 30, GEN0);
         let narrow = cache.lines.len();
         assert!(
             narrow > wide,
@@ -351,14 +355,14 @@ mod tests {
         let mut cache = StreamingCache::default();
         let mut renderer = fresh_renderer();
 
-        cache.get_or_update(&mut renderer, base, "", style, style, width);
+        cache.get_or_update(&mut renderer, base, "", style, style, width, GEN0);
         let mut prev_count = cache.lines.len();
 
         let chars: Vec<char> = suffix.chars().collect();
         for i in 1..=chars.len() {
             let partial: String = chars[..i].iter().collect();
             let text = format!("{base}{partial}");
-            cache.get_or_update(&mut renderer, &text, "", style, style, width);
+            cache.get_or_update(&mut renderer, &text, "", style, style, width, GEN0);
             assert!(
                 cache.lines.len() >= prev_count.saturating_sub(1),
                 "line count dropped from {prev_count} to {} at partial {partial:?}",
@@ -376,11 +380,11 @@ mod tests {
         let mut renderer = fresh_renderer();
 
         let base = "| A | B |\n| --- | --- |\n| 1 | 2 |";
-        cache.get_or_update(&mut renderer, base, "", style, style, width);
+        cache.get_or_update(&mut renderer, base, "", style, style, width, GEN0);
         let base_lines = cache_lines_text(&cache);
 
         let partial = format!("{base}\n| 3 | in pro");
-        cache.get_or_update(&mut renderer, &partial, "", style, style, width);
+        cache.get_or_update(&mut renderer, &partial, "", style, style, width, GEN0);
         let partial_lines = cache_lines_text(&cache);
         assert!(
             partial_lines.len() > base_lines.len(),
@@ -393,7 +397,7 @@ mod tests {
         );
 
         let complete = format!("{base}\n| 3 | in progress |");
-        cache.get_or_update(&mut renderer, &complete, "", style, style, width);
+        cache.get_or_update(&mut renderer, &complete, "", style, style, width, GEN0);
         let complete_lines = cache_lines_text(&cache);
         let has_complete_content = complete_lines.iter().any(|l| l.contains("in progress"));
         assert!(
@@ -408,14 +412,14 @@ mod tests {
 
         let mut sc = StreamingContent::new("", style, style, 4);
         sc.set_buffer("hello world");
-        sc.render_lines(80);
+        sc.render_lines(80, GEN0);
         sc.clear();
         assert!(sc.is_empty());
         assert!(sc.cache.key.is_none());
         assert!(sc.cache.lines.is_empty());
 
         sc.set_buffer("hello");
-        sc.render_lines(80);
+        sc.render_lines(80, GEN0);
         let text = sc.take_all();
         assert_eq!(text, "hello");
         assert!(sc.is_empty());
@@ -423,7 +427,7 @@ mod tests {
 
         let mut sc = StreamingContent::new("old> ", style, style, 4);
         sc.set_buffer("text");
-        sc.render_lines(80);
+        sc.render_lines(80, GEN0);
         let new_style = Style::default().fg(ratatui::style::Color::Red);
         sc.set_style("new> ", new_style, new_style);
         assert!(sc.cache.lines.is_empty());
@@ -434,7 +438,7 @@ mod tests {
         let style = Style::default();
         let mut cache = StreamingCache::default();
         let mut renderer = fresh_renderer();
-        let repopulated = cache.get_or_update(&mut renderer, "hello", "", style, style, 80);
+        let repopulated = cache.get_or_update(&mut renderer, "hello", "", style, style, 80, GEN0);
         assert!(repopulated, "first call must repopulate (return true)");
     }
 
@@ -443,8 +447,8 @@ mod tests {
         let style = Style::default();
         let mut cache = StreamingCache::default();
         let mut renderer = fresh_renderer();
-        cache.get_or_update(&mut renderer, "hello", "", style, style, 80);
-        let hit = cache.get_or_update(&mut renderer, "hello", "", style, style, 80);
+        cache.get_or_update(&mut renderer, "hello", "", style, style, 80, GEN0);
+        let hit = cache.get_or_update(&mut renderer, "hello", "", style, style, 80, GEN0);
         assert!(
             !hit,
             "second identical call must be a cache hit (return false)"
@@ -459,7 +463,7 @@ mod tests {
         let mut sc = StreamingContent::new("old> ", style, style, 4);
         sc.set_buffer("hello");
         let before: Vec<String> = sc
-            .render_lines(80)
+            .render_lines(80, GEN0)
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
@@ -467,7 +471,7 @@ mod tests {
 
         sc.set_style("new> ", red, red);
         let after: Vec<String> = sc
-            .render_lines(80)
+            .render_lines(80, GEN0)
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
@@ -480,7 +484,7 @@ mod tests {
         let style = Style::default();
         let mut cache = StreamingCache::default();
         let mut renderer = fresh_renderer();
-        let repopulated = cache.get_or_update(&mut renderer, "", "", style, style, 80);
+        let repopulated = cache.get_or_update(&mut renderer, "", "", style, style, 80, GEN0);
         assert!(repopulated);
         assert!(
             !cache.lines.is_empty(),
@@ -495,11 +499,11 @@ mod tests {
         let mut renderer = fresh_renderer();
 
         let first_block = "```rust\nfn a() {}\n```";
-        cache.get_or_update(&mut renderer, first_block, "", style, style, 80);
+        cache.get_or_update(&mut renderer, first_block, "", style, style, 80, GEN0);
         let after_first = cache_lines_text(&cache);
 
         let both_blocks = "```rust\nfn a() {}\n```\ntext\n```python\ndef b(): pass\n```";
-        cache.get_or_update(&mut renderer, both_blocks, "", style, style, 80);
+        cache.get_or_update(&mut renderer, both_blocks, "", style, style, 80, GEN0);
         let after_both = cache_lines_text(&cache);
 
         assert!(

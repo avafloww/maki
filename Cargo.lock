@@ -2851,10 +2851,10 @@ dependencies = [
  "maki-lua",
  "maki-lua-macro",
  "maki-markdown",
+ "maki-match",
  "maki-providers",
  "maki-storage",
  "mlua",
- "nucleo-matcher",
  "pin-project-lite",
  "regex",
  "rustix",
@@ -2921,6 +2921,14 @@ dependencies = [
  "maki-highlight",
  "test-case",
  "unicode-width",
+]
+
+[[package]]
+name = "maki-match"
+version = "0.4.11-luna"
+dependencies = [
+ "nucleo-matcher",
+ "test-case",
 ]
 
 [[package]]
@@ -2995,6 +3003,7 @@ dependencies = [
  "maki-highlight",
  "maki-lua",
  "maki-markdown",
+ "maki-match",
  "maki-providers",
  "maki-storage",
  "notify",

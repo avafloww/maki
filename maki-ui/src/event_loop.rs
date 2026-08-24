@@ -52,6 +52,7 @@ use crate::repaint::{Dirty, IDLE_POLL};
 
 use crate::storage_writer::StorageWriter;
 use crate::terminal;
+use crate::theme::ThemesProvider;
 
 /// Max events handled per frame so a flood cannot starve rendering.
 const DRAIN_BUDGET: usize = 256;
@@ -356,6 +357,7 @@ impl SpawnCtx {
             Arc::clone(&self.custom_commands),
             self.lua_event_handle.clone(),
             Arc::clone(&self.model_policy),
+            crate::theme::default_provider().clone(),
         );
         handles.apply_to_app(&mut app);
         if resumed {
@@ -507,17 +509,15 @@ impl<'t> EventLoop<'t> {
         // could bake the syntax palette from the old theme. Only the
         // in-memory name is set, so the user's saved pick survives.
         if let Some(ref name) = ui_config.theme {
-            match crate::theme::load_by_name(name) {
-                Ok(theme) => {
-                    crate::theme::set_current_name(name);
-                    crate::theme::set(theme);
-                }
+            let provider = crate::theme::default_provider();
+            match provider.install(name) {
+                Ok(()) => provider.select(name),
                 Err(e) => startup_warnings.push(format!("config ui.theme: {e}")),
             }
         }
 
         // Seed the highlight palette for the active theme synchronously. For a
-        // saved (non-config) theme `theme::set` never runs, so without this the
+        // saved (non-config) theme `install` never runs, so without this the
         // palette only lands on the warmup thread and plugins that cache
         // `theme_color` at load (e.g. the splash) bake the fallback instead of
         // the real theme. Cheap: it only swaps the theme + a few UI colors; the

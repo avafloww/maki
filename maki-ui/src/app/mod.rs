@@ -26,6 +26,7 @@ use crate::AppSession;
 use crate::chat::Chat;
 use crate::chat::{CANCELLED_TEXT, ChatEventResult, DONE_TEXT, ERROR_TEXT};
 use crate::clipboard::ClipboardState;
+use crate::components::arg_completion::{LuaArgumentSource, ModelArgSource, ThemeArgSource};
 use crate::components::btw_modal::BtwModal;
 use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
 use crate::components::file_completion::{
@@ -67,12 +68,14 @@ use maki_lua::{
     BuiltinAction, CompletionCtx, EventHandle, HintReader, HintSnapshot, ItemSpec, KeymapReader,
     LuaCommandReader, WinView,
 };
+use maki_match::{MatchCandidate, Resolution, fuzzy_resolve, fuzzy_resolve_candidates};
 use maki_providers::{ContentBlock, Message, Model, Role, ThinkingConfig, add_cost, format_tokens};
 use maki_storage::StateDir;
 use maki_storage::input_history::InputHistory;
 use maki_storage::model::persist_model;
 
 use crate::storage_writer::StorageWriter;
+use crate::theme::ThemesProvider;
 use ratatui::layout::Position;
 
 pub(crate) use crate::agent::QueuedMessage;
@@ -104,6 +107,17 @@ const WORKFLOW_ON_MSG: &str = "Workflow mode: on";
 const WORKFLOW_OFF_MSG: &str = "Workflow mode: off";
 const IMPLEMENT_MSG_PREFIX: &str = "Implement the plan";
 const IMPLEMENT_PARALLEL_HINT: &str = "Use batch+task to parallelize, assign each subagent a separate module and restrict its tests to that module to avoid interference.";
+/// `/model <fragment>` resolution: no discovered spec fuzzy-matches.
+const INVALID_MODEL_MSG: &str = "Invalid model";
+const MODEL_NO_MATCH_MSG: &str = "No model matches";
+/// `/model <fragment>` resolution: two or more specs fuzzy-match.
+const MODEL_AMBIGUOUS_MSG: &str = "Ambiguous model";
+/// `/theme <name>` commit: the resolved theme was applied and persisted.
+const THEME_APPLIED_PREFIX: &str = "Theme";
+/// `/theme <name>`: the name is not in the catalog (mirrors `load`'s error).
+const THEME_UNKNOWN_MSG: &str = "unknown theme";
+/// `/theme <fragment>` resolution: two or more names fuzzy-match.
+const THEME_AMBIGUOUS_MSG: &str = "Ambiguous theme";
 
 const TASK_DONE_DETAIL: &str = "✓ ";
 const MISSING_TOOL_COMPLETION: &str = "Tool did not report completion before the turn ended";
@@ -312,6 +326,7 @@ pub struct App {
     pub(super) last_esc: Option<Instant>,
 
     pub(crate) storage: StateDir,
+    pub(crate) theme_provider: Arc<dyn ThemesProvider>,
     pub(crate) usage_slot: Arc<ArcSwapOption<UsageFetchState>>,
     pub(crate) available_models: Arc<ArcSwapOption<Vec<String>>>,
     pub(crate) shared_history: Option<SharedMessages>,
@@ -337,7 +352,7 @@ pub struct App {
 
 impl App {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         model: &Model,
         session: AppSession,
         storage: StateDir,
@@ -354,6 +369,7 @@ impl App {
         custom_commands: Arc<[maki_agent::command::CustomCommand]>,
         lua_event_handle: EventHandle,
         model_policy: Arc<ModelPolicy>,
+        theme_provider: Arc<dyn ThemesProvider>,
     ) -> Self {
         scrollbar::set_enabled(ui_config.scrollbar);
         let state = SessionState::from_session(session, model, &storage, &model_policy);
@@ -368,6 +384,7 @@ impl App {
                 "Main".into(),
                 ui_config.clone(),
                 lua_event_handle.clone(),
+                Arc::clone(&theme_provider),
             )],
             active_chat: 0,
             chat_index: HashMap::new(),
@@ -376,11 +393,14 @@ impl App {
                 custom_commands,
                 mcp_reader.clone(),
                 lua_command_reader,
+                ModelArgSource::new(Arc::clone(&available_models)),
+                ThemeArgSource::new(Arc::clone(&theme_provider)),
+                LuaArgumentSource::new(lua_event_handle.clone()),
             ),
             task_picker: ListPicker::new(),
             task_picker_original: None,
             lua_picker: LuaPicker::new(lua_event_handle.clone()),
-            theme_picker: ThemePicker::new(),
+            theme_picker: ThemePicker::new(Arc::clone(&theme_provider)),
             model_picker: ModelPicker::new(Arc::clone(&available_models)),
             login_picker: LoginPicker::new(),
             mcp_picker: McpPicker::new(mcp_reader, mcp_config_errors),
@@ -411,6 +431,7 @@ impl App {
             clipboard: ClipboardState::new(),
             last_esc: None,
             storage,
+            theme_provider,
             usage_slot: Arc::new(ArcSwapOption::empty()),
             available_models,
             shared_history: None,
@@ -715,7 +736,7 @@ impl App {
             return None;
         }
         if key::QUIT.matches(key) {
-            self.command_palette.close(&self.lua_event_handle);
+            self.command_palette.close();
             return Some(if !self.is_main_chat() || self.input_box.is_empty() {
                 if self.status == Status::Streaming {
                     return Some(self.handle_cancel());
@@ -852,7 +873,6 @@ impl App {
                         self.command_palette.sync_arguments(
                             &val,
                             self.input_box.buffer.cursor_byte_offset(),
-                            &self.lua_event_handle,
                             &self.state.mode.id_key(),
                         );
                         self.sync_file_completion();
@@ -1130,7 +1150,6 @@ impl App {
                 self.command_palette.sync_arguments(
                     &val,
                     self.input_box.buffer.cursor_byte_offset(),
-                    &self.lua_event_handle,
                     &self.state.mode.id_key(),
                 );
                 self.sync_file_completion();
@@ -1138,18 +1157,16 @@ impl App {
             return vec![];
         }
 
-        match self.command_palette.handle_key(
-            key,
-            &self.input_box.buffer.value(),
-            &self.lua_event_handle,
-        ) {
+        match self
+            .command_palette
+            .handle_key(key, &self.input_box.buffer.value())
+        {
             CommandAction::Consumed => return vec![],
             CommandAction::SelectionChanged => {
                 let input = self.input_box.buffer.value();
                 self.command_palette.sync_arguments(
                     &input,
                     self.input_box.buffer.cursor_byte_offset(),
-                    &self.lua_event_handle,
                     &self.state.mode.id_key(),
                 );
                 return vec![];
@@ -1171,12 +1188,8 @@ impl App {
                 self.refresh_at_ref_labels(&text);
                 self.input_box.set_input(text.clone());
                 self.input_box.buffer.set_cursor_byte_offset(cursor);
-                self.command_palette.sync_arguments(
-                    &text,
-                    cursor,
-                    &self.lua_event_handle,
-                    &self.state.mode.id_key(),
-                );
+                self.command_palette
+                    .sync_arguments(&text, cursor, &self.state.mode.id_key());
                 return vec![];
             }
             CommandAction::Passthrough => {}
@@ -1208,7 +1221,6 @@ impl App {
                 self.command_palette.sync_arguments(
                     &val,
                     self.input_box.buffer.cursor_byte_offset(),
-                    &self.lua_event_handle,
                     &self.state.mode.id_key(),
                 );
                 self.sync_file_completion();
@@ -1346,7 +1358,6 @@ impl App {
         self.command_palette.sync_arguments(
             &val,
             self.input_box.buffer.cursor_byte_offset(),
-            &self.lua_event_handle,
             &self.state.mode.id_key(),
         );
     }
@@ -1714,6 +1725,7 @@ impl App {
             subagent.name.clone(),
             self.ui_config.clone(),
             self.lua_event_handle.clone(),
+            Arc::clone(&self.theme_provider),
         );
         chat.set_restore_channel(self.restore_event_tx.clone());
         chat.model_id = subagent.model.clone();
@@ -1795,12 +1807,22 @@ impl App {
                 vec![]
             }
             "/model" => {
-                self.model_picker.open(&self.state.model.spec());
-                vec![Action::RefreshModels]
+                let arg = cmd.args.trim();
+                if arg.is_empty() {
+                    self.model_picker.open(&self.state.model.spec());
+                    vec![Action::RefreshModels]
+                } else {
+                    self.resolve_model_arg(arg)
+                }
             }
             "/theme" => {
-                self.theme_picker.open();
-                vec![]
+                let arg = cmd.args.trim();
+                if arg.is_empty() {
+                    self.theme_picker.open();
+                    vec![]
+                } else {
+                    self.resolve_theme_arg(arg)
+                }
             }
             "/mcp" => {
                 self.mcp_picker.open();
@@ -1977,6 +1999,76 @@ impl App {
         })
     }
 
+    /// Resolve a `/model <arg>` argument without the picker. An explicit
+    /// `provider/id` spec bypasses the discovered list (matching `ChangeModel`
+    /// behaviour); otherwise the argument is fuzzy-resolved against the
+    /// discovered specs. Zero or ambiguous matches flash and emit nothing, so
+    /// the session model is left untouched and the picker stays closed.
+    fn resolve_model_arg(&mut self, arg: &str) -> Vec<Action> {
+        if arg.contains('/') {
+            if let Err(error) = Model::parse_spec(arg) {
+                self.flash(format!("{INVALID_MODEL_MSG}: {error}"));
+                return vec![];
+            }
+            return vec![Action::ChangeModel(arg.to_string())];
+        }
+        let models = self
+            .available_models
+            .load_full()
+            .map(|arc| (*arc).clone())
+            .unwrap_or_default();
+        let candidates: Vec<_> = models
+            .iter()
+            .map(|spec| {
+                let (provider, model_id) = spec.split_once('/').unwrap_or(("", spec));
+                MatchCandidate {
+                    value: spec,
+                    fields: vec![spec, provider, model_id],
+                }
+            })
+            .collect();
+        match fuzzy_resolve_candidates(arg, &candidates) {
+            Resolution::Unique(index) => vec![Action::ChangeModel(models[index].clone())],
+            Resolution::NoMatch => {
+                self.flash(format!("{MODEL_NO_MATCH_MSG}: {arg}"));
+                vec![]
+            }
+            Resolution::Ambiguous => {
+                self.flash(format!("{MODEL_AMBIGUOUS_MSG}: {arg}"));
+                vec![]
+            }
+        }
+    }
+
+    /// Resolve a `/theme <arg>` argument without the picker. A unique match is
+    /// installed (palette store, highlighter refresh, generation bump) and
+    /// persisted under the app's `StateDir`, then flashed; unknown or ambiguous
+    /// arguments flash and change nothing.
+    fn resolve_theme_arg(&mut self, arg: &str) -> Vec<Action> {
+        let names = self.theme_provider.names();
+        match fuzzy_resolve(arg, &names) {
+            Resolution::Unique(index) => {
+                let name = names[index].clone();
+                match self.theme_provider.install(&name) {
+                    Ok(()) => {
+                        self.theme_provider.persist(&name);
+                        self.flash(format!("{THEME_APPLIED_PREFIX}: {name}"));
+                    }
+                    Err(error) => self.flash(error),
+                }
+                vec![]
+            }
+            Resolution::NoMatch => {
+                self.flash(format!("{THEME_UNKNOWN_MSG}: {arg}"));
+                vec![]
+            }
+            Resolution::Ambiguous => {
+                self.flash(format!("{THEME_AMBIGUOUS_MSG}: {arg}"));
+                vec![]
+            }
+        }
+    }
+
     fn cmd_cd(&mut self, args: &str) -> Vec<Action> {
         let path = if args.is_empty() {
             maki_storage::paths::home().unwrap_or_default()
@@ -2073,7 +2165,7 @@ impl App {
     }
 
     pub fn close_all_overlays(&mut self) {
-        self.command_palette.close(&self.lua_event_handle);
+        self.command_palette.close();
         self.overlays_mut().iter_mut().for_each(|o| o.close());
     }
 
@@ -2095,7 +2187,7 @@ impl App {
             | self.hints.poll(self.hint_reader.load_full())
             | self.tick_file_picker()
             | self.tick_file_completion()
-            | self.command_palette.poll_arguments(&self.lua_event_handle);
+            | self.command_palette.poll_arguments();
         dirty |= self.tick_chats();
         while let Some(shown) = self.chats[0].take_splash_event() {
             // The autocmd is fire-and-forget; repainting is the frame pull's
@@ -2227,7 +2319,6 @@ impl App {
             self.command_palette.sync_arguments(
                 &val,
                 self.input_box.buffer.cursor_byte_offset(),
-                &self.lua_event_handle,
                 &self.state.mode.id_key(),
             );
             self.sync_file_completion();

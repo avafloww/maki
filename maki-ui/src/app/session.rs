@@ -167,6 +167,7 @@ impl App {
             "Main".into(),
             self.ui_config.clone(),
             self.lua_event_handle.clone(),
+            Arc::clone(&self.theme_provider),
         );
         main.set_restore_channel(self.restore_event_tx.clone());
         main.set_splash_frame(splash_frame);
@@ -219,6 +220,7 @@ impl App {
                 sa.name,
                 self.ui_config.clone(),
                 self.lua_event_handle.clone(),
+                Arc::clone(&self.theme_provider),
             );
             chat.set_restore_channel(self.restore_event_tx.clone());
             chat.model_id = sa.model;
@@ -251,7 +253,7 @@ impl App {
             return;
         };
         let eh = &self.lua_event_handle;
-        let theme_gen = crate::theme::generation();
+        let theme_gen = self.theme_provider.generation();
         for mut item in items {
             item.theme_gen = Some(theme_gen);
             eh.request_restore(item, tx.clone());

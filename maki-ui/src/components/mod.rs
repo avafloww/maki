@@ -1,3 +1,4 @@
+pub(crate) mod arg_completion;
 pub(crate) mod btw_modal;
 pub(crate) mod code_view;
 pub mod command;
