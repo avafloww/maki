@@ -3,7 +3,6 @@
 -- dispatch live in Rust, which exposes primitives only (`maki.api.get_tools`,
 -- `maki.agent.call_tool`); orchestration policy is here.
 
-local truncate = require("maki.truncate")
 local ToolView = require("maki.tool_view")
 local output_limits = require("maki.output_limits")
 local partial = require("maki.partial")
@@ -273,7 +272,12 @@ local function handler(input, ctx)
   local cut_reply
   local function cut(reason)
     cut_reply = cut_reply
-      or partial.cut(view, truncate(table.concat(output_parts, "\n"), max_lines, max_bytes), reason, timeout)
+      or partial.cut(
+        view,
+        maki.text.truncate_file(table.concat(output_parts, "\n"), max_lines, max_bytes, nil),
+        reason,
+        timeout
+      )
     return cut_reply
   end
 
@@ -329,7 +333,7 @@ local function handler(input, ctx)
     view:append({ { "No output", "dim" } })
   end
 
-  local llm_output = truncate(output, max_lines, max_bytes)
+  local llm_output = maki.text.truncate_file(output, max_lines, max_bytes)
   view:finish()
 
   return { llm_output = llm_output, body = buf }

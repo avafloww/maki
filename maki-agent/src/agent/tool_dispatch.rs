@@ -10,7 +10,7 @@ use tracing::{debug, error, warn};
 use crate::mcp::{McpSession, TOOL_SEARCH_TOOL_NAME, UNKNOWN_MCP};
 use crate::task_set::TaskSet;
 use crate::tools::registry::{ToolInvocation, ToolRegistry};
-use crate::tools::{LocalToolFn, ToolContext, truncate_bytes};
+use crate::tools::{LocalToolFn, ToolContext, truncate_line};
 use crate::{AgentError, AgentEvent, ToolDoneEvent, ToolOutput, ToolStartEvent};
 use maki_config::ToolKey;
 
@@ -348,7 +348,7 @@ async fn execute_mcp_tool(
             return done(format!("invalid MCP tool key '{tool_name}': {e}"), true);
         }
     };
-    let perm_scope = truncate_bytes(&input.to_string(), MCP_PERM_SCOPE_MAX_BYTES);
+    let perm_scope = truncate_line(&input.to_string(), MCP_PERM_SCOPE_MAX_BYTES);
     let perm_scopes = crate::tools::PermissionScopes::single(perm_scope);
 
     if let Err(e) = ctx

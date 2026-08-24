@@ -10,7 +10,7 @@ use grep_searcher::{Sink, SinkContext, SinkFinish, SinkMatch};
 use ignore::WalkState;
 use tracing::debug;
 
-use super::{mtime, resolve_search_path, truncate_bytes, walk_builder};
+use super::{mtime, resolve_search_path, truncate_line, walk_builder};
 
 pub(super) const INVALID_REGEX: &str = "invalid regex pattern";
 const MULTILINE_HEAP_LIMIT: usize = 64 * 1024 * 1024;
@@ -180,7 +180,7 @@ impl GrepSink<'_> {
         let text = text.strip_suffix('\r').unwrap_or(text);
         self.current_group.push(GrepLine {
             line_nr: line_nr as usize,
-            text: truncate_bytes(text, self.max_line_bytes),
+            text: truncate_line(text, self.max_line_bytes),
             is_match,
         });
     }

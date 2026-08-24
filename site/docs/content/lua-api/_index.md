@@ -3456,6 +3456,42 @@ if err then return end
 print(md) -- "# Hello\n\nworld"
 ```
 
+---
+
+### `maki.text.truncate_line()` {#maki-text-truncate_line}
+
+```lua
+maki.text.truncate_line({text}, {max_bytes})
+```
+
+Truncate one line while preserving a UTF-8 boundary and adding `[line truncated]`.
+
+**Parameters:**
+
+- `{text}` (`string`) The line to truncate.
+- `{max_bytes}` (`integer`) Maximum source bytes to retain.
+
+**Returns:** string The truncated line.
+
+---
+
+### `maki.text.truncate_file()` {#maki-text-truncate_file}
+
+```lua
+maki.text.truncate_file({text}, {max_lines}, {max_bytes}, {remaining_lines})
+```
+
+Truncate file output by line and byte limits, adding `[file truncated]` when needed.
+
+**Parameters:**
+
+- `{text}` (`string`) The file output to truncate.
+- `{max_lines}` (`integer`) Maximum lines to retain.
+- `{max_bytes}` (`integer`) Maximum bytes to retain.
+- `{remaining_lines}` (`integer?`) Number of source lines remaining after the output.
+
+**Returns:** string The truncated file output.
+
 
 ## maki.time {#maki-time}
 
@@ -5817,7 +5853,7 @@ function M.replace(content, old_string, new_string, replace_all)
 
 local DEFAULT_MAX_OUTPUT_LINES = 2000
 local DEFAULT_MAX_OUTPUT_BYTES = 50 * 1024
-local DEFAULT_MAX_LINE_BYTES = 500
+local DEFAULT_MAX_LINE_BYTES = 1000
 
 local M = {}
 
@@ -6055,43 +6091,5 @@ function ToolView.restore(output, opts)
 -- "markdown"`); {opts.width} is the wrap width. Errors stay plain, as they do
 -- live.
 function ToolView.restore_markdown(output, is_error, opts)
-```
-
-### `require("maki.truncate")`
-
-```lua
-local function truncate(text, max_lines, max_bytes)
-  if #text <= max_bytes then
-    local n = 0
-    for _ in text:gmatch("\n") do
-      n = n + 1
-    end
-    if n + 1 <= max_lines then
-      return text
-    end
-  end
-  local out = {}
-  local bytes = 0
-  local lines = 0
-  for line in text:gmatch("([^\n]*)\n?") do
-    lines = lines + 1
-    if lines > max_lines then
-      break
-    end
-    local new_bytes = bytes + #line + 1
-    if new_bytes > max_bytes then
-      break
-    end
-    out[#out + 1] = line
-    bytes = new_bytes
-  end
-  local result = table.concat(out, "\n")
-  if #result < #text then
-    result = result .. "\n\n[truncated " .. (#text - #result) .. " bytes]"
-  end
-  return result
-end
-
-return truncate
 ```
 

@@ -4478,7 +4478,7 @@ mod read_tool_required_params {
         );
         // Should have truncation hint
         assert!(
-            out.contains("Truncated"),
+            out.contains("[file truncated"),
             "should mention truncation, got: {out}"
         );
     }
