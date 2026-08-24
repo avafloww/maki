@@ -1094,7 +1094,8 @@ and tool set.
   - `local_tools` (`table?`) map of `name -> spec` for Lua-backed tools. Each spec
     requires `description` (string), `input_schema` (table), and
     `handler` (function). The handler receives the input table and must return
-    `(string)` or `(nil, err)`.
+    `(string)` or `(nil, err)`. Set `capture_input` to surface a successful
+    call's input as `captured` in the turn result.
   - `name` (`string?`) display name for logs and UI.
   - `audience` (`string?`) tool audience for capability gating. Default: `"general_sub"`.
   - `mcp` (`boolean?`) give the session access to MCP tools. Their
@@ -1114,6 +1115,8 @@ and tool set.
     usage into the parent session's UI or event stream. The session still
     completes and `:prompt()` still returns its result (including a commit
     set via a `local_tools` handler). Use for hidden one-shot classification.
+  - `semaphore` (`maki.async.Semaphore?`) concurrency limit acquired by the
+    driver immediately before each turn and released when that turn ends.
 
 **Returns:** ([`Session?`](#maki-agent-Session), `string?`) Session handle, or `(nil, err)` on failure.
 
@@ -1139,16 +1142,13 @@ sess:close()
 maki.agent.report_task_result({value})
 ```
 
-Commit a structured-output result from the currently-running subagent
-driver. The task plugin's `structured_output` local tool validates the
-value in Lua, then routes it here so the background driver can surface it
-as `captured` on completion.
+Commit a result to the session whose local tool is currently executing.
 
 **Parameters:**
 
-- `{value}` (`table`) The validated result to commit.
+- `{value}` (`table`) The result to commit.
 
-**Returns:** (`boolean?`, `string?`) `true` when a session is active, else `(nil, err)`.
+**Returns:** (`boolean?`, `string?`) `true` while a session-local tool is active.
 
 
 ## maki.agent.Session {#maki-agent-Session}

@@ -1,6 +1,5 @@
 -- Structured-output story: the subagent gets a session-local structured_output
--- tool whose handler validates and reports the result via
--- `maki.agent.report_task_result` (the Rust driver surfaces it as `captured`).
+-- tool whose validated input is captured by the Rust driver.
 -- Invalid input is an inline tool error the model can fix in the same run.
 --
 -- Subagents run on a background driver, so the main agent is not blocked while
@@ -40,6 +39,7 @@ local NUDGE_SUMMARY =
 local INVALID_INPUT_PREFIX =
   "Input does not match the required schema. Fix the errors and call structured_output again:\n"
 local UNKNOWN_TASK_ERR = "unknown task_id"
+local TASK_CLOSED_ERR = "task was despawned before its message was admitted"
 local BODY_INDENT_COLS = 4
 local MIN_MD_WIDTH = 20
 local DEFAULT_OUTPUT_LINES = 5
@@ -221,8 +221,6 @@ local function prepare(input, ctx)
 
   local local_tools
   if validator then
-    -- The handler validates in Lua and reports the result to the driver via
-    -- `maki.agent.report_task_result`, which surfaces it as `captured`.
     -- Invalid input is an inline tool error the model can fix in the same run;
     -- the last validation errors are kept on the tool spec so the composite
     -- can report them if the subagent never commits.
@@ -231,16 +229,13 @@ local function prepare(input, ctx)
         description = STRUCTURED_OUTPUT_DESCRIPTION,
         input_schema = input.output_schema,
         last_errors = nil,
+        capture_input = true,
         handler = function(value)
           local errs = validator:validate(value)
           if errs then
             local spec = local_tools[STRUCTURED_OUTPUT_NAME]
             spec.last_errors = bounded_errors(errs)
             return nil, INVALID_INPUT_PREFIX .. spec.last_errors
-          end
-          local _, commit_err = maki.agent.report_task_result(value)
-          if commit_err then
-            return nil, "no active subagent session"
           end
           return STRUCTURED_OUTPUT_ACK
         end,
@@ -259,7 +254,7 @@ local function prepare(input, ctx)
     nil
 end
 
-local function ctx_opts(spec, input)
+local function ctx_opts(spec, input, turn_semaphore)
   return {
     model_spec = spec.model.spec,
     system = spec.system,
@@ -267,38 +262,62 @@ local function ctx_opts(spec, input)
     local_tools = spec.local_tools,
     audience = spec.audience,
     name = input.description,
+    semaphore = turn_semaphore,
   }
 end
 
-local function spawn(spec, input, ctx)
-  local permit = semaphore:acquire()
-  local ok, sess, sess_err = pcall(function()
-    return maki.agent.session(ctx, ctx_opts(spec, input))
+local function fail_task(task, err)
+  if task.closed then
+    return
+  end
+  task.closed = true
+  task.error = err
+  task.sess:close()
+end
+
+local function enqueue(task, message)
+  if task.closed then
+    return nil, task.error or TASK_CLOSED_ERR
+  end
+  local ok, admitted, admission_err = pcall(function()
+    return task.sess:send(message)
   end)
   if not ok then
-    permit:release()
+    fail_task(task, admitted or TASK_CLOSED_ERR)
+    return nil, admitted or TASK_CLOSED_ERR
+  end
+  if not admitted then
+    fail_task(task, admission_err or TASK_CLOSED_ERR)
+    return nil, admission_err or TASK_CLOSED_ERR
+  end
+  return true, nil
+end
+
+local function spawn(spec, input, ctx)
+  local ok, sess, sess_err = pcall(function()
+    return maki.agent.session(ctx, ctx_opts(spec, input, semaphore))
+  end)
+  if not ok then
     return nil, sess_err
   end
   if sess_err then
-    permit:release()
     return nil, sess_err
   end
   local task_id = sess:session_id()
-  tasks[task_id] = {
+  local task = {
     sess = sess,
-    permit = permit,
+    closed = false,
     validator = spec.local_tools ~= nil,
   }
+  tasks[task_id] = task
   local message = input.prompt
   if spec.local_tools then
     message = message .. STRUCTURED_OUTPUT_PROMPT_SUFFIX
   end
-  local _, send_err = sess:send(message)
-  if send_err then
-    sess:close()
+  local admitted, enqueue_err = enqueue(task, message)
+  if not admitted then
     tasks[task_id] = nil
-    permit:release()
-    return nil, send_err
+    return nil, enqueue_err
   end
   return task_id, nil
 end
@@ -347,6 +366,10 @@ local function get_handler(input)
   if err then
     return { llm_output = err, is_error = true }
   end
+  if task.closed and task.error then
+    status.status = "closed"
+    status.error = task.error
+  end
   return { llm_output = maki.json.encode(status) }
 end
 
@@ -370,8 +393,8 @@ local function send_handler(input)
   if not task then
     return { llm_output = UNKNOWN_TASK_ERR, is_error = true }
   end
-  local _, err = task.sess:send(input.message)
-  if err then
+  local ok, err = enqueue(task, input.message)
+  if not ok then
     return { llm_output = err, is_error = true }
   end
   return { llm_output = maki.json.encode({ queued = true }) }
@@ -393,9 +416,8 @@ local function despawn_handler(input)
   if not task then
     return { llm_output = UNKNOWN_TASK_ERR, is_error = true }
   end
+  fail_task(task, TASK_CLOSED_ERR)
   tasks[input.task_id] = nil
-  task.sess:close()
-  task.permit:release()
   return { llm_output = maki.json.encode({ ok = true }) }
 end
 
@@ -498,7 +520,7 @@ end
 
 maki.api.register_tool({
   name = "task_spawn",
-  description = "Start a background subagent and return its task_id immediately. The main agent stays unblocked. The result is returned automatically when the subagent finishes, so wait for the reply instead of polling task_get. Queue messages with task_send and finish with task_despawn. Also callable from a code_execution script as a Python async function.",
+  description = "Start a background subagent and return its task_id immediately. Each task's messages run FIFO, acquiring concurrency capacity only when each turn starts. The result is returned automatically when the subagent finishes, so wait for the reply instead of polling task_get. Queue messages with task_send and finish with task_despawn. Also callable from a code_execution script as a Python async function.",
   kind = "execute",
   audiences = { "main", "interpreter", "workflow" },
   examples = {},
@@ -524,7 +546,7 @@ maki.api.register_tool({
 
 maki.api.register_tool({
   name = "task_send",
-  description = "Queue a message to a background subagent. A done subagent processes it as a new turn. Returns { queued = true } immediately. Also callable from a code_execution script as a Python async function.",
+  description = "Queue a message to a background subagent in per-task FIFO order and return immediately. A done subagent processes it as a new turn, acquiring concurrency capacity when the turn starts. Returns { queued = true }, or a session error if queueing fails. Also callable from a code_execution script as a Python async function.",
   kind = "execute",
   audiences = { "main", "interpreter", "workflow" },
   examples = {},
@@ -538,7 +560,7 @@ maki.api.register_tool({
 
 maki.api.register_tool({
   name = "task_despawn",
-  description = "Cancel a background subagent, flush its chat transcript, and release its concurrency slot. Returns { ok = true }. Also callable from a code_execution script as a Python async function.",
+  description = "Cancel a background subagent, discard messages not yet admitted, flush its chat transcript, and release active turn permits. Returns { ok = true }. Also callable from a code_execution script as a Python async function.",
   kind = "execute",
   audiences = { "main", "interpreter", "workflow" },
   examples = {},
