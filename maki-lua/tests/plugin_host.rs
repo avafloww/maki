@@ -4577,7 +4577,7 @@ fn frame_has_text(frame: &maki_lua::SplashFrame, needle: &str) -> bool {
 #[test]
 fn test_splash_host_boots_and_serves_frames() {
     let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
-    let frame = wait_for_splash_text(&handle, "luna-maki");
+    let frame = wait_for_splash_text(&handle, "makima");
     assert_eq!(frame.width, 80);
     assert_eq!(frame.height, 20);
     assert!(!frame.rows.is_empty(), "frame has rows");
@@ -4587,8 +4587,8 @@ fn test_splash_host_boots_and_serves_frames() {
 fn test_splash_slot_default() {
     let (handle, _guard) = maki_lua::test_support::spawn_host_for_tests(&["splashes_default"]);
     handle.set_version("0.4.8-luna", None);
-    let frame = wait_for_splash_text(&handle, "luna-maki");
-    assert!(frame_has_text(&frame, "luna-maki"), "{frame:?}");
+    let frame = wait_for_splash_text(&handle, "makima");
+    assert!(frame_has_text(&frame, "makima"), "{frame:?}");
     assert!(
         frame_has_text(&frame, "v0.4.8-luna"),
         "version current in default rows"
@@ -4603,7 +4603,7 @@ fn test_splash_slot_default() {
 
     // A newer version pushed into the Lua store surfaces as the update notice.
     handle.set_version("0.4.8-luna", Some("9.9.9"));
-    let frame = wait_for_splash_text(&handle, "run maki update to get v9.9.9");
+    let frame = wait_for_splash_text(&handle, "run makima update to get v9.9.9");
     assert!(frame_has_text(&frame, "0.4.8-luna"), "still shows current");
 }
 

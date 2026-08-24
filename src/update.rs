@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use maki_storage::version::{self, VersionError};
 use maki_storage::{StateDir, StorageError};
 
-const INSTALL_SCRIPT_URL: &str = "https://maki.sh/install.sh";
+const INSTALL_SCRIPT_URL: &str = "https://makima.ln4.net/install.sh";
 const BACKUP_FILENAME: &str = "maki_backup";
-const INSTALL_DIR_ENV: &str = "MAKI_INSTALL_DIR";
+const INSTALL_DIR_ENV: &str = "MAKIMA_INSTALL_DIR";
 
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
@@ -205,7 +205,7 @@ pub fn update(skip_confirm: bool, no_color: bool) -> Result<(), UpdateError> {
     println!();
     println!("Updated successfully.");
     println!("Previous version saved to: {}", backup_path.display());
-    println!("To restore: maki rollback");
+    println!("To restore: makima rollback");
 
     Ok(())
 }

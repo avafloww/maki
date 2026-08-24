@@ -108,7 +108,7 @@ fn write_theme_section(out: &mut String) {
     writeln!(
         out,
         "Name of the color theme to load at startup, overriding the theme you \
-         last picked interactively. If unset, Maki keeps your last selection \
+         last picked interactively. If unset, Makima keeps your last selection \
          (the built-in default on first run). An unknown name is ignored with \
          a warning.\n"
     )
@@ -122,17 +122,17 @@ fn write_theme_section(out: &mut String) {
     writeln!(
         out,
         "You can add your own themes too. Drop a `<name>.toml` file into \
-         `themes/` inside your Maki config directory, for example \
-         `~/.config/maki/themes/`. If it reuses a built-in name, yours wins.\n"
+         `themes/` inside your Makima config directory, for example \
+         `~/.config/makima/themes/`. If it reuses a built-in name, yours wins.\n"
     )
     .unwrap();
     writeln!(
         out,
-        "Themes use 24-bit colors, but not every terminal can show them. Maki \
+        "Themes use 24-bit colors, but not every terminal can show them. Makima \
          checks the environment, terminfo, and the terminal itself, and when \
          truecolor is missing it quietly falls back to the closest of the 256 \
          classic terminal colors. If detection gets it wrong, set \
-         `MAKI_TRUECOLOR=1` to force truecolor or `MAKI_TRUECOLOR=0` to force \
+         `MAKIMA_TRUECOLOR=1` to force truecolor or `MAKIMA_TRUECOLOR=0` to force \
          the fallback.\n"
     )
     .unwrap();
@@ -215,8 +215,8 @@ Settings go in `init.lua`, a Lua script that calls `maki.setup()`. Same language
 
 Two places, both optional:
 
-- **Global**: `~/.config/maki/init.lua`
-- **Project**: `.maki/init.lua` (relative to your working directory)
+- **Global**: `~/.config/makima/init.lua`
+- **Project**: `.makima/init.lua` (relative to your working directory)
 
 When both exist, project settings override global ones. Neither file is required.
 
@@ -254,7 +254,7 @@ maki.setup({{
 
 All fields are optional. Typos in field names cause an error right away.
 
-`provider.allowed_models` is a list of glob patterns for qualified `provider/model-id` specs. `*` also matches `/`, so `opencode/*` includes nested model IDs. When the list is empty or omitted, every model is allowed. `provider.excluded_models` removes matching models after that, so exclusions always win. A project list replaces the matching global list; omit it to inherit or use `{{}}` to clear it. The policy applies to selectors, CLI and API model changes, delegation, and `maki models`.
+`provider.allowed_models` is a list of glob patterns for qualified `provider/model-id` specs. `*` also matches `/`, so `opencode/*` includes nested model IDs. When the list is empty or omitted, every model is allowed. `provider.excluded_models` removes matching models after that, so exclusions always win. A project list replaces the matching global list; omit it to inherit or use `{{}}` to clear it. The policy applies to selectors, CLI and API model changes, delegation, and `makima models`.
 
 `maki.setup()` can only be called once per init.lua.
 
@@ -292,9 +292,9 @@ All fields are optional. Typos in field names cause an error right away.
          The edit plugin's extra tools are options too: \
          `plugins.edit = {{ multiedit = false, edit_lines = true }}`. \
          The old `tools` table is gone. If your config still uses it, \
-         Maki stops at startup and shows you the new form.\n\n\
+         Makima stops at startup and shows you the new form.\n\n\
          This table is for bundled plugins only. Your own plugins go in \
-         `~/.config/maki/lua/`, see [Plugins](/docs/plugins/).\n"
+         `~/.config/makima/lua/`, see [Plugins](/docs/plugins/).\n"
     )
     .unwrap();
     writeln!(
@@ -316,7 +316,7 @@ maki.setup({{
     writeln!(out, "## Validation\n").unwrap();
     writeln!(
         out,
-        "If a value is below its minimum, Maki shows a `ConfigError` with the field name, \
+        "If a value is below its minimum, Makima shows a `ConfigError` with the field name, \
          value, and minimum."
     )
     .unwrap();
@@ -326,24 +326,24 @@ maki.setup({{
         "
 ## Directory layout
 
-Maki follows platform directory conventions. On Linux and macOS that is XDG. On Windows, config, data, state, and logs all live under Roaming AppData (Windows has no separate state dir in this layout).
+Makima follows platform directory conventions. On Linux and macOS that is XDG. On Windows, config, data, state, and logs all live under Roaming AppData (Windows has no separate state dir in this layout).
 
 | Purpose | Linux / macOS | Windows |
 |---------|---------------|---------|
-| Config | `~/.config/maki/` | `%APPDATA%\\maki\\` |
-| Data | `~/.local/share/maki/` | `%APPDATA%\\maki\\` |
-| State | `~/.local/state/maki/` | `%APPDATA%\\maki\\` |
-| Logs | `~/.local/logs/maki/` | `%APPDATA%\\maki\\` |
-| Cache | `~/.cache/maki/` | `%LOCALAPPDATA%\\maki\\` |
+| Config | `~/.config/makima/` | `%APPDATA%\\makima\\` |
+| Data | `~/.local/share/makima/` | `%APPDATA%\\makima\\` |
+| State | `~/.local/state/makima/` | `%APPDATA%\\makima\\` |
+| Logs | `~/.local/logs/makima/` | `%APPDATA%\\makima\\` |
+| Cache | `~/.cache/makima/` | `%LOCALAPPDATA%\\makima\\` |
 
-Config holds `init.lua`, `permissions.toml`, `mcp.toml`, `providers.toml`, and `commands/`. State holds sessions, auth tokens, memories, plans, and model-tier overrides. The install script puts the binary under `%LOCALAPPDATA%\\maki` on Windows; that is separate from these runtime dirs.
+Config holds `init.lua`, `permissions.toml`, `mcp.toml`, `providers.toml`, and `commands/`. State holds sessions, auth tokens, memories, plans, and model-tier overrides. The install script puts the binary under `%LOCALAPPDATA%\\makima` on Windows; that is separate from these runtime dirs.
 
-`~/.maki/` (or `%USERPROFILE%\\.maki\\`) is checked as a legacy fallback. If that directory still exists, maki uses it for everything until you migrate.
+`~/.makima/` (or `%USERPROFILE%\\.makima\\`) is checked as a legacy fallback. If that directory still exists, maki uses it for everything until you migrate.
 
-### Migrating from ~/.maki/
+### Migrating from ~/.makima/
 
 ```
-maki migrate xdg
+makima migrate xdg
 ```
 
 This safely moves sessions, auth, plans, memories, logs, and preferences to the platform locations above. Where both old and new files exist, they are merged (input history, model tiers, etc.). Nothing is deleted until it has been copied. At the end you get a summary of where everything lives now.
@@ -352,10 +352,10 @@ Safe to run more than once.
 
 ## Personal Instructions
 
-On top of the project instruction files Maki loads from the git root down to the cwd (`AGENTS.md`, `CLAUDE.md`, and friends; see [Context](/docs/context/#instruction-files)), you can add:
+On top of the project instruction files Makima loads from the git root down to the cwd (`AGENTS.md`, `CLAUDE.md`, and friends; see [Context](/docs/context/#instruction-files)), you can add:
 
 - `AGENTS.local.md` in any of those project directories for per-directory preferences (gitignored)
-- `~/.config/maki/AGENTS.md` for preferences that apply to all projects
+- `~/.config/makima/AGENTS.md` for preferences that apply to all projects
 
 All of these are added to the system prompt at the start of every session.
 
@@ -363,9 +363,9 @@ All of these are added to the system prompt at the start of every session.
 
 The `memory` tool and `/memory` command store small Markdown notes under the state directory, scoped per project:
 
-`…/state/maki/projects/<project-id>/memories/`
+`…/state/makima/projects/<project-id>/memories/`
 
-(Linux/macOS: `~/.local/state/maki/…`; Windows: `%APPDATA%\\maki\\…`). Use them for non-obvious gotchas and decisions that should survive across sessions. They are separate from skills and from `AGENTS.md`.
+(Linux/macOS: `~/.local/state/makima/…`; Windows: `%APPDATA%\\makima\\…`). Use them for non-obvious gotchas and decisions that should survive across sessions. They are separate from skills and from `AGENTS.md`.
 
 Related pages: [Skills](/docs/skills/), [CLI](/docs/cli/), [Providers](/docs/providers/#providers-toml)."
     )

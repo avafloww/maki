@@ -7,14 +7,14 @@ group = "Reference"
 
 # CLI
 
-`maki` without a subcommand starts the TUI. Subcommands cover auth, models, MCP OAuth, updates, and a few debug helpers. Many flags only apply to one of three run paths: **TUI**, one-shot **`--print`**, or **SDK** (`--print --input-format stream-json`).
+`makima` without a subcommand starts the TUI. Subcommands cover auth, models, MCP OAuth, updates, and a few debug helpers. Many flags only apply to one of three run paths: **TUI**, one-shot **`--print`**, or **SDK** (`--print --input-format stream-json`).
 
 ```bash
-maki [OPTIONS] [PROMPT]
-maki <COMMAND>
+makima [OPTIONS] [PROMPT]
+makima <COMMAND>
 ```
 
-If you pass a prompt (or pipe stdin) without `--print`, the TUI still opens and that text is the first message. With `--print`, Maki runs non-interactively and exits when done.
+If you pass a prompt (or pipe stdin) without `--print`, the TUI still opens and that text is the first message. With `--print`, Makima runs non-interactively and exits when done.
 
 ## Flags by run path
 
@@ -45,7 +45,7 @@ If you pass a prompt (or pipe stdin) without `--print`, the TUI still opens and 
 | `-s`, `--session` / `--resume <ID>` | Resume a specific session (TUI / SDK only) |
 | `--output-format <text\|json\|stream-json>` | Output shape for `--print` (default `text`) |
 | `--input-format <text\|stream-json>` | With `--print`, `stream-json` enters SDK mode |
-| `--no-commands` | Skip custom commands from `.maki/commands`, `.claude/commands`, etc. |
+| `--no-commands` | Skip custom commands from `.makima/commands`, `.claude/commands`, etc. |
 | `--no-rtk` | Disable [rtk](https://github.com/rtk-ai/rtk) command rewriting |
 | `--no-plugins` | Skip user `init.lua` (global and project); keep the Lua host and builtin plugins so tools and the default keymap still load |
 | `--no-jit` | Run plugin Lua on the interpreter with full debug info |
@@ -63,7 +63,7 @@ If you pass a prompt (or pipe stdin) without `--print`, the TUI still opens and 
 
 ### Tool name lists
 
-`--allowed-tools` / `--disallowed-tools` accept Claude Code PascalCase (`Read,Edit,Bash`) or snake_case (`read,edit,bash`). Maki lowercases PascalCase to snake_case and checks the result against the built-in tool names, so `CodeExecution` works but `MultiEdit` errors: it normalizes to `multi_edit`, and the tool is called `multiedit`. Write `multiedit` or `edit_lines` as-is. Unknown names error out with the list of valid names. The opt-in edit tools (`edit_lines`, `insert_lines`, `multiedit`) are always valid names here, even while disabled; listing one does nothing until you enable the tool in config.
+`--allowed-tools` / `--disallowed-tools` accept Claude Code PascalCase (`Read,Edit,Bash`) or snake_case (`read,edit,bash`). Makima lowercases PascalCase to snake_case and checks the result against the built-in tool names, so `CodeExecution` works but `MultiEdit` errors: it normalizes to `multi_edit`, and the tool is called `multiedit`. Write `multiedit` or `edit_lines` as-is. Unknown names error out with the list of valid names. The opt-in edit tools (`edit_lines`, `insert_lines`, `multiedit`) are always valid names here, even while disabled; listing one does nothing until you enable the tool in config.
 
 ### Permission modes (SDK)
 
@@ -76,104 +76,104 @@ If you pass a prompt (or pipe stdin) without `--print`, the TUI still opens and 
 
 If both `--yolo` and `--permission-mode` are set, the explicit mode wins. Unknown mode names warn and fall back to `default`.
 
-Several other Claude Code flags are accepted and ignored so existing scripts keep parsing. Maki prints a warning when you pass one of them.
+Several other Claude Code flags are accepted and ignored so existing scripts keep parsing. Makima prints a warning when you pass one of them.
 
 ## Subcommands
 
-### `maki auth`
+### `makima auth`
 
 ```bash
-maki auth login [provider]   # interactive picker if omitted
-maki auth logout <provider>
-maki auth status
+makima auth login [provider]   # interactive picker if omitted
+makima auth logout <provider>
+makima auth status
 ```
 
 `login` stores credentials under the state directory and can write plan / base URL choices into `providers.toml` (see [Configuration](/docs/configuration/#directory-layout) for the platform path). OpenAI and Copilot have dedicated flows; other providers prompt for a key (and a plan when the provider has more than one). Custom providers can be created from the interactive picker.
 
 `status` shows each provider as configured (key on disk), env-only, or missing.
 
-### `maki models`
+### `makima models`
 
-Lists every model Maki currently knows about (built-ins, discovered, catalog). One model spec per line. Warnings from discovery go to stderr.
+Lists every model Makima currently knows about (built-ins, discovered, catalog). One model spec per line. Warnings from discovery go to stderr.
 
-### `maki mcp`
+### `makima mcp`
 
 ```bash
-maki mcp auth <server>     # OAuth for an HTTP MCP server
-maki mcp logout <server>   # drop stored tokens
+makima mcp auth <server>     # OAuth for an HTTP MCP server
+makima mcp logout <server>   # drop stored tokens
 ```
 
 Server names come from your [MCP config](/docs/mcp/). On a machine without a browser, `auth` prints a URL you open elsewhere and paste back.
 
-### `maki update` / `maki rollback`
+### `makima update` / `makima rollback`
 
 ```bash
-maki update            # install latest release
-maki update -y         # skip confirmation
-maki update --no-color
-maki rollback          # previous version
+makima update            # install latest release
+makima update -y         # skip confirmation
+makima update --no-color
+makima rollback          # previous version
 ```
 
 Uses the same install locations as the install scripts.
 
-### `maki acp`
+### `makima acp`
 
 ```bash
-maki acp
-maki acp -m anthropic/claude-sonnet-4-6
-maki acp --yolo
-maki --no-jit acp
+makima acp
+makima acp -m anthropic/claude-sonnet-4-6
+makima acp --yolo
+makima --no-jit acp
 ```
 
 Starts an [ACP](/docs/acp/) server on stdio for editors like Zed. Subcommand flags are only `-m` / `--model` and `--yolo`. Global flags like `--no-jit` must come before the subcommand.
 
-### `maki index`
+### `makima index`
 
 ```bash
-maki index path/to/file.rs
+makima index path/to/file.rs
 ```
 
 Runs the `index` tool on a file and prints the skeleton, so you can see what the agent will get before a session. Builtin plugins always load here; `--no-plugins` only skips user `init.lua`.
 
-### `maki prompt`
+### `makima prompt`
 
 ```bash
-maki prompt                  # rendered system prompt (default: system variant)
-maki prompt research
-maki prompt general
-maki prompt --plan           # system prompt + plan-mode reminder (system only)
-maki prompt --tools          # tool definitions as JSON
-maki prompt --tools --names  # tool names only, one per line
+makima prompt                  # rendered system prompt (default: system variant)
+makima prompt research
+makima prompt general
+makima prompt --plan           # system prompt + plan-mode reminder (system only)
+makima prompt --tools          # tool definitions as JSON
+makima prompt --tools --names  # tool names only, one per line
 ```
 
 Debug helper for inspecting the prompt and tool surface the agent sees. `--plan` is rejected on non-system variants.
 
-### `maki migrate`
+### `makima migrate`
 
 ```bash
-maki migrate xdg
+makima migrate xdg
 ```
 
-Moves data from `~/.maki/` into platform directories. Safe to re-run. See [Configuration](/docs/configuration/#directory-layout).
+Moves data from `~/.makima/` into platform directories. Safe to re-run. See [Configuration](/docs/configuration/#directory-layout).
 
 ## Everyday examples
 
 ```bash
 # TUI on a project
-cd ~/code/my-app && maki
+cd ~/code/my-app && makima
 
 # One-shot with YOLO and a model pin
-maki -p --yolo -m anthropic/claude-sonnet-4-6 "summarize the architecture"
+makima -p --yolo -m anthropic/claude-sonnet-4-6 "summarize the architecture"
 
 # Resume yesterday's session
-maki --continue
+makima --continue
 
 # List models, then log in
-maki models
-maki auth login
+makima models
+makima auth login
 
 # Inspect tools without starting a session
-maki prompt --tools --names
+makima prompt --tools --names
 ```
 
 For JSON / stream-json output, stdin prompts, and SDK wire mode, see [Headless Mode](/docs/headless/).

@@ -226,7 +226,7 @@ mod tests {
 
     use super::*;
 
-    const PLAN_PATH: &str = ".maki/plans/123.md";
+    const PLAN_PATH: &str = ".makima/plans/123.md";
 
     #[test_case(&AgentMode::Build, false ; "build_excludes_plan")]
     #[test_case(&AgentMode::Plan(PathBuf::from(PLAN_PATH)), true ; "plan_includes_plan")]
@@ -389,8 +389,12 @@ mod tests {
     fn load_instructions_includes_global_from_home() {
         let cwd = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
-        fs::create_dir_all(home.path().join(".maki")).unwrap();
-        fs::write(home.path().join(".maki").join("AGENTS.md"), "global rules").unwrap();
+        fs::create_dir_all(home.path().join(".makima")).unwrap();
+        fs::write(
+            home.path().join(".makima").join("AGENTS.md"),
+            "global rules",
+        )
+        .unwrap();
 
         let text =
             load_instructions_with_home(cwd.path().to_str().unwrap(), Some(home.path()), None).text;

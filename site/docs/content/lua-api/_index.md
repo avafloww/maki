@@ -18,7 +18,7 @@ The API tries to mirror Neovim as much as possible (`maki.fs`, `maki.uv`,
 so code can be copy-pasted between the two without too many modifications.
 
 Plugins run compiled to native code (Luau JIT). If you are debugging a
-plugin and want full backtraces, start maki with `--no-jit`: it runs your
+plugin and want full backtraces, start makima with `--no-jit`: it runs your
 Lua on the interpreter with complete debug info instead.
 
 A small plugin looks like this:
@@ -60,7 +60,7 @@ A gated call without its permission raises
 `permission denied: '<name>' not granted for this plugin`.
 
 Grants come from a `plugin.toml` next to the Lua file (for
-`~/.config/maki/init.lua` that is `~/.config/maki/plugin.toml`):
+`~/.config/makima/init.lua` that is `~/.config/makima/plugin.toml`):
 
 ```toml
 [permissions]
@@ -73,7 +73,7 @@ env = true
 
 The rules:
 
-- No `plugin.toml` at all: every permission is denied, and maki logs a
+- No `plugin.toml` at all: every permission is denied, and makima logs a
   warning at load time.
 - `plugin.toml` exists: permissions default to granted; set a key to
   `false` to revoke it. An empty file grants everything.
@@ -92,7 +92,7 @@ The rules:
 | [`maki.async.Semaphore`](#maki-async-Semaphore) | A counting semaphore for limiting how many tasks run at once. |
 | [`maki.async.Permit`](#maki-async-Permit) | One slot in a semaphore, obtained from `Semaphore:acquire()`. |
 | [`maki.base64`](#maki-base64) | Base64 encoding and decoding, modelled after `vim.base64`. |
-| [`maki.env`](#maki-env) | Paths to maki's own directories (config, state, logs, legacy). |
+| [`maki.env`](#maki-env) | Paths to makima's own directories (config, state, logs, legacy). |
 | [`maki.fn`](#maki-fn) | Process and environment helpers, modeled after Neovim's `vim.fn` job |
 | [`maki.fs`](#maki-fs) | File-system utilities, modelled after `vim.fs` and `vim.uv`. |
 | [`maki.image`](#maki-image) | Small building blocks for working with images: probe metadata, decode |
@@ -189,7 +189,7 @@ maki.split("\nhello\nworld\n", "\n", { trimempty = true }) -- { "hello", "world"
 maki.version()
 ```
 
-Read the current maki version and, if the built-in update check found one, the newer version. Rust owns the update check; plugins only mirror it, so the version text and update notice belong to whoever draws them.
+Read the current makima version and, if the built-in update check found one, the newer version. Rust owns the update check; plugins only mirror it, so the version text and update notice belong to whoever draws them.
 
 **Returns:** (`table`) { current = string, latest = string|nil, update_available = boolean }
 
@@ -198,14 +198,14 @@ Read the current maki version and, if the built-in update check found one, the n
 ```lua
 local v = maki.version()
 if v.update_available then
-  print("run maki update to get v" .. v.latest)
+  print("run makima update to get v" .. v.latest)
 end
 ```
 
 
 ## maki.api {#maki-api}
 
-Plugin registration. This is where you tell maki about your tools,
+Plugin registration. This is where you tell makima about your tools,
 slash commands, and prompt contributions.
 
 Most plugins only need `register_tool` and maybe `register_prompt_hint`.
@@ -974,7 +974,7 @@ prompt for a subagent session.
   Optional fields:
 
   - `instructions` (`string|boolean?`) extra text appended to the prompt.
-    `true` loads instructions from the project `.maki/instructions` file.
+    `true` loads instructions from the project `.makima/instructions` file.
     `false` or nil omits them.
 
 **Returns:** (`string?`, `string?`) The assembled prompt string, or `(nil, err)` on failure.
@@ -1578,7 +1578,7 @@ maki.base64.decode("aGVsbG8=") -- "hello"
 
 ## maki.env {#maki-env}
 
-Paths to maki's own directories (config, state, logs, legacy).
+Paths to makima's own directories (config, state, logs, legacy).
 
 Use these to locate config files or persistent state without hard-coding paths.
 
@@ -1594,8 +1594,8 @@ local cfg = maki.env.config_dir()
 maki.env.state_dir()
 ```
 
-Return the directory where maki stores runtime state (sessions, auth tokens, etc.).
-Typically something like `~/.local/state/maki`.
+Return the directory where makima stores runtime state (sessions, auth tokens, etc.).
+Typically something like `~/.local/state/makima`.
 
 Requires the `env` [plugin permission](#plugin-permissions).
 
@@ -1615,8 +1615,8 @@ local dir = maki.env.state_dir()
 maki.env.config_dir()
 ```
 
-Return the directory where maki looks for user configuration files.
-Typically something like `~/.config/maki`.
+Return the directory where makima looks for user configuration files.
+Typically something like `~/.config/makima`.
 
 Requires the `env` [plugin permission](#plugin-permissions).
 
@@ -1637,7 +1637,7 @@ maki.env.logs_dir()
 ```
 
 Return the directory where maki writes its log files (`maki.log`).
-Typically something like `~/.local/logs/maki`.
+Typically something like `~/.local/logs/makima`.
 
 Requires the `env` [plugin permission](#plugin-permissions).
 
@@ -1657,7 +1657,7 @@ local dir = maki.env.logs_dir()
 maki.env.legacy_dir()
 ```
 
-Return the legacy config path (`~/.maki`), if it exists on disk.
+Return the legacy config path (`~/.makima`), if it exists on disk.
 Useful for migration logic. Returns nil when there is no legacy directory.
 
 Requires the `env` [plugin permission](#plugin-permissions).
@@ -2780,7 +2780,7 @@ maki.keymap.del("n", "<C-t>")
 Structured logging for plugins.
 
 Each call emits a tracing event tagged with the calling plugin's name.
-Messages show up in maki's log output, which you can view with `maki --log`.
+Messages show up in makima's log output, which you can view with `makima --log`.
 
 ```lua
 maki.log.info("ready")

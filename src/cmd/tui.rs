@@ -361,7 +361,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
         match outcome {
             RunOutcome::Exit { session_id, code } => {
                 if let Some(session_id) = session_id {
-                    eprintln!("Resume session:\n\n  maki -s {session_id}");
+                    eprintln!("Resume session:\n\n  makima -s {session_id}");
                 }
                 let started = Instant::now();
                 drop(stack);
@@ -413,13 +413,13 @@ pub fn run(mut cli: Cli) -> Result<()> {
 fn warn_stale_config_toml(cwd: &std::path::Path) {
     let stale_paths = [
         maki_config::global_config_dir().map(|d| d.join("config.toml")),
-        Some(cwd.join(".maki/config.toml")),
+        Some(cwd.join(".makima/config.toml")),
     ];
     for path in stale_paths.into_iter().flatten() {
         if path.is_file() {
             tracing::warn!(
                 path = %path.display(),
-                "config.toml found but no longer used. Migrate to init.lua. See https://maki.sh/docs/configuration/"
+                "config.toml found but no longer used. Migrate to init.lua. See https://makima.ln4.net/docs/configuration/"
             );
         }
     }
@@ -533,15 +533,15 @@ mod tests {
         use tempfile::tempdir;
 
         let dir = tempdir().expect("tempdir");
-        let maki_dir: PathBuf = dir.path().join(".maki");
-        fs::create_dir_all(&maki_dir).expect("mkdir .maki");
+        let maki_dir: PathBuf = dir.path().join(".makima");
+        fs::create_dir_all(&maki_dir).expect("mkdir .makima");
         fs::write(
             maki_dir.join("init.lua"),
             "error('broken init lua must not run')",
         )
         .expect("write init.lua");
 
-        let cli = Cli::parse_from(["maki", "--no-plugins"]);
+        let cli = Cli::parse_from(["makima", "--no-plugins"]);
         assert!(cli.no_plugins);
 
         let mut plugin_host = PluginHost::with_jit(Arc::new(ToolRegistry::new()), true)
@@ -571,15 +571,15 @@ mod tests {
         use tempfile::tempdir;
 
         let dir = tempdir().expect("tempdir");
-        let maki_dir: PathBuf = dir.path().join(".maki");
-        fs::create_dir_all(&maki_dir).expect("mkdir .maki");
+        let maki_dir: PathBuf = dir.path().join(".makima");
+        fs::create_dir_all(&maki_dir).expect("mkdir .makima");
         fs::write(
             maki_dir.join("init.lua"),
             "error('broken init lua must not run')",
         )
         .expect("write init.lua");
 
-        let cli = Cli::parse_from(["maki"]);
+        let cli = Cli::parse_from(["makima"]);
         assert!(!cli.no_plugins);
 
         let mut plugin_host =

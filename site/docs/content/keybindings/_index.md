@@ -119,10 +119,10 @@ The `/help` modal and the splash show default labels, not live overrides, but pr
 
 ### Recovering from a bad keymap
 
-If an override leaves Maki stuck (a rebound `Ctrl+C`, a modal that won't close, a plugin that throws on load), boot without user `init.lua`:
+If an override leaves Makima stuck (a rebound `Ctrl+C`, a modal that won't close, a plugin that throws on load), boot without user `init.lua`:
 
 ```bash
-maki --no-plugins
+makima --no-plugins
 ```
 
 Skips user `init.lua` files (global and project) but keeps the Lua host and builtin plugins running, so tools still work. `permissions.toml`, custom commands, and env files load as usual.

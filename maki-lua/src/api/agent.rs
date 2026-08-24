@@ -231,7 +231,7 @@ async fn resolve_model(
 ///   `prompt_id` (string) - one of `"research"`, `"general"`, `"system"`.
 /// Optional fields:
 ///   `instructions` (string|boolean?) - extra text appended to the prompt.
-///     `true` loads instructions from the project `.maki/instructions` file.
+///     `true` loads instructions from the project `.makima/instructions` file.
 ///     `false` or nil omits them.
 /// @return (string?, string?) The assembled prompt string, or `(nil, err)` on failure.
 /// @example

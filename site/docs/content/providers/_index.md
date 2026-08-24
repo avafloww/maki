@@ -7,27 +7,27 @@ group = "Reference"
 
 # Providers
 
-Maki talks to LLM providers over their HTTP APIs. Models are split into three tiers: **weak** (cheap and fast), **medium** (balanced), and **strong** (highest capability, highest cost). There is also a **compaction** tier for choosing a dedicated model to summarize context when the conversation grows long.
+Makima talks to LLM providers over their HTTP APIs. Models are split into three tiers: **weak** (cheap and fast), **medium** (balanced), and **strong** (highest capability, highest cost). There is also a **compaction** tier for choosing a dedicated model to summarize context when the conversation grows long.
 
-Open the model picker with `/model` and press `!`, `@`, `#`, or `$` on any row to assign it to strong, medium, weak, or compaction. Press the same key again to remove the assignment. Your overrides are saved to `~/.local/state/maki/model-tiers` and apply across sessions.
+Open the model picker with `/model` and press `!`, `@`, `#`, or `$` on any row to assign it to strong, medium, weak, or compaction. Press the same key again to remove the assignment. Your overrides are saved to `~/.local/state/makima/model-tiers` and apply across sessions.
 
 ## Auth Reloading
 
-Maki re-reads auth from storage and environment variables each time a new agent spawns (`/new`, retry, session load). If you run `maki auth login` in another terminal or change an env var, the next session picks it up without a restart.
+Makima re-reads auth from storage and environment variables each time a new agent spawns (`/new`, retry, session load). If you run `makima auth login` in another terminal or change an env var, the next session picks it up without a restart.
 
 You can set multiple API keys in one env var (`ANTHROPIC_API_KEY=sk-1,sk-2,sk-3`) and they rotate automatically on rate-limit or auth errors.
 
 ## Base URL Overrides
 
-Every provider honors a `<SLUG>_BASE_URL` env var (`anthropic` -> `ANTHROPIC_BASE_URL`, `llama-cpp` -> `LLAMA_CPP_BASE_URL`). Set it to the origin of a proxy or a compatible endpoint and Maki appends the API paths itself:
+Every provider honors a `<SLUG>_BASE_URL` env var (`anthropic` -> `ANTHROPIC_BASE_URL`, `llama-cpp` -> `LLAMA_CPP_BASE_URL`). Set it to the origin of a proxy or a compatible endpoint and Makima appends the API paths itself:
 
 ```sh
-ANTHROPIC_BASE_URL=https://my-proxy.internal maki
+ANTHROPIC_BASE_URL=https://my-proxy.internal makima
 ```
 
 It wins over `providers.toml` and built-in defaults. `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` are the same names the official SDKs use, so an existing proxy setup carries over as is. Two exceptions: `OPENAI_BASE_URL` only redirects the platform API, never the ChatGPT Coding Plan backend; `XAI_BASE_URL` only redirects the public API-key endpoint, never the OAuth CLI proxy.
 
-You can also set `base_url` for a built-in provider in `~/.config/maki/providers.toml`. It overrides the built-in default and loses to the env var above:
+You can also set `base_url` for a built-in provider in `~/.config/makima/providers.toml`. It overrides the built-in default and loses to the env var above:
 
 ```toml
 [openai]
@@ -65,7 +65,7 @@ Add `-1m` to any Claude model, like `claude-sonnet-4-6-1m`, to use the 1M token 
 
 #### Amazon Bedrock
 
-If you already use Claude through AWS Bedrock, you can point Maki at it instead of the direct Anthropic API. Set `CLAUDE_CODE_USE_BEDROCK=1` and Maki will route all Anthropic requests through Bedrock. The same models, the same features, just a different door.
+If you already use Claude through AWS Bedrock, you can point Makima at it instead of the direct Anthropic API. Set `CLAUDE_CODE_USE_BEDROCK=1` and Makima will route all Anthropic requests through Bedrock. The same models, the same features, just a different door.
 
 You will need `AWS_REGION` and one of the following for auth:
 
@@ -111,7 +111,7 @@ You can use OpenAI two ways.
 
 **API key** — Set `OPENAI_API_KEY` or pick `OpenAI (API key)` in `/login` and paste a key from [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
 
-**ChatGPT subscription** — Use OpenAI Codex through your ChatGPT login instead. Run `maki auth login openai` or pick `OpenAI Codex (ChatGPT login)` in `/login`. Maki guides you through the OAuth device flow at [auth.openai.com/codex](https://auth.openai.com/codex) and stores your OAuth tokens, which take precedence over the API key.
+**ChatGPT subscription** — Use OpenAI Codex through your ChatGPT login instead. Run `makima auth login openai` or pick `OpenAI Codex (ChatGPT login)` in `/login`. Makima guides you through the OAuth device flow at [auth.openai.com/codex](https://auth.openai.com/codex) and stores your OAuth tokens, which take precedence over the API key.
 
 ### Google
 
@@ -129,7 +129,7 @@ Defaults: gemini-2.5-pro (strong), gemini-2.5-flash (medium), gemini-2.0-flash-l
 
 ### Copilot
 
-- **Env var**: `GH_COPILOT_TOKEN` (or run `maki auth login copilot` to import a token from gh CLI, the Copilot client, or the system keyring)
+- **Env var**: `GH_COPILOT_TOKEN` (or run `makima auth login copilot` to import a token from gh CLI, the Copilot client, or the system keyring)
 - **API**: `https://api.githubcopilot.com (or GraphQL-discovered Copilot API endpoint)`
 - **Features**: Native Copilot Chat HTTP API with model endpoint discovery
 
@@ -263,7 +263,7 @@ No hardcoded model catalog. Use any model ID supported by this provider.
 
 No hardcoded model catalog. Use any model ID supported by this provider.
 
-By default Maki hides free models from the Opencode catalog. To list free models (they use a public fallback, no API key needed), add this to `~/.config/maki/providers.toml`:
+By default Makima hides free models from the Opencode catalog. To list free models (they use a public fallback, no API key needed), add this to `~/.config/makima/providers.toml`:
 
 ```toml
 [opencode]
@@ -274,7 +274,7 @@ The default is `false`.
 
 ### xAI
 
-- **Env var**: `XAI_API_KEY` (also supports OAuth via `maki auth login xai`)
+- **Env var**: `XAI_API_KEY` (also supports OAuth via `makima auth login xai`)
 - **API endpoints**:
   - `https://api.x.ai/v1`
   - `https://cli-chat-proxy.grok.com/v1`
@@ -288,7 +288,7 @@ The default is `false`.
 
 Defaults: grok-4.6 (strong), grok-4.3 (medium)
 
-OAuth uses the same first-party xAI client as the official Grok CLI (`maki auth login xai`). Browser login (PKCE) is the desktop default; device code is recommended over SSH or in a container. Tokens refresh automatically. After login, Maki fetches your account catalog from `GET /v1/models-v2` on the Grok CLI proxy and caches it for 15 minutes. `XAI_BASE_URL` only redirects the public API-key endpoint, never the OAuth proxy.
+OAuth uses the same first-party xAI client as the official Grok CLI (`makima auth login xai`). Browser login (PKCE) is the desktop default; device code is recommended over SSH or in a container. Tokens refresh automatically. After login, Makima fetches your account catalog from `GET /v1/models-v2` on the Grok CLI proxy and caches it for 15 minutes. `XAI_BASE_URL` only redirects the public API-key endpoint, never the OAuth proxy.
 
 If `~/.grok/auth.json` already exists, login offers to reuse it without writing that file.
 
@@ -324,7 +324,7 @@ If the model name is unique across providers, the prefix can be omitted.
 
 ## providers.toml
 
-`providers.toml` lives in the config directory (`~/.config/maki/providers.toml` on Linux/macOS, `%APPDATA%\maki\providers.toml` on Windows). It is the file for provider overrides and custom HTTP providers. Two jobs:
+`providers.toml` lives in the config directory (`~/.config/makima/providers.toml` on Linux/macOS, `%APPDATA%\makima\providers.toml` on Windows). It is the file for provider overrides and custom HTTP providers. Two jobs:
 
 1. Tweak a built-in (pick a plan, change its base URL, set `enable_free_models` for Opencode).
 2. Declare a custom provider that speaks OpenAI, Anthropic, or Google wire format.
@@ -366,10 +366,10 @@ supports_vision = false
 |-------|------|-------|
 | `display_name` | string | Shown in pickers and auth status |
 | `protocol` | string | `openai`, `openai-responses`, `anthropic`, or `google`. Required for custom slugs |
-| `base_url` | string | Origin of the API. Maki appends the protocol paths |
+| `base_url` | string | Origin of the API. Makima appends the protocol paths |
 | `plan` | string | Built-in plan key (see Plans below). Sets base URL and default model |
 | `api_key_env` | string | Env var that holds the key. Defaults to `<SLUG>_API_KEY` |
-| `api_key` | string | Inline key (prefer the env var or `maki auth login`) |
+| `api_key` | string | Inline key (prefer the env var or `makima auth login`) |
 | `default_model` | string | Used after login when no model is saved yet |
 | `discover_models` | bool | When true, also probe the provider's model list endpoint (default false) |
 | `enable_free_models` | bool | Opencode only. Show free catalog models (default false) |
@@ -394,7 +394,7 @@ supports_vision = false
 
 Custom slugs must not reuse a built-in provider name. A bad TOML parse exits with code 2 at startup so a typo cannot silently empty the registry.
 
-You can also create a custom provider interactively with `maki auth login` and choosing the custom option. That writes a starter entry to this file.
+You can also create a custom provider interactively with `makima auth login` and choosing the custom option. That writes a starter entry to this file.
 
 ### Aperture overrides
 
@@ -413,11 +413,11 @@ supports_vision = true
 
 Provider-level fields apply to every model from that upstream; per-model entries under `models` win field by field. Fields: `context_window`, `max_output_tokens`, `supports_thinking`, `supports_vision`, `base` (remaps an opaque vendor to a native provider; e.g. `llama-cpp`, `google`, `anthropic`), and `path_prefix`. Model ids containing dots must be quoted (`"qwen3.6"`) since TOML treats a bare dotted key as a nested table.
 
-Maki sends `/v1` (or `/v1beta` for Gemini routes, nothing for Anthropic and Z.AI), and Aperture appends that path to the upstream's base url. If an upstream base url already carries its own path, set `path_prefix = ""` for it to avoid a doubled path. Z.AI defaults to no prefix since its API path has no `/v1` segment; point the upstream base url at the full API root (e.g. `https://api.z.ai/api/paas/v4`).
+Makima sends `/v1` (or `/v1beta` for Gemini routes, nothing for Anthropic and Z.AI), and Aperture appends that path to the upstream's base url. If an upstream base url already carries its own path, set `path_prefix = ""` for it to avoid a doubled path. Z.AI defaults to no prefix since its API path has no `/v1` segment; point the upstream base url at the full API root (e.g. `https://api.z.ai/api/paas/v4`).
 
 ### Plans
 
-Some built-ins ship multiple plans (different base URLs or default models). `maki auth login <provider>` asks which plan to use when more than one exists. You can also set it in TOML:
+Some built-ins ship multiple plans (different base URLs or default models). `makima auth login <provider>` asks which plan to use when more than one exists. You can also set it in TOML:
 
 ```toml
 [mistral]
@@ -440,7 +440,7 @@ Env `<SLUG>_BASE_URL` still wins over both the plan and a `base_url` in this fil
 
 ## Dynamic Providers
 
-To add a custom provider or proxy, drop an executable script into the config `providers/` directory (`~/.config/maki/providers/` on Linux/macOS, `%APPDATA%\maki\providers\` on Windows). The script must handle these subcommands:
+To add a custom provider or proxy, drop an executable script into the config `providers/` directory (`~/.config/makima/providers/` on Linux/macOS, `%APPDATA%\makima\providers\` on Windows). The script must handle these subcommands:
 
 | Subcommand | Timeout | What it does |
 |------------|---------|--------|
@@ -463,7 +463,7 @@ If your provider serves models not in the base catalog, add a `models` subcomman
 
 Only `id` is required. Optional fields: `tier` (default `medium`), `context_window` (128K), `max_output_tokens` (16K), `pricing` (`{input, output, cache_write, cache_read}`, all per 1M tokens), `supports_tool_examples` (defaults to the base provider's setting), `supports_thinking` (defaults to the base provider's setting), `requires_thinking` (default false; for APIs that reject requests with thinking off, raises it to minimal effort and implies `supports_thinking`), `supports_vision` (defaults to the base provider's setting; when false, image input and the `view_image` tool are disabled). The first model listed per tier is used for sub-agents. Without this subcommand, the base provider's models are used.
 
-A `llama-cpp` model can replace Maki's token-budget mapping with its native thinking fields. Each thinking mode maps to a JSON fragment merged into the request body:
+A `llama-cpp` model can replace Makima's token-budget mapping with its native thinking fields. Each thinking mode maps to a JSON fragment merged into the request body:
 
 ```json
 [{

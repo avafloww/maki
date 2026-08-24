@@ -14,8 +14,8 @@ use crate::{
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use super::{KeyPool, ResolvedAuth};
 
-const REFERER: &str = "https://maki.sh";
-const APP_TITLE: &str = "maki";
+const REFERER: &str = "https://makima.ln4.net";
+const APP_TITLE: &str = "Makima";
 const PER_MILLION: f64 = 1_000_000.0;
 
 static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {

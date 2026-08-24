@@ -7,7 +7,7 @@ group = "Reference"
 
 # Permissions
 
-Maki uses a permission system to decide what each tool is allowed to do and when to ask you first.
+Makima uses a permission system to decide what each tool is allowed to do and when to ask you first.
 
 Rules come from four layers, combined for resolution:
 
@@ -52,7 +52,7 @@ File-write tools are pre-allowed inside the project working directory (cwd at se
 | `insert_lines` | `<cwd>/**` | Same, when the opt-in tool is enabled |
 | `task` | `*` | Subagent spawning always allowed |
 
-The memory plugin uses a plugin rule to pre-allow the file-write tools inside its notes directory (under maki's state dir), so the agent can edit memory notes directly without a prompt.
+The memory plugin uses a plugin rule to pre-allow the file-write tools inside its notes directory (under makima's state dir), so the agent can edit memory notes directly without a prompt.
 
 These tools have no builtin allow rule, so they prompt (or follow your `default`) every time unless you add rules:
 
@@ -68,8 +68,8 @@ Container tools like `batch` and `code_execution` prompt for each inner tool ind
 
 There are two permission files:
 
-- **Global**: `~/.config/maki/permissions.toml`
-- **Project**: `.maki/permissions.toml` (takes precedence over global)
+- **Global**: `~/.config/makima/permissions.toml`
+- **Project**: `.makima/permissions.toml` (takes precedence over global)
 
 ```toml
 default = "deny"
@@ -144,14 +144,14 @@ Tool names must match `^[a-zA-Z0-9_-]{1,64}$` (no dots, max 64 chars). Server na
 
 ## Permission Prompts
 
-When a gated tool needs permission, Maki asks you.
+When a gated tool needs permission, Makima asks you.
 
 | Key | Action |
 |-----|--------|
 | `y` | Allow once (immediate) |
 | `s` | Allow for this session (confirm with `Enter` or `y`; any other key cancels) |
-| `a` | Always allow for this project (confirm; saved to `.maki/permissions.toml`) |
-| `A` | Always allow globally (confirm; saved to `~/.config/maki/permissions.toml`) |
+| `a` | Always allow for this project (confirm; saved to `.makima/permissions.toml`) |
+| `A` | Always allow globally (confirm; saved to `~/.config/makima/permissions.toml`) |
 | `n` | Open deny guidance editor (type optional guidance, then `Enter` to deny once; `Esc` cancels) |
 | `d` | Deny always for this project (confirm) |
 | `D` | Deny always globally (confirm) |
@@ -178,7 +178,7 @@ The classifier sees only the command and working directory in a silent throwaway
 Enable it like YOLO:
 
 ```lua
--- ~/.config/maki/init.lua
+-- ~/.config/makima/init.lua
 maki.setup({
     plugins = {
         bash = {
@@ -208,7 +208,7 @@ To skip prompts on gated tools, toggle YOLO with `/yolo`, or run with `--yolo`. 
 To start in YOLO mode every time:
 
 ```lua
--- ~/.config/maki/init.lua
+-- ~/.config/makima/init.lua
 maki.setup({
     always_yolo = true,
 })

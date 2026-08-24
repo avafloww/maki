@@ -20,17 +20,17 @@
 
 ## Color
 
-"Warm surfaces, cool ink." Two neutrals + one accent, oklch, defined once in `base.html` `:root` / `[data-theme="dark"]`; components only use vars.
+"Warm surfaces, red ink." Two neutrals + one accent, defined once in `base.html` `:root` / `[data-theme="dark"]`; components only use vars.
 
 | | Light | Dark |
 |---|---|---|
-| Surface | warm paper `95.5% .018 95` | deep navy `19% .03 277` |
-| Ink | navy `30-32% .04 277` | `85% .015 277` |
-| Accent | sienna `48% .115 45` | salmon `73% .105 45` |
+| Surface | warm paper `#f5eded` | lunared `#120c0c` |
+| Ink | warm brown `#2a1818` | `#e9dede` |
+| Accent | crimson `#e03030` | red `#ff4545` |
 
 - Accent only on: links, active items, hover, focus ring, search marks, note-callout strong.
-- Neutral tints: hue 85-95 light, hue 277 low-chroma dark. Hue 275+ with chroma > .06 is banned (reads purple).
-- Callouts: tip green (hue 155), warn amber (hue 70-80). Never pure #000/#fff.
+- Neutral tints: muted mauve `#7a5c5c`, borders `#241818` (dark) / `#e0cfcf` (light).
+- Callouts: tip rose (hue ~10), warn amber (hue ~35). Never pure #000/#fff.
 
 ## Code blocks
 
@@ -67,3 +67,4 @@ Rotation display serifs (Fraunces, Instrument Serif, Space Grotesk...), rounded 
 ## Verifying
 
 `cd site && ./build.sh` (full: search.json + token spans) or `zola build` in `site/docs` (fast). Check both themes, 390px and 1600px. Screenshot previews can lie about color; pixel-sample PNGs. Landing page not yet migrated.
+ can lie about color; pixel-sample PNGs. Landing page not yet migrated.
