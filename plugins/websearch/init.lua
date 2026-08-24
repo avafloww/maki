@@ -3,7 +3,6 @@ local REQUEST_TIMEOUT_SECS = 25
 local DEFAULT_NUM_RESULTS = 8
 
 local parse_sse_response = require("parse_sse")
-local truncate = require("maki.truncate")
 local ToolView = require("maki.tool_view")
 local output_limits = require("maki.output_limits")
 
@@ -109,7 +108,7 @@ maki.api.register_tool({
       return { llm_output = "error: " .. tostring(parse_err), is_error = true }
     end
 
-    local llm_output = truncate(text, max_lines, max_bytes)
+    local llm_output = maki.text.truncate_file(text, max_lines, max_bytes, nil)
 
     return {
       llm_output = llm_output,

@@ -145,9 +145,9 @@ fn batch_restore_renders_real_children_and_click_expands_grep() {
     assert!(text.contains("grep> "), "grep child header: {text}");
     assert!(text.contains("bash> "), "bash child header: {text}");
     // grep's real view reformats `nr:` into gutter lines.
-    assert!(text.contains(" 1 fn main() {}"), "grep gutter: {text}");
+    assert!(text.contains("    1: fn main() {}"), "grep gutter: {text}");
     assert!(
-        !text.contains("1: fn main"),
+        !text.contains("\n1: fn main"),
         "raw llm text means the child restore degraded to fallback: {text}"
     );
     assert!(
@@ -179,7 +179,7 @@ fn batch_restore_renders_real_children_and_click_expands_grep() {
     );
     let text = &clicked.body;
     assert!(
-        text.contains("10 fn other() {}"),
+        text.contains("    10: fn other() {}"),
         "expanded grep tail visible: {text}"
     );
     assert!(
