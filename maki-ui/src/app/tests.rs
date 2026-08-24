@@ -21,7 +21,7 @@ use maki_lua::{
     BuiltinAction, CommandArgumentItem, HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader,
 };
 use maki_providers::{ContentBlock, Effort, Message, Role, TokenUsage};
-use maki_storage::sessions::{StoredMode, StoredThinking};
+use maki_storage::sessions::{StoredMode, StoredSubagent, StoredThinking};
 use ratatui::layout::Rect;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -1344,6 +1344,237 @@ fn ctrl_x_toggles_tasks_picker() {
     assert!(app.task_picker.is_open());
     app.update(Msg::Key(kb::TASKS.to_key_event()));
     assert!(!app.task_picker.is_open());
+}
+
+#[test]
+fn open_tasks_picker_highlights_active_chat_after_sort() {
+    // task1 (chat index 1) finishes, task2 (chat index 2) stays running. The
+    // picker sorts running first, so row order != chat_index; opening while
+    // active on the finished task must still highlight that task, not row N.
+    let mut app = app_with_subagent_id("task1");
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "y".into() },
+        "task2",
+        Some("build"),
+    ));
+    finish_subagent(&mut app, "task1", false);
+    app.active_chat = 1;
+
+    app.update(Msg::Key(kb::TASKS.to_key_event()));
+    assert!(app.task_picker.is_open());
+    assert_eq!(
+        app.task_picker.selected_item().unwrap().chat_index,
+        1,
+        "picker highlights the active chat, not the sorted row"
+    );
+}
+
+#[test]
+fn ago_formats_relative_start_time() {
+    let now = Instant::now();
+    assert_eq!(ago(now), "just now");
+    assert_eq!(ago(now - Duration::from_secs(5 * 60)), "5min ago");
+    assert_eq!(ago(now - Duration::from_secs(2 * 60 * 60)), "2h ago");
+    assert_eq!(ago(now - Duration::from_secs(3 * 24 * 60 * 60)), "3d ago");
+}
+
+#[test]
+fn task_entries_sorted_running_first() {
+    let mut app = app_with_subagent_id("task1");
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "y".into() },
+        "task2",
+        Some("build"),
+    ));
+    finish_subagent(&mut app, "task1", false);
+
+    let entries = app.task_entries();
+    assert_eq!(entries[0].chat_index, 0, "main chat stays first");
+    assert!(
+        !entries[1].is_finished(),
+        "running subagent before finished"
+    );
+    assert!(entries[1].is_spinning());
+    assert!(entries[2].is_finished(), "finished subagent last");
+}
+
+#[test]
+fn task_entry_shows_context_and_ago() {
+    let mut app = app_with_subagent();
+    app.chats[1].context_size = 5000;
+    let entries = app.task_entries();
+
+    let sub = entries.iter().find(|e| e.chat_index == 1).unwrap();
+    assert_eq!(sub.context_str(), Some("5.0k"));
+    assert!(sub.ago().is_some_and(|s| !s.is_empty()));
+
+    let main = &entries[0];
+    assert_eq!(main.context_str(), None);
+    assert_eq!(main.ago(), None);
+}
+
+#[test]
+fn finished_subagent_entry_is_finished_flag() {
+    let mut app = app_with_subagent();
+    let entries = app.task_entries();
+    assert!(!entries[0].is_finished(), "main chat is not finished");
+    assert!(
+        !entries[1].is_finished(),
+        "running subagent is not finished"
+    );
+
+    finish_subagent_task(&mut app, false);
+    let done_entries = app.task_entries();
+    let done = done_entries.iter().find(|e| e.chat_index == 1).unwrap();
+    assert!(done.is_finished());
+}
+
+fn rendered_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.view(frame)).unwrap();
+    let buf = terminal.backend().buffer();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| {
+                    buf.cell(ratatui::layout::Position::new(x, y))
+                        .map(|c| c.symbol())
+                        .unwrap_or(" ")
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn top_bar_is_always_one_row() {
+    let area = Rect::new(0, 0, 80, 24);
+    // Persistent even with no subagents.
+    assert_eq!(test_app().top_bar_rect(area).height, 1);
+
+    // Stays one row regardless of how many subagents are running.
+    let mut app = app_with_subagent();
+    assert_eq!(app.top_bar_rect(area).height, 1);
+    for i in 2..=6 {
+        app.update(subagent_msg(
+            AgentEvent::TextDelta { text: "x".into() },
+            &format!("task{i}"),
+            Some("name"),
+        ));
+    }
+    assert_eq!(app.top_bar_rect(area).height, 1, "top bar stays one row");
+}
+
+#[test]
+fn top_bar_shows_active_chat_running_count_and_cwd() {
+    let mut app = app_with_subagent_id("task1");
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "y".into() },
+        "task2",
+        Some("build"),
+    ));
+    finish_subagent(&mut app, "task2", false);
+
+    let bar_h = app.top_bar_rect(Rect::new(0, 0, 80, 24)).height;
+    let rows = rendered_rows(&mut app, 80, 24);
+    let bar: String = rows
+        .iter()
+        .take(bar_h as usize)
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Active chat badge for the main chat.
+    assert!(bar.contains("[Main]"), "active badge: {bar}");
+    // One running subagent besides the main chat.
+    assert!(bar.contains("1 more"), "running count: {bar}");
+    assert!(bar.contains(kb::TASKS.label), "ctrl-x hint: {bar}");
+    // cwd:branch lives on the right, sourced from the status bar's cache.
+    assert!(
+        bar.contains(app.status_bar.cwd_branch()),
+        "cwd shown: {bar}"
+    );
+    // No per-subagent rows in the bar.
+    assert!(!bar.contains("research"), "no name rows: {bar}");
+
+    // A second running subagent bumps the count.
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "z".into() },
+        "task3",
+        Some("third"),
+    ));
+    let rows = rendered_rows(&mut app, 80, 24);
+    let bar: String = rows
+        .iter()
+        .take(bar_h as usize)
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(bar.contains("2 more"), "two running: {bar}");
+}
+
+#[test]
+fn top_bar_omits_more_hint_when_no_other_running_subagents() {
+    let mut app = test_app();
+    let rows = rendered_rows(&mut app, 80, 24);
+    let bar: String = rows.first().map(|s| s.as_str()).unwrap_or("").to_string();
+    assert!(bar.contains("[Main]"), "badge always present: {bar}");
+    assert!(
+        !bar.contains("more") && !bar.contains(kb::TASKS.label),
+        "no hint without running subagents: {bar}"
+    );
+}
+
+#[test]
+fn top_bar_shows_subagent_badge_when_tabbed_into_subagent() {
+    let mut app = app_with_subagent();
+    app.active_chat = 1;
+    let rows = rendered_rows(&mut app, 80, 24);
+    let bar: String = rows.first().map(|s| s.as_str()).unwrap_or("").to_string();
+    assert!(bar.contains("↳"), "subagent badge: {bar}");
+    assert!(bar.contains("research"), "subagent name: {bar}");
+    // No "more" hint: the only running subagent is the active one.
+    assert!(!bar.contains("more"), "no self-count: {bar}");
+}
+
+#[test]
+fn top_bar_hint_excludes_finished_subagents() {
+    let mut app = app_with_subagent_id("task1");
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "y".into() },
+        "task2",
+        Some("build"),
+    ));
+    finish_subagent(&mut app, "task1", false);
+    // task2 still running, task1 finished: from Main, one more running.
+    let rows = rendered_rows(&mut app, 80, 24);
+    let bar: String = rows.first().map(|s| s.as_str()).unwrap_or("").to_string();
+    assert!(bar.contains("1 more"), "only running counted: {bar}");
+}
+
+#[test]
+fn restored_subagents_have_no_ago_and_are_finished() {
+    let mut app = test_app();
+    let id = "restored-sub".to_string();
+    app.state.session_mut().set_subagents(vec![StoredSubagent {
+        tool_use_id: id.clone(),
+        name: "old task".into(),
+        model: None,
+    }]);
+    app.state
+        .session_mut()
+        .set_subagent_messages(id.clone(), vec![Message::user("hi".into())]);
+    app.restore_display();
+
+    assert_eq!(app.chats.len(), 2);
+    assert!(app.chats[1].is_finished());
+    assert_eq!(app.chats[1].started_at(), None);
+
+    let entries = app.task_entries();
+    let sub = entries.iter().find(|e| e.chat_index == 1).unwrap();
+    assert!(sub.is_finished());
+    assert_eq!(sub.ago(), None);
 }
 
 fn streaming_app() -> App {

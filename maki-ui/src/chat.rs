@@ -22,6 +22,7 @@ use ratatui::style::Color;
 
 use crate::repaint::{Cadence, Dirty};
 use crate::theme::ThemesProvider;
+use std::time::Instant;
 
 pub(crate) const DONE_TEXT: &str = "Done!";
 pub(crate) const ERROR_TEXT: &str = "Error";
@@ -57,6 +58,7 @@ pub struct Chat {
     pending_turn_usage: Option<String>,
     messages_panel: MessagesPanel,
     finished: bool,
+    started_at: Option<Instant>,
 }
 
 impl Chat {
@@ -75,7 +77,16 @@ impl Chat {
             pending_turn_usage: None,
             messages_panel: MessagesPanel::new(ui_config, lua_event_handle, theme_provider),
             finished: false,
+            started_at: None,
         }
+    }
+
+    pub fn started_at(&self) -> Option<Instant> {
+        self.started_at
+    }
+
+    pub(crate) fn set_started_at_now(&mut self) {
+        self.started_at = Some(Instant::now());
     }
 
     pub fn set_pending_turn_usage(&mut self, usage: String) {

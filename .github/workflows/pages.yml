@@ -1,0 +1,90 @@
+name: Pages
+
+on:
+  push:
+    branches: [mistress]
+    paths:
+      - 'site/**'
+      - 'install.sh'
+      - 'install.ps1'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build site
+        working-directory: site
+        run: |
+          REPO="${{ github.event.repository.name }}"
+          OWNER="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          export SITE_PREFIX="/$REPO"
+          export SITE_BASE_URL="https://$OWNER.github.io/$REPO"
+          export SITE_REPO="${{ github.repository }}"
+          ./build.sh
+          echo "REPO=$REPO" >> "$GITHUB_ENV"
+      - name: Verify no unprefixed root-relative links
+        run: |
+          set -e
+          # NOTE: `! grep` is exempt from `set -e`, so use `if grep; then exit 1; fi`.
+          # HTML: root-relative /docs/, /favicon*, /apple-touch-icon, /site.webmanifest links must be prefixed.
+          if grep -R --exclude-dir=.git -nE 'href="/docs/|href="/favicon|href="/apple-touch-icon|href="/site\.webmanifest' site/_build; then
+            echo "unprefixed HTML root-relative links remain" >&2; exit 1
+          fi
+          # webmanifest icon srcs: anchored negative — only matches the UNPREFIXED form.
+          if grep -nE '"src":"/android-chrome' site/_build/site.webmanifest; then
+            echo "unprefixed webmanifest icon srcs remain" >&2; exit 1
+          fi
+          # residual upstream origin must be rewritten in rendered HTML (no-slash form catches the topnav logo/Home too).
+          if grep -R --include='*.html' -nE 'https://maki\.sh' site/_build; then
+            echo "residual https://maki.sh in HTML" >&2; exit 1
+          fi
+          # residual upstream GitHub repo references must be rewritten to the fork.
+          if grep -R --include='*.html' -nE 'tontinton/maki' site/_build; then
+            echo "residual tontinton/maki in HTML" >&2; exit 1
+          fi
+          # LLM markdown mirrors must have prefixed /docs/ cross-links and no upstream refs.
+          # Scoped to *.md/*.txt only — search.json (also under _build/docs) legitimately
+          # retains upstream strings in code-fence bodies and is outside this guard's scope.
+          if grep -rnE --include='*.md' --include='*.txt' '\]\(/docs/|tontinton/maki|https://maki\.sh' site/_build; then
+            echo "unprefixed /docs/ or upstream refs in LLM mirrors" >&2; exit 1
+          fi
+          # prefixed build must emit .nojekyll (Pages needs it).
+          [ -e site/_build/.nojekyll ]
+          # Positive checks: search.json hrefs and webmanifest icon srcs carry the prefix.
+          python3 - <<PY
+          import json, os
+          repo = os.environ["REPO"]
+          prefix = "/" + repo + "/docs/"
+          d = json.load(open("site/_build/docs/search.json"))
+          bad = [h["href"] for h in d if not h["href"].startswith(prefix)]
+          assert not bad, bad
+          m = json.load(open("site/_build/site.webmanifest"))
+          mbad = [i["src"] for i in m.get("icons", []) if not i["src"].startswith("/" + repo + "/")]
+          assert not mbad, mbad
+          PY
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site/_build
+          include-hidden-files: true
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v5
+        id: deployment

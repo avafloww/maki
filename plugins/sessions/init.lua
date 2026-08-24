@@ -20,14 +20,6 @@ local AGE_TICKS = 10
 -- Placeholder only: the host swaps "spinner:*"-styled spans for the live
 -- animated frame, so working rows spin without this plugin redrawing.
 local WORKING_ICON = "· "
-local AGE_UNITS = {
-  { 31536000, "y" },
-  { 2592000, "mo" },
-  { 604800, "w" },
-  { 86400, "d" },
-  { 3600, "h" },
-  { 60, "m" },
-}
 local FILTER_KEYS = {
   { "Enter", "open" },
   { "Ctrl+N", "new" },
@@ -137,16 +129,6 @@ local function filter_changed()
   apply_filter()
 end
 
-local function age(updated_at)
-  local secs = math.max(os.time() - (updated_at or 0), 0)
-  for _, u in ipairs(AGE_UNITS) do
-    if secs >= u[1] then
-      return math.floor(secs / u[1]) .. u[2] .. " ago"
-    end
-  end
-  return "just now"
-end
-
 local function dispw(s)
   return utf8.len(s) or #s
 end
@@ -170,7 +152,7 @@ local function render()
     local selected = s.id == board.sel_id
     local icon, icon_style, spinning = icon_of(s)
     local base = selected and "selected" or "item"
-    local right = s.focused and CURRENT_LABEL or age(s.updated_at)
+    local right = s.focused and CURRENT_LABEL or maki.time.ago(maki.time.at(s.updated_at))
     local right_style = selected and "selected" or (s.focused and "accent" or "dim")
     if selected then
       icon_style = "selected"
