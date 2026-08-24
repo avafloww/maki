@@ -1476,8 +1476,8 @@ fn top_bar_shows_active_chat_running_count_and_cwd() {
     ));
     finish_subagent(&mut app, "task2", false);
 
-    let bar_h = app.top_bar_rect(Rect::new(0, 0, 80, 24)).height;
-    let rows = rendered_rows(&mut app, 80, 24);
+    let bar_h = app.top_bar_rect(Rect::new(0, 0, 120, 24)).height;
+    let rows = rendered_rows(&mut app, 120, 24);
     let bar: String = rows
         .iter()
         .take(bar_h as usize)
@@ -1488,7 +1488,7 @@ fn top_bar_shows_active_chat_running_count_and_cwd() {
     // Active chat badge for the main chat.
     assert!(bar.contains("[Main]"), "active badge: {bar}");
     // One running subagent besides the main chat.
-    assert!(bar.contains("1 more"), "running count: {bar}");
+    assert!(bar.contains("1 tasks"), "running count: {bar}");
     assert!(bar.contains(kb::TASKS.label), "ctrl-x hint: {bar}");
     // cwd:branch lives on the right, sourced from the status bar's cache.
     assert!(
@@ -1511,19 +1511,20 @@ fn top_bar_shows_active_chat_running_count_and_cwd() {
         .map(|s| s.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(bar.contains("2 more"), "two running: {bar}");
+    assert!(bar.contains("2 tasks"), "two running: {bar}");
 }
 
 #[test]
-fn top_bar_omits_more_hint_when_no_other_running_subagents() {
+fn top_bar_shows_task_hint_when_no_subagents_are_running() {
     let mut app = test_app();
     let rows = rendered_rows(&mut app, 80, 24);
     let bar: String = rows.first().map(|s| s.as_str()).unwrap_or("").to_string();
     assert!(bar.contains("[Main]"), "badge always present: {bar}");
     assert!(
-        !bar.contains("more") && !bar.contains(kb::TASKS.label),
-        "no hint without running subagents: {bar}"
+        bar.contains("to see tasks"),
+        "task hint always present: {bar}"
     );
+    assert!(bar.contains(kb::TASKS.label), "ctrl-x hint: {bar}");
 }
 
 #[test]
@@ -1534,8 +1535,8 @@ fn top_bar_shows_subagent_badge_when_tabbed_into_subagent() {
     let bar: String = rows.first().map(|s| s.as_str()).unwrap_or("").to_string();
     assert!(bar.contains("↳"), "subagent badge: {bar}");
     assert!(bar.contains("research"), "subagent name: {bar}");
-    // No "more" hint: the only running subagent is the active one.
-    assert!(!bar.contains("more"), "no self-count: {bar}");
+    // The task hint includes all non-main subagents, including the active one.
+    assert!(bar.contains("1 tasks"), "running count: {bar}");
 }
 
 #[test]
@@ -1550,7 +1551,7 @@ fn top_bar_hint_excludes_finished_subagents() {
     // task2 still running, task1 finished: from Main, one more running.
     let rows = rendered_rows(&mut app, 80, 24);
     let bar: String = rows.first().map(|s| s.as_str()).unwrap_or("").to_string();
-    assert!(bar.contains("1 more"), "only running counted: {bar}");
+    assert!(bar.contains("1 tasks"), "only running counted: {bar}");
 }
 
 #[test]
