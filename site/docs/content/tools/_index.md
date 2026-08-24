@@ -184,7 +184,7 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 
 ### `task_spawn` {#task_spawn}
 
-Start a background subagent and return its task_id immediately. The main agent stays unblocked. The result is returned automatically when the subagent finishes, so wait for the reply instead of polling task_get. Queue messages with task_send and finish with task_despawn. Also callable from a code_execution script as a Python async function.
+Start a background subagent and return its task_id immediately. Each task's messages run FIFO, acquiring concurrency capacity only when each turn starts. The result is returned automatically when the subagent finishes, so wait for the reply instead of polling task_get. Queue messages with task_send and finish with task_despawn. Also callable from a code_execution script as a Python async function.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -204,7 +204,7 @@ Poll a background subagent. Returns { status = "running" | "done" | "closed", re
 
 ### `task_send` {#task_send}
 
-Queue a message to a background subagent. A done subagent processes it as a new turn. Returns { queued = true } immediately. Also callable from a code_execution script as a Python async function.
+Queue a message to a background subagent in per-task FIFO order and return immediately. A done subagent processes it as a new turn, acquiring concurrency capacity when the turn starts. Returns { queued = true }, or a session error if queueing fails. Also callable from a code_execution script as a Python async function.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -213,7 +213,7 @@ Queue a message to a background subagent. A done subagent processes it as a new 
 
 ### `task_despawn` {#task_despawn}
 
-Cancel a background subagent, flush its chat transcript, and release its concurrency slot. Returns { ok = true }. Also callable from a code_execution script as a Python async function.
+Cancel a background subagent, discard messages not yet admitted, flush its chat transcript, and release active turn permits. Returns { ok = true }. Also callable from a code_execution script as a Python async function.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

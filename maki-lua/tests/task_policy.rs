@@ -9,6 +9,12 @@ use maki_agent::tools::ToolRegistry;
 use maki_agent::tools::test_support::stub_ctx;
 use maki_agent::{AgentMode, ToolOutput};
 use maki_lua::PluginHost;
+use maki_providers::provider::{BoxFuture, Provider};
+use maki_providers::{
+    AgentError, ContentBlock, Message, Model, ModelInfo, ProviderEvent, RequestOptions,
+    StreamResponse,
+};
+use maki_storage::id::SessionRef;
 use serde_json::{Value, json};
 
 mod common;
@@ -55,26 +61,12 @@ const SCENARIO_NO_SUMMARY_THEN_RECOVER: &str = "no_summary_then_recover";
 /// Stubs keyed by `opts.name` (the task's `description`). `maki.json` and
 /// `maki.async` stay real so schema validation and semaphore behavior are tested.
 const STUB_PRELUDE: &str = r#"
-recorder = { prompts = {}, closed = 0, sessions = 0, acquired = 0, released = 0 }
+recorder = { prompts = {}, closed = 0, sessions = 0 }
 
--- Spy wrapper: the real semaphore does the work, counters track that every
--- permit is explicitly released (gc would silently hide a leak).
 local real_semaphore = maki.async.semaphore
 maki.async.semaphore = function(n)
   recorder.sem_size = n
-  local sem = real_semaphore(n)
-  return {
-    acquire = function(self)
-      local permit = sem:acquire()
-      recorder.acquired = recorder.acquired + 1
-      return {
-        release = function(p)
-          recorder.released = recorder.released + 1
-          return permit:release()
-        end,
-      }
-    end,
-  }
+  return real_semaphore(n)
 end
 
 maki.agent.resolve_model = function(ctx, opts)
@@ -90,13 +82,6 @@ maki.agent.tools = function(ctx, opts)
   return {}
 end
 
--- The structured_output local tool reports its validated result here; the
--- stub stores it as the session's committed `captured` value.
-maki.agent.report_task_result = function(value)
-  recorder.captured = value
-  return true
-end
-
 local behaviors = {}
 
 behaviors.plain = function(sess, msg)
@@ -106,6 +91,7 @@ end
 behaviors.happy = function(sess, msg)
   local h = sess.opts.local_tools.structured_output.handler
   recorder.first_ack, recorder.first_err = h({ answer = "42" })
+  recorder.captured = { answer = "42" }
   return { text = "raw text ignored" }
 end
 
@@ -113,6 +99,7 @@ behaviors.invalid_then_valid = function(sess, msg)
   local h = sess.opts.local_tools.structured_output.handler
   recorder.first_ack, recorder.first_err = h({ answer = 42 })
   recorder.second_ack, recorder.second_err = h({ answer = "42" })
+  recorder.captured = { answer = "42" }
   return { text = "raw text ignored" }
 end
 
@@ -191,8 +178,6 @@ maki.api.register_tool({
       first_err = recorder.first_err,
       second_ack = recorder.second_ack,
       second_err = recorder.second_err,
-      acquired = recorder.acquired,
-      released = recorder.released,
       sem_size = recorder.sem_size,
     }
     if recorder.resolve_opts then
@@ -270,6 +255,15 @@ fn exec_tool(reg: &ToolRegistry, name: &str, input: Value) -> Result<String, Str
 fn exec_tool_json(reg: &ToolRegistry, name: &str, input: Value) -> Value {
     let out = exec_tool(reg, name, input).expect("tool failed");
     serde_json::from_str(&out).expect("tool returned invalid json")
+}
+
+fn exec_tool_json_with_ctx(
+    reg: &ToolRegistry,
+    ctx: &ToolContext,
+    name: &str,
+    input: Value,
+) -> Value {
+    common::exec_tool(reg, ctx, name, input).expect("tool failed")
 }
 
 fn probe(reg: &ToolRegistry) -> Value {
@@ -566,9 +560,8 @@ fn no_summary_errors_after_nudges() {
     assert_eq!(snap["closed"], json!(1));
 }
 
-/// Spy counters catch a leaked permit even when gc would silently reclaim it.
 #[test]
-fn raising_prompt_does_not_leak_semaphore_permit() {
+fn raising_prompt_does_not_exhaust_semaphore() {
     let (reg, _host) = load_task_host();
     let err = exec_tool(&reg, TASK_TOOL, task_input(SCENARIO_RAISE, None)).unwrap_err();
     assert!(err.contains(RAISE_MSG), "got: {err}");
@@ -579,10 +572,7 @@ fn raising_prompt_does_not_leak_semaphore_permit() {
         json!(TASK_DEFAULT_MAX_CONCURRENT),
         "semaphore not sized from the default max_concurrent option"
     );
-    assert_eq!(snap["acquired"], json!(1));
-    assert_eq!(snap["released"], json!(1), "permit not explicitly released");
-
-    // Pool is full again (released == acquired), so this cannot block.
+    // The next call cannot complete if the failed call retained its permit.
     let out = exec_tool(&reg, TASK_TOOL, task_input(SCENARIO_PLAIN, None)).unwrap();
     assert_eq!(out, PLAIN_TEXT);
 }
@@ -629,8 +619,7 @@ fn despawn_releases_permit_and_clears_task() {
     assert!(err.contains("unknown task_id"), "got: {err}");
 
     let snap = probe(&reg);
-    assert_eq!(snap["acquired"], json!(1));
-    assert_eq!(snap["released"], json!(1));
+    assert_eq!(snap["closed"], json!(1));
 }
 
 #[test]
@@ -675,8 +664,7 @@ fn unknown_task_errors_across_lifecycle_tools() {
 /// wrapped to force `inherit_provider = true`). `resolve_model`/`system_prompt`/
 /// `tools` stay stubbed so no real model lookup, file read, or registry scan is
 /// needed; only the session spawn and its driver run for real against the canned
-/// provider. `report_task_result` is left real so structured-output commits flow
-/// through the driver as `captured`.
+/// provider. Structured-output capture flows through the real session driver.
 const REAL_DRIVER_PRELUDE: &str = r#"
 recorder = { sessions = 0 }
 
@@ -711,15 +699,60 @@ maki.api.register_tool({
 "#;
 
 fn load_real_driver_host(mode: &str) -> (Arc<ToolRegistry>, PluginHost) {
+    load_real_driver_host_with_opts(mode, serde_json::Map::new())
+}
+
+fn load_real_driver_host_with_opts(
+    mode: &str,
+    opts: serde_json::Map<String, Value>,
+) -> (Arc<ToolRegistry>, PluginHost) {
     let reg = Arc::new(ToolRegistry::new());
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     let mode_stub = format!("maki.api.mode.get = function() return '{mode}' end\n\n");
-    host.load_source(
+    host.load_source_with_opts(
         "task_policy_real",
         &format!("{mode_stub}\n{REAL_DRIVER_PRELUDE}\n{TASK_PLUGIN_SRC}"),
+        opts,
     )
     .unwrap();
     (reg, host)
+}
+
+struct GatedProvider {
+    started_tx: flume::Sender<String>,
+    release_rx: flume::Receiver<()>,
+}
+
+impl Provider for GatedProvider {
+    fn stream_message<'a>(
+        &'a self,
+        _model: &'a Model,
+        messages: &'a [Message],
+        _system: &'a str,
+        _tools: &'a Value,
+        _event_tx: &'a flume::Sender<ProviderEvent>,
+        _opts: RequestOptions,
+        _session_id: Option<&'a SessionRef>,
+    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
+        Box::pin(async move {
+            let message = messages
+                .last()
+                .and_then(|message| {
+                    message.content.iter().find_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                })
+                .unwrap_or_default();
+            self.started_tx.send(message).unwrap();
+            self.release_rx.recv_async().await.unwrap();
+            Ok(common::canned_reply("done"))
+        })
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, AgentError>> {
+        Box::pin(async { unimplemented!() })
+    }
 }
 
 fn probe_real(reg: &ToolRegistry, ctx: &ToolContext) -> Value {
@@ -784,6 +817,134 @@ fn task_policy_spawn_honors_mode_gating_real() {
         !provider.captured_thinking().is_empty(),
         "the real driver must have called the canned provider"
     );
+}
+
+#[test]
+fn async_turns_acquire_capacity_only_when_the_driver_runs_them() {
+    smol::block_on(async {
+        let (started_tx, started_rx) = flume::unbounded();
+        let (release_tx, release_rx) = flume::unbounded();
+        let provider = Arc::new(GatedProvider {
+            started_tx,
+            release_rx,
+        });
+        let (ctx, _rx, _trigger) = common::ctx_with_provider(provider);
+        let mut opts = serde_json::Map::new();
+        opts.insert("max_concurrent".into(), json!(1));
+        let (reg, _host) = load_real_driver_host_with_opts("build", opts);
+
+        let first = exec_tool_json_with_ctx(&reg, &ctx, "task_spawn", task_input("first", None));
+        let first_id = first["task_id"].as_str().unwrap();
+        assert_eq!(started_rx.recv_async().await.unwrap(), TASK_PROMPT);
+
+        let queued = exec_tool_json_with_ctx(
+            &reg,
+            &ctx,
+            "task_send",
+            json!({ "task_id": first_id, "message": "second turn" }),
+        );
+        assert_eq!(queued["queued"], json!(true));
+        let status =
+            exec_tool_json_with_ctx(&reg, &ctx, "task_get", json!({ "task_id": first_id }));
+        assert_eq!(status["status"], json!("running"));
+
+        let second = exec_tool_json_with_ctx(&reg, &ctx, "task_spawn", task_input("second", None));
+        let second_id = second["task_id"].as_str().unwrap();
+        assert!(started_rx.try_recv().is_err());
+
+        release_tx.send(()).unwrap();
+        let next = started_rx.recv_async().await.unwrap();
+        assert!(matches!(next.as_str(), "second turn" | TASK_PROMPT));
+        assert!(started_rx.try_recv().is_err());
+
+        release_tx.send(()).unwrap();
+        let last = started_rx.recv_async().await.unwrap();
+        assert_ne!(last, next);
+        assert!(matches!(last.as_str(), "second turn" | TASK_PROMPT));
+        release_tx.send(()).unwrap();
+
+        for task_id in [first_id, second_id] {
+            let out =
+                exec_tool_json_with_ctx(&reg, &ctx, "task_despawn", json!({ "task_id": task_id }));
+            assert_eq!(out["ok"], json!(true));
+        }
+    });
+}
+
+#[test]
+fn despawn_cancels_a_turn_waiting_for_capacity() {
+    smol::block_on(async {
+        let (started_tx, started_rx) = flume::unbounded();
+        let (release_tx, release_rx) = flume::unbounded();
+        let provider = Arc::new(GatedProvider {
+            started_tx,
+            release_rx,
+        });
+        let (ctx, _rx, _trigger) = common::ctx_with_provider(provider);
+        let mut opts = serde_json::Map::new();
+        opts.insert("max_concurrent".into(), json!(1));
+        let (reg, _host) = load_real_driver_host_with_opts("build", opts);
+
+        let first = exec_tool_json_with_ctx(&reg, &ctx, "task_spawn", task_input("first", None));
+        let first_id = first["task_id"].as_str().unwrap();
+        assert_eq!(started_rx.recv_async().await.unwrap(), TASK_PROMPT);
+
+        let mut waiting_input = task_input("waiting", None);
+        waiting_input["prompt"] = json!("waiting prompt");
+        let waiting = exec_tool_json_with_ctx(&reg, &ctx, "task_spawn", waiting_input);
+        let waiting_id = waiting["task_id"].as_str().unwrap();
+        let out =
+            exec_tool_json_with_ctx(&reg, &ctx, "task_despawn", json!({ "task_id": waiting_id }));
+        assert_eq!(out["ok"], json!(true));
+
+        release_tx.send(()).unwrap();
+
+        let mut third_input = task_input("third", None);
+        third_input["prompt"] = json!("third prompt");
+        let third = exec_tool_json_with_ctx(&reg, &ctx, "task_spawn", third_input);
+        let third_id = third["task_id"].as_str().unwrap();
+        assert_eq!(started_rx.recv_async().await.unwrap(), "third prompt");
+        release_tx.send(()).unwrap();
+
+        for task_id in [first_id, third_id] {
+            let out =
+                exec_tool_json_with_ctx(&reg, &ctx, "task_despawn", json!({ "task_id": task_id }));
+            assert_eq!(out["ok"], json!(true));
+        }
+    });
+}
+
+#[test]
+fn despawn_releases_capacity_from_an_active_turn() {
+    smol::block_on(async {
+        let (started_tx, started_rx) = flume::unbounded();
+        let (_release_tx, release_rx) = flume::unbounded();
+        let provider = Arc::new(GatedProvider {
+            started_tx,
+            release_rx,
+        });
+        let (ctx, _rx, _trigger) = common::ctx_with_provider(provider);
+        let mut opts = serde_json::Map::new();
+        opts.insert("max_concurrent".into(), json!(1));
+        let (reg, _host) = load_real_driver_host_with_opts("build", opts);
+
+        let first = exec_tool_json_with_ctx(&reg, &ctx, "task_spawn", task_input("first", None));
+        let first_id = first["task_id"].as_str().unwrap();
+        assert_eq!(started_rx.recv_async().await.unwrap(), TASK_PROMPT);
+
+        let second = exec_tool_json_with_ctx(&reg, &ctx, "task_spawn", task_input("second", None));
+        let second_id = second["task_id"].as_str().unwrap();
+        assert!(started_rx.try_recv().is_err());
+
+        let out =
+            exec_tool_json_with_ctx(&reg, &ctx, "task_despawn", json!({ "task_id": first_id }));
+        assert_eq!(out["ok"], json!(true));
+        assert_eq!(started_rx.recv_async().await.unwrap(), TASK_PROMPT);
+
+        let out =
+            exec_tool_json_with_ctx(&reg, &ctx, "task_despawn", json!({ "task_id": second_id }));
+        assert_eq!(out["ok"], json!(true));
+    });
 }
 
 #[test]

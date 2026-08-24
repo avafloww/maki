@@ -13,8 +13,8 @@ const AWAIT_MIN_ARGS: usize = 2;
 const PERMIT_RELEASED_ERR: &str = "permit already released";
 
 /// Cancel-aware counting semaphore. Permits release on `:release()` or gc.
-struct LuaSemaphore {
-    sem: Arc<Semaphore>,
+pub(crate) struct LuaSemaphore {
+    pub(crate) sem: Arc<Semaphore>,
 }
 
 struct LuaPermit {
