@@ -63,14 +63,14 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use maki_agent::permissions::PermissionManager;
 use maki_agent::{
-    AgentEvent, Envelope, ImageSource, McpConfigErrors, McpPromptInfo, McpSnapshotReader,
+    AgentEvent, Envelope, ImageSource, McpConfigErrors, McpPromptRequest, McpSnapshotReader,
     SharedMessages, SubagentInfo,
 };
 use maki_commands::InvocationTargetId;
 use maki_config::{ModelPolicy, UiConfig};
 use maki_lua::{
     BuiltinAction, CompletionCtx, EventHandle, HintReader, HintSnapshot, ItemSpec, KeymapReader,
-    LuaCommandReader, WinView,
+    WinView,
 };
 use maki_match::{MatchCandidate, Resolution, fuzzy_resolve, fuzzy_resolve_candidates};
 use maki_providers::{ContentBlock, Message, Model, Role, ThinkingConfig, add_cost, format_tokens};
@@ -395,14 +395,12 @@ impl App {
         available_models: Arc<ArcSwapOption<Vec<String>>>,
         mcp_reader: McpSnapshotReader,
         mcp_config_errors: McpConfigErrors,
-        _lua_command_reader: LuaCommandReader,
         keymap_reader: KeymapReader,
         hint_reader: HintReader,
         storage_writer: Arc<StorageWriter>,
         ui_config: UiConfig,
         input_history_size: usize,
         permissions: Arc<PermissionManager>,
-        _custom_commands: Arc<[maki_agent::command::CustomCommand]>,
         lua_event_handle: EventHandle,
         model_policy: Arc<ModelPolicy>,
         theme_provider: Arc<dyn ThemesProvider>,
@@ -1857,17 +1855,8 @@ impl App {
             CommandRoute::Builtin(route) => {
                 self.execute_builtin_route(*route, command.arguments.clone(), command.depth as u8)
             }
-            CommandRoute::Custom(custom) => self.execute_custom(command.arguments.as_str(), custom),
-            CommandRoute::Mcp(prompt) => self.execute_mcp(prompt, &command.arguments),
-            CommandRoute::Lua { plugin, name } => {
-                self.lua_event_handle.run_command(
-                    Arc::clone(plugin),
-                    Arc::clone(name),
-                    command.arguments.clone(),
-                    command.depth as u8,
-                );
-                RouteOutcome::completed(Vec::new())
-            }
+            CommandRoute::Prompt(prompt) => self.submit_rendered_prompt(prompt),
+            CommandRoute::Mcp(prompt) => self.execute_mcp(prompt),
         };
         if matches!(command.route, CommandRoute::Builtin(BuiltinRoute::Theme)) {
             self.command_runtime.finish_theme_preview(
@@ -2036,33 +2025,12 @@ impl App {
         }
     }
 
-    fn execute_mcp(&mut self, prompt: &McpPromptInfo, args: &str) -> RouteOutcome {
-        let arguments = Self::parse_prompt_args(prompt, args);
-        let missing: Vec<_> = prompt
-            .arguments
-            .iter()
-            .filter(|a| a.required && !arguments.contains_key(&a.name))
-            .map(|a| format!("<{}>", a.name))
-            .collect();
-        if !missing.is_empty() {
-            self.flash(format!(
-                "Usage: /{} {}",
-                prompt.display_name,
-                missing.join(" ")
-            ));
-            return RouteOutcome::failed("required MCP prompt arguments are missing");
-        }
-
+    fn execute_mcp(&mut self, prompt: &McpPromptRequest) -> RouteOutcome {
         let prompt_ref = maki_agent::McpPromptRef {
             qualified_name: prompt.qualified_name.clone(),
-            arguments,
+            arguments: prompt.arguments.clone(),
         };
-        let name = format!("/{}", prompt.display_name);
-        let display_text = if args.trim().is_empty() {
-            name
-        } else {
-            format!("{name} {args}")
-        };
+        let display_text = prompt.display_text.clone();
         // Same single-expansion rule as submit_prompt: `@`-references in the
         // prompt args are rewritten once here, before the agent sees them.
         let display_text = match self.lua_event_handle.expand_references(&display_text) {
@@ -2086,37 +2054,9 @@ impl App {
         }
     }
 
-    fn parse_prompt_args(prompt: &McpPromptInfo, args: &str) -> HashMap<String, String> {
-        let mut result = HashMap::new();
-        let mut remaining = args.trim();
-        if remaining.is_empty() || prompt.arguments.is_empty() {
-            return result;
-        }
-        let last_idx = prompt.arguments.len() - 1;
-        for (i, arg) in prompt.arguments.iter().enumerate() {
-            if remaining.is_empty() {
-                break;
-            }
-            if i == last_idx {
-                result.insert(arg.name.clone(), remaining.to_string());
-            } else if let Some((word, rest)) = remaining.split_once(char::is_whitespace) {
-                result.insert(arg.name.clone(), word.to_string());
-                remaining = rest.trim_start();
-            } else {
-                result.insert(arg.name.clone(), remaining.to_string());
-                break;
-            }
-        }
-        result
-    }
-
-    fn execute_custom(
-        &mut self,
-        args: &str,
-        command: &maki_agent::command::CustomCommand,
-    ) -> RouteOutcome {
+    fn submit_rendered_prompt(&mut self, prompt: &str) -> RouteOutcome {
         match self.submit_prompt(QueuedMessage {
-            text: command.render(args),
+            text: prompt.to_string(),
             images: Vec::new(),
         }) {
             SubmitOutcome::Started(actions) => RouteOutcome::accepted(actions),

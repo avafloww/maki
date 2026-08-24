@@ -13,15 +13,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventK
 use maki_agent::command::{CommandScope, CustomCommand};
 use maki_agent::permissions::PermissionManager;
 use maki_agent::{
-    DoneReason, ImageMediaType, McpConfigErrors, McpPromptInfo, McpServerInfo, McpServerStatus,
+    DoneReason, ImageMediaType, McpConfigErrors, McpPromptRequest, McpServerInfo, McpServerStatus,
     McpSnapshot, McpSnapshotReader, ModeDefSpec, ToolDoneEvent, ToolOutput, ToolStartEvent,
     TurnCompleteEvent,
 };
 use maki_config::{PermissionsConfig, UiConfig};
 use maki_lua::test_support::{HintWriterHandle, hint_writer_pair};
-use maki_lua::{
-    BuiltinAction, CommandArgumentItem, HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader,
-};
+use maki_lua::{BuiltinAction, CommandArgumentItem, HintReader, KeymapReader};
 use maki_providers::{ContentBlock, Effort, Message, Role, TokenUsage};
 use maki_storage::sessions::{StoredMode, StoredSubagent, StoredThinking};
 use ratatui::layout::Rect;
@@ -53,7 +51,7 @@ fn set_zone(app: &mut App, zone: SelectionZone, area: Rect) {
 }
 
 fn build_app(dir: StateDir, writer: Arc<StorageWriter>) -> App {
-    build_app_with_lua(dir, writer, LuaCommandReader::empty())
+    build_app_with_registry(dir, writer, maki_commands::CommandRegistry::new())
 }
 
 fn build_app_with_handle(
@@ -64,46 +62,209 @@ fn build_app_with_handle(
     build_app_with_full(
         dir,
         writer,
-        LuaCommandReader::empty(),
+        maki_commands::CommandRegistry::new(),
         handle,
         UiConfig::default(),
     )
 }
 
-fn build_app_with_lua(
+fn build_app_with_registry(
     dir: StateDir,
     writer: Arc<StorageWriter>,
-    lua_commands: LuaCommandReader,
+    registry: maki_commands::CommandRegistry,
 ) -> App {
     build_app_with_full(
         dir,
         writer,
-        lua_commands,
+        registry,
         maki_lua::EventHandle::disconnected_for_test(),
         UiConfig::default(),
     )
 }
 
+#[derive(Clone)]
+struct TestLuaBehavior {
+    handle: maki_lua::EventHandle,
+    plugin: Arc<str>,
+    name: Arc<str>,
+}
+
+impl maki_commands::CommandBehavior for TestLuaBehavior {
+    fn execute(
+        &self,
+        invocation: maki_commands::CommandInvocation,
+    ) -> maki_commands::CommandFuture<Result<(), maki_commands::CommandError>> {
+        self.handle.run_command(
+            Arc::clone(&self.plugin),
+            Arc::clone(&self.name),
+            invocation.arguments.to_string(),
+            invocation.depth as u8,
+        );
+        invocation
+            .lifecycle
+            .transition(maki_commands::CommandClassification::Completed);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[derive(Clone)]
+struct TestLuaCompletion {
+    handle: maki_lua::EventHandle,
+    plugin: Arc<str>,
+}
+
+impl maki_commands::CommandCompletion for TestLuaCompletion {
+    fn complete(
+        &self,
+        context: maki_commands::CompletionContext,
+        _cancellation: maki_commands::CancellationToken,
+    ) -> maki_commands::CommandFuture<
+        Result<Vec<maki_commands::CompletionItem>, maki_commands::CompletionError>,
+    > {
+        let (_, cancel) = maki_agent::CancelToken::new();
+        let context = maki_lua::CommandArgumentContext {
+            command: context.invoked_name,
+            plugin: Arc::clone(&self.plugin),
+            args: context.arguments.to_string(),
+            arg: context.argument.to_string(),
+            index: context.argument_index,
+            mode: context.mode.to_string(),
+            session: 1,
+            generation: 0,
+        };
+        let Some(rx) = self.handle.collect_command_argument_items(context, cancel) else {
+            return Box::pin(async { Ok(Vec::new()) });
+        };
+        Box::pin(async move {
+            Ok(rx
+                .recv_async()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|item| maki_commands::CompletionItem {
+                    label: Arc::from(item.label),
+                    insertion: Arc::from(item.insertion),
+                    description: item.description.map(Arc::from),
+                })
+                .collect())
+        })
+    }
+
+    fn lifecycle(
+        &self,
+        context: &maki_commands::CompletionContext,
+        event: &maki_commands::CompletionLifecycleEvent,
+        _cancellation: &maki_commands::CancellationToken,
+    ) -> Result<(), maki_commands::CompletionError> {
+        let (event, item) = match event {
+            maki_commands::CompletionLifecycleEvent::Highlight(item) => (
+                maki_lua::CommandArgumentLifecycle::Highlight,
+                Some(maki_lua::CommandArgumentItem {
+                    label: item.label.to_string(),
+                    insertion: item.insertion.to_string(),
+                    description: item.description.as_ref().map(ToString::to_string),
+                }),
+            ),
+            maki_commands::CompletionLifecycleEvent::Accept(item) => (
+                maki_lua::CommandArgumentLifecycle::Accept,
+                Some(maki_lua::CommandArgumentItem {
+                    label: item.label.to_string(),
+                    insertion: item.insertion.to_string(),
+                    description: item.description.as_ref().map(ToString::to_string),
+                }),
+            ),
+            maki_commands::CompletionLifecycleEvent::Cancel => {
+                (maki_lua::CommandArgumentLifecycle::Cancel, None)
+            }
+        };
+        self.handle.command_argument_lifecycle(
+            maki_lua::CommandArgumentContext {
+                command: Arc::clone(&context.invoked_name),
+                plugin: Arc::clone(&self.plugin),
+                args: context.arguments.to_string(),
+                arg: context.argument.to_string(),
+                index: context.argument_index,
+                mode: context.mode.to_string(),
+                session: 1,
+                generation: 0,
+            },
+            event,
+            item,
+            maki_agent::CancelToken::none(),
+        );
+        Ok(())
+    }
+}
+
+struct TestLuaCommand {
+    handle: maki_lua::EventHandle,
+    name: Arc<str>,
+    plugin: Arc<str>,
+    max_args: Option<usize>,
+    completion: bool,
+}
+
+fn register_test_lua_command(
+    registry: &maki_commands::CommandRegistry,
+    command: TestLuaCommand,
+) -> maki_commands::Producer {
+    let producer = registry.create_producer(maki_commands::ProducerPrecedence::Plugin);
+    let completion = command.completion.then(|| {
+        Arc::new(TestLuaCompletion {
+            handle: command.handle.clone(),
+            plugin: Arc::clone(&command.plugin),
+        }) as Arc<dyn maki_commands::CommandCompletion>
+    });
+    producer
+        .replace(vec![maki_commands::Registration {
+            spec: maki_commands::CommandSpec {
+                name: Arc::clone(&command.name),
+                aliases: Arc::from([]),
+                arguments: command
+                    .max_args
+                    .map(|max| maki_commands::ArgumentArity::bounded(0, max))
+                    .unwrap_or_else(|| maki_commands::ArgumentArity::unbounded(0)),
+                docs: maki_commands::CommandDocs {
+                    summary: Arc::from("Lua test command"),
+                    argument_hint: None,
+                },
+            },
+            behavior: Arc::new(TestLuaBehavior {
+                handle: command.handle,
+                plugin: command.plugin,
+                name: command.name,
+            }),
+            completion,
+        }])
+        .unwrap();
+    producer
+}
+
+fn lua_registry(
+    command: TestLuaCommand,
+) -> (maki_commands::CommandRegistry, maki_commands::Producer) {
+    let registry = maki_commands::CommandRegistry::new();
+    let producer = register_test_lua_command(&registry, command);
+    (registry, producer)
+}
+
 fn build_app_with_full(
     dir: StateDir,
     writer: Arc<StorageWriter>,
-    lua_commands: LuaCommandReader,
+    registry: maki_commands::CommandRegistry,
     handle: maki_lua::EventHandle,
     ui: UiConfig,
 ) -> App {
     let model = test_model();
-    let lua_snapshot = lua_commands.load();
     let command_runtime = Arc::new(crate::command_runtime::CommandRuntime::new_for_test(
         &[],
-        &[],
-        &lua_snapshot.commands,
+        registry,
         Arc::new(crate::components::arg_completion::ModelArgSource::new(
             Arc::new(ArcSwapOption::empty()),
         )),
         Arc::new(crate::components::arg_completion::ThemeArgSource::new(
             Arc::new(crate::theme::InMemoryThemesProvider::bundled()),
         )),
-        handle.clone(),
     ));
     App::new(
         &model,
@@ -112,7 +273,6 @@ fn build_app_with_full(
         Arc::new(ArcSwapOption::empty()),
         McpSnapshotReader::empty(),
         McpConfigErrors::new(PathBuf::new()),
-        lua_commands,
         KeymapReader::empty(),
         HintReader::empty(),
         writer,
@@ -126,7 +286,6 @@ fn build_app_with_full(
             PathBuf::from("/tmp"),
             Arc::default(),
         )),
-        Arc::from([]),
         handle,
         Arc::new(maki_config::ModelPolicy::default()),
         Arc::new(crate::theme::InMemoryThemesProvider::bundled()),
@@ -145,15 +304,13 @@ fn app_with_custom_commands(commands: &[CustomCommand]) -> App {
     let handle = maki_lua::EventHandle::disconnected_for_test();
     let command_runtime = Arc::new(crate::command_runtime::CommandRuntime::new_for_test(
         commands,
-        &[],
-        &[],
+        maki_commands::CommandRegistry::new(),
         Arc::new(crate::components::arg_completion::ModelArgSource::new(
             Arc::new(ArcSwapOption::empty()),
         )),
         Arc::new(crate::components::arg_completion::ThemeArgSource::new(
             Arc::new(crate::theme::InMemoryThemesProvider::bundled()),
         )),
-        handle.clone(),
     ));
     let mut app = App::new(
         &model,
@@ -162,7 +319,6 @@ fn app_with_custom_commands(commands: &[CustomCommand]) -> App {
         Arc::new(ArcSwapOption::empty()),
         McpSnapshotReader::empty(),
         McpConfigErrors::new(PathBuf::new()),
-        LuaCommandReader::empty(),
         KeymapReader::empty(),
         HintReader::empty(),
         writer,
@@ -176,7 +332,6 @@ fn app_with_custom_commands(commands: &[CustomCommand]) -> App {
             PathBuf::from("/tmp"),
             Arc::default(),
         )),
-        Arc::from(commands.to_vec()),
         handle,
         Arc::new(ModelPolicy::default()),
         Arc::new(crate::theme::InMemoryThemesProvider::bundled()),
@@ -531,17 +686,15 @@ fn paste_works_regardless_of_status(status: Status) {
 #[test]
 fn ordinary_paste_synchronizes_argument_completion() {
     let dir = StateDir::from_path(env::temp_dir());
-    let mut app = build_app_with_lua(
-        dir.clone(),
-        Arc::new(test_writer(dir)),
-        LuaCommandReader::from_commands(vec![LuaCommandInfo {
-            name: "/deploy".into(),
-            description: "Deploy".into(),
-            plugin: "deploy".into(),
-            max_args: 1,
-            has_argument_completion: true,
-        }]),
-    );
+    let handle = maki_lua::EventHandle::disconnected_for_test();
+    let (registry, _producer) = lua_registry(TestLuaCommand {
+        handle,
+        name: Arc::from("/deploy"),
+        plugin: Arc::from("deploy"),
+        max_args: Some(1),
+        completion: true,
+    });
+    let mut app = build_app_with_registry(dir.clone(), Arc::new(test_writer(dir)), registry);
     let generation = app.command_palette.argument_generation();
 
     app.update(Msg::Paste("/deploy staging".into()));
@@ -742,19 +895,28 @@ fn enter_executes_new_command() {
     assert!(!app.command_palette.is_active());
 }
 
-fn lifecycle_app() -> (App, maki_lua::test_support::RequestProbe) {
+fn lifecycle_app() -> (
+    App,
+    maki_lua::test_support::RequestProbe,
+    maki_commands::Producer,
+) {
     let dir = StateDir::from_path(env::temp_dir());
     let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    let registry = maki_commands::CommandRegistry::new();
+    let producer = register_test_lua_command(
+        &registry,
+        TestLuaCommand {
+            handle: handle.clone(),
+            name: Arc::from("/deploy"),
+            plugin: Arc::from("deploy"),
+            max_args: Some(1),
+            completion: true,
+        },
+    );
     let mut app = build_app_with_full(
         dir.clone(),
         Arc::new(test_writer(dir)),
-        LuaCommandReader::from_commands(vec![LuaCommandInfo {
-            name: "/deploy".into(),
-            description: "Deploy".into(),
-            plugin: "deploy".into(),
-            max_args: 1,
-            has_argument_completion: true,
-        }]),
+        registry,
         handle,
         UiConfig::default(),
     );
@@ -771,12 +933,12 @@ fn lifecycle_app() -> (App, maki_lua::test_support::RequestProbe) {
         .unwrap();
     let _ = app.command_palette.poll_arguments();
     let _ = probe.try_finish_command_argument_lifecycle();
-    (app, probe)
+    (app, probe, producer)
 }
 
 #[test]
 fn ctrl_c_closes_palette_and_cancels_lifecycle() {
-    let (mut app, probe) = lifecycle_app();
+    let (mut app, probe, _producer) = lifecycle_app();
 
     app.update(Msg::Key(kb::QUIT.to_key_event()));
 
@@ -789,7 +951,7 @@ fn ctrl_c_closes_palette_and_cancels_lifecycle() {
 
 #[test]
 fn esc_closes_palette_and_cancels_lifecycle() {
-    let (mut app, probe) = lifecycle_app();
+    let (mut app, probe, _producer) = lifecycle_app();
 
     app.update(Msg::Key(key(KeyCode::Esc)));
 
@@ -802,7 +964,7 @@ fn esc_closes_palette_and_cancels_lifecycle() {
 
 #[test]
 fn reset_session_cancels_completion_lifecycle_once() {
-    let (mut app, probe) = lifecycle_app();
+    let (mut app, probe, _producer) = lifecycle_app();
 
     app.reset_session();
 
@@ -815,7 +977,7 @@ fn reset_session_cancels_completion_lifecycle_once() {
 
 #[test]
 fn session_switch_cancels_completion_lifecycle_once() {
-    let (mut app, probe) = lifecycle_app();
+    let (mut app, probe, _producer) = lifecycle_app();
     let session = AppSession::new("test-model", "/tmp/test");
 
     app.apply_loaded_session(session, &test_model());
@@ -829,7 +991,7 @@ fn session_switch_cancels_completion_lifecycle_once() {
 
 #[test]
 fn programmatic_overlay_close_cancels_completion_lifecycle_once() {
-    let (mut app, probe) = lifecycle_app();
+    let (mut app, probe, _producer) = lifecycle_app();
 
     app.close_all_overlays();
 
@@ -965,19 +1127,21 @@ fn tool_lifecycle_events_name_the_session_and_tool() {
 #[test]
 fn argument_completion_enter_fills_then_next_enter_executes() {
     let dir = StateDir::from_path(env::temp_dir());
-    let mut app = build_app_with_lua(
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    let (registry, _producer) = lua_registry(TestLuaCommand {
+        handle: handle.clone(),
+        name: Arc::from("/rename"),
+        plugin: Arc::from("sessions"),
+        max_args: None,
+        completion: true,
+    });
+    let mut app = build_app_with_full(
         dir.clone(),
         Arc::new(test_writer(dir)),
-        LuaCommandReader::from_commands(vec![LuaCommandInfo {
-            name: "/rename".into(),
-            description: "Rename".into(),
-            plugin: "sessions".into(),
-            max_args: usize::MAX,
-            has_argument_completion: true,
-        }]),
+        registry,
+        handle,
+        UiConfig::default(),
     );
-    let (handle, probe) = maki_lua::test_support::probed_event_handle();
-    app.lua_event_handle = handle;
     app.input_box.set_input("/rename dråft tail".into());
     app.command_palette.sync("/rename dråft tail");
     app.input_box.buffer.set_cursor(0, 11);
@@ -1010,19 +1174,21 @@ fn argument_completion_enter_fills_then_next_enter_executes() {
 #[test]
 fn argument_completion_enter_on_exact_match_executes_immediately() {
     let dir = StateDir::from_path(env::temp_dir());
-    let mut app = build_app_with_lua(
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    let (registry, _producer) = lua_registry(TestLuaCommand {
+        handle: handle.clone(),
+        name: Arc::from("/rename"),
+        plugin: Arc::from("sessions"),
+        max_args: None,
+        completion: true,
+    });
+    let mut app = build_app_with_full(
         dir.clone(),
         Arc::new(test_writer(dir)),
-        LuaCommandReader::from_commands(vec![LuaCommandInfo {
-            name: "/rename".into(),
-            description: "Rename".into(),
-            plugin: "sessions".into(),
-            max_args: usize::MAX,
-            has_argument_completion: true,
-        }]),
+        registry,
+        handle,
+        UiConfig::default(),
     );
-    let (handle, probe) = maki_lua::test_support::probed_event_handle();
-    app.lua_event_handle = handle;
     app.input_box.set_input("/rename final".into());
     app.command_palette.sync("/rename final");
     app.command_palette.set_argument_completion(
@@ -3237,19 +3403,21 @@ const LUA_COMMAND_NOT_SENT: &str = "lua command with args must not reach the mod
 #[test]
 fn typed_lua_command_with_args_executes() {
     let dir = StateDir::from_path(env::temp_dir());
-    let mut app = build_app_with_lua(
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    let (registry, _producer) = lua_registry(TestLuaCommand {
+        handle: handle.clone(),
+        name: Arc::from("/rename"),
+        plugin: Arc::from("sessions"),
+        max_args: None,
+        completion: false,
+    });
+    let mut app = build_app_with_full(
         dir.clone(),
         Arc::new(test_writer(dir)),
-        LuaCommandReader::from_commands(vec![LuaCommandInfo {
-            name: "/rename".into(),
-            description: "Rename the current session".into(),
-            plugin: "sessions".into(),
-            max_args: usize::MAX,
-            has_argument_completion: false,
-        }]),
+        registry,
+        handle,
+        UiConfig::default(),
     );
-    let (handle, probe) = maki_lua::test_support::probed_event_handle();
-    app.lua_event_handle = handle;
 
     let actions = type_and_submit(&mut app, "/rename my title");
 
@@ -3355,16 +3523,13 @@ fn run_cmdline_dispatches_custom_command() {
 #[test]
 fn run_cmdline_dispatches_mcp_prompt() {
     let mut app = test_app();
-    app.command_runtime.replace_mcp(&[McpPromptInfo {
+    let outcome = app.execute_mcp(&McpPromptRequest {
         display_name: "review".into(),
         qualified_name: "server/review".into(),
-        description: "Code review".into(),
-        arguments: vec![],
-    }]);
-    app.command_palette =
-        CommandPalette::new(app.command_runtime.registry.clone(), app.command_target);
-
-    let actions = app.run_cmdline("/review src/lib.rs", 0).unwrap();
+        arguments: HashMap::new(),
+        display_text: "/review src/lib.rs".into(),
+    });
+    let actions = outcome.actions;
 
     let [Action::SendMessage(input)] = actions.as_slice() else {
         panic!("expected one SendMessage action");
@@ -3424,19 +3589,21 @@ fn run_cmdline_rejects_past_max_depth() {
 #[test]
 fn run_cmdline_forwards_depth_to_lua_command() {
     let dir = StateDir::from_path(env::temp_dir());
-    let mut app = build_app_with_lua(
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    let (registry, _producer) = lua_registry(TestLuaCommand {
+        handle: handle.clone(),
+        name: Arc::from("/Sessions"),
+        plugin: Arc::from("sessions"),
+        max_args: Some(0),
+        completion: false,
+    });
+    let mut app = build_app_with_full(
         dir.clone(),
         Arc::new(test_writer(dir)),
-        LuaCommandReader::from_commands(vec![LuaCommandInfo {
-            name: "/Sessions".into(),
-            description: "Browse sessions".into(),
-            plugin: "sessions".into(),
-            max_args: 0,
-            has_argument_completion: false,
-        }]),
+        registry,
+        handle,
+        UiConfig::default(),
     );
-    let (handle, probe) = maki_lua::test_support::probed_event_handle();
-    app.lua_event_handle = handle;
 
     app.run_cmdline("/sessions", 3).unwrap();
 
@@ -3768,22 +3935,13 @@ fn mcp_toggle_dispatches_action() {
 fn mcp_prompt_args_expand_references() {
     let (_tmp, mut app, backend) = completion_app();
     seed_skill(&backend, "pdf");
-    app.command_runtime.replace_mcp(&[McpPromptInfo {
+    let outcome = app.execute_mcp(&McpPromptRequest {
         display_name: "prompt".into(),
         qualified_name: "srv/prompt".into(),
-        description: "test prompt".into(),
-        arguments: vec![],
-    }]);
-    app.command_palette =
-        CommandPalette::new(app.command_runtime.registry.clone(), app.command_target);
-
-    let actions = app.execute_command(
-        ParsedCommand {
-            name: "/prompt".into(),
-            args: "@skill:pdf summarize".into(),
-        },
-        0,
-    );
+        arguments: HashMap::new(),
+        display_text: "/prompt @skill:pdf summarize".into(),
+    });
+    let actions = outcome.actions;
     let [Action::SendMessage(input)] = actions.as_slice() else {
         panic!("expected one SendMessage action");
     };
@@ -5667,13 +5825,32 @@ fn enter_inserts_skill() {
 #[test]
 fn at_completion_insertion_synchronizes_argument_completion() {
     let (_tmp, mut app, _backend) = completion_app();
-    app.command_runtime.replace_lua(&[LuaCommandInfo {
-        name: "/deploy".into(),
-        description: "Deploy".into(),
-        plugin: "deploy".into(),
-        max_args: 1,
-        has_argument_completion: true,
-    }]);
+    let producer = app
+        .command_runtime
+        .registry
+        .create_producer(maki_commands::ProducerPrecedence::Plugin);
+    producer
+        .replace(vec![maki_commands::Registration {
+            spec: maki_commands::CommandSpec {
+                name: Arc::from("/deploy"),
+                aliases: Arc::from([]),
+                arguments: maki_commands::ArgumentArity::bounded(0, 1),
+                docs: maki_commands::CommandDocs {
+                    summary: Arc::from("Deploy"),
+                    argument_hint: None,
+                },
+            },
+            behavior: Arc::new(TestLuaBehavior {
+                handle: maki_lua::EventHandle::disconnected_for_test(),
+                plugin: Arc::from("deploy"),
+                name: Arc::from("/deploy"),
+            }),
+            completion: Some(Arc::new(TestLuaCompletion {
+                handle: maki_lua::EventHandle::disconnected_for_test(),
+                plugin: Arc::from("deploy"),
+            })),
+        }])
+        .unwrap();
     app.command_palette =
         CommandPalette::new(app.command_runtime.registry.clone(), app.command_target);
     app.input_box.set_input("/deploy @rev".into());
@@ -6385,7 +6562,13 @@ fn test_splash_off_settles_idle() {
         splash_animation: false,
         ..Default::default()
     };
-    let mut app = build_app_with_full(dir, writer, LuaCommandReader::empty(), handle, ui);
+    let mut app = build_app_with_full(
+        dir,
+        writer,
+        maki_commands::CommandRegistry::new(),
+        handle,
+        ui,
+    );
     rendered(&mut app); // start the entry fade
     app.main_chat().advance_splash_past_fade();
     let _ = app.tick(); // settle: fade over, still splash is IDLE
@@ -6405,7 +6588,13 @@ fn test_splash_still_repulls_once_on_version_change() {
         splash_animation: false,
         ..Default::default()
     };
-    let mut app = build_app_with_full(dir, writer, LuaCommandReader::empty(), handle.clone(), ui);
+    let mut app = build_app_with_full(
+        dir,
+        writer,
+        maki_commands::CommandRegistry::new(),
+        handle.clone(),
+        ui,
+    );
     // Warm the Lua JIT so the still-splash pull and the forced repull below
     // fit inside the pull timeout even under parallel test load.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);

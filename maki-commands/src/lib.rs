@@ -1111,6 +1111,10 @@ impl InvocationLifecycle {
         Self(lifecycle)
     }
 
+    pub fn detached() -> Self {
+        classification_channel().0
+    }
+
     pub fn transition(&self, classification: CommandClassification) -> bool {
         self.0.transition(classification)
     }

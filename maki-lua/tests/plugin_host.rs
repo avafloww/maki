@@ -891,7 +891,7 @@ error("plugin blew up after register")
         .expect_err("expected lua error");
     assert!(matches!(err, PluginError::Lua { .. }));
     assert!(!reg.has("doomed"));
-    assert_eq!(host.command_reader().load().commands.len(), 0);
+    assert!(host.command_registry().snapshot().commands().is_empty());
 
     host.load_source("broken", ECHO_PLUGIN)
         .expect("retry with good source should succeed");
@@ -2581,12 +2581,13 @@ fn register_command_happy_path() {
     )
     .unwrap();
 
-    let reader = host.command_reader();
-    let snap = reader.load();
-    assert_eq!(snap.commands.len(), 1);
-    assert_eq!(snap.commands[0].name.as_ref(), "/hello");
-    assert_eq!(snap.commands[0].description.as_ref(), "says hello");
-    assert_eq!(snap.commands[0].plugin.as_ref(), "cmd_plugin");
+    let snapshot = host.command_registry().snapshot();
+    assert_eq!(snapshot.commands().len(), 1);
+    assert_eq!(snapshot.commands()[0].spec().name.as_ref(), "/hello");
+    assert_eq!(
+        snapshot.commands()[0].spec().docs.summary.as_ref(),
+        "says hello"
+    );
 }
 
 #[test]
@@ -2761,7 +2762,11 @@ fn register_command_nargs_values(nargs_field: &str) -> usize {
     )
     .unwrap();
 
-    host.command_reader().load().commands[0].max_args
+    host.command_registry().snapshot().commands()[0]
+        .spec()
+        .arguments
+        .max
+        .unwrap_or(usize::MAX)
 }
 
 #[test_case::test_case("a  b c", "a  b c|a,b,c" ; "raw_text_and_split_list")]
@@ -2881,9 +2886,9 @@ fn reload_replaces_commands() {
         r#"maki.api.register_command({ name = "/v2", handler = function() end })"#,
     )
     .unwrap();
-    let snap = host.command_reader().load();
-    assert_eq!(snap.commands.len(), 1);
-    assert_eq!(snap.commands[0].name.as_ref(), "/v2");
+    let snapshot = host.command_registry().snapshot();
+    assert_eq!(snapshot.commands().len(), 1);
+    assert_eq!(snapshot.commands()[0].spec().name.as_ref(), "/v2");
 }
 
 #[test]
@@ -2895,17 +2900,21 @@ fn unload_clears_commands() {
         r#"maki.api.register_command({ name = "/bye", handler = function() end })"#,
     )
     .unwrap();
-    assert_eq!(host.command_reader().load().commands.len(), 1);
+    assert_eq!(host.command_registry().snapshot().commands().len(), 1);
 
     host.unload("cmd_only").unwrap();
-    assert_eq!(host.command_reader().load().commands.len(), 0);
+    assert!(host.command_registry().snapshot().commands().is_empty());
 }
 
 #[test]
 fn sessions_plugin_registers_commands() {
     let (_reg, host) = builtins_host();
-    let snap = host.command_reader().load();
-    let names: Vec<&str> = snap.commands.iter().map(|c| c.name.as_ref()).collect();
+    let snapshot = host.command_registry().snapshot();
+    let names: Vec<&str> = snapshot
+        .commands()
+        .iter()
+        .map(|c| c.spec().name.as_ref())
+        .collect();
     assert!(
         names.contains(&"/sessions"),
         "missing /sessions in {names:?}"

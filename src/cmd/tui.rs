@@ -142,8 +142,13 @@ fn build_stack(
 ) -> Result<(Stack, Vec<String>)> {
     let mut warnings = Vec::new();
 
-    let mut plugin_host = PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), !cli.no_jit)
-        .context("initialize lua plugin host")?;
+    let command_registry = maki_commands::CommandRegistry::new();
+    let mut plugin_host = PluginHost::with_command_registry(
+        Arc::clone(ToolRegistry::global_arc()),
+        command_registry,
+        !cli.no_jit,
+    )
+    .context("initialize lua plugin host")?;
 
     let (fallback_config, fallback_model) = fallback.unzip();
     let reloading = fallback_model.is_some();
@@ -345,7 +350,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
                 )),
                 timeouts: stack.timeouts(),
                 exit_on_done: cli.exit_on_done,
-                lua_command_reader: stack.plugin_host.command_reader(),
+                command_registry: stack.plugin_host.command_registry(),
                 keymap_reader: stack.plugin_host.keymap_reader(),
                 hint_reader: stack.plugin_host.hint_reader(),
                 ui_action_rx: stack.plugin_host.ui_action_rx(),

@@ -20,6 +20,7 @@ use maki_agent::{
     AgentEvent, BufferSnapshot, ImageMediaType, ImageSource, InstructionBlock, SharedBuf,
     TextOutput, ToolOutput,
 };
+use maki_commands::DispatchRequest;
 use maki_config::{Effect, PermissionRule, ToolKey, ToolOutputLines};
 use maki_lua_macro::{lua_fn, lua_table};
 use mlua::{
@@ -31,15 +32,13 @@ use serde_json::{Value, json};
 use crate::api::completion::add_completion_fns;
 use crate::api::options::{PluginOpts, register_options__doc, register_options__register};
 use crate::api::ui::buf::{BufHandle, line_to_lua};
-use crate::api::util::command::{
-    CommandEntry, CommandHandlerMap, LuaCommandWriter, UiAction, publish_command_snapshot,
-    ui_roundtrip,
-};
+use crate::api::util::command::{CommandEntry, CommandHandlerMap, UiAction, ui_roundtrip};
 use crate::api::util::convert::{json_to_lua, lua_to_json};
 use crate::api::util::ctx::LuaCtx;
 use crate::api::util::pair::{Pair, try_pair};
 use crate::runtime::{
     HintContent, LiveCtx, PromptHintCallbacks, PromptHintRegistration, Request, command_depth,
+    command_invocation,
 };
 
 const TOOL_NAME_MAX: usize = 64;
@@ -845,15 +844,28 @@ async fn run_command(
     cmdline: String,
 ) -> LuaResult<Pair<bool>> {
     let depth = command_depth(&lua).saturating_add(1);
-    let reply = try_pair!(
-        ui_roundtrip(tx.as_ref(), |reply_tx| UiAction::RunCommand {
-            cmdline,
-            depth,
-            reply_tx,
-        })
-        .await
-    );
-    try_pair!(reply);
+    if let Some(invocation) = command_invocation(&lua) {
+        let result = invocation
+            .dispatcher
+            .dispatch(DispatchRequest {
+                input: Arc::from(cmdline),
+                depth: depth as usize,
+                target_id: invocation.target_id,
+                lifecycle: invocation.lifecycle,
+            })
+            .await;
+        try_pair!(result.map(|_| ()).map_err(|error| error.to_string()));
+    } else {
+        let reply = try_pair!(
+            ui_roundtrip(tx.as_ref(), |reply_tx| UiAction::RunCommand {
+                cmdline,
+                depth,
+                reply_tx,
+            })
+            .await
+        );
+        try_pair!(reply);
+    }
     Ok((Some(true), None))
 }
 
@@ -1471,14 +1483,7 @@ fn register_command_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> LuaRe
         );
     }
 
-    let map = lua
-        .app_data_ref::<CommandHandlerMap>()
-        .ok_or_else(|| mlua::Error::runtime("register_command: not initialized"))?;
-    let writer = lua
-        .app_data_ref::<LuaCommandWriter>()
-        .ok_or_else(|| mlua::Error::runtime("register_command: not initialized"))?;
-    publish_command_snapshot(&map, &writer);
-
+    crate::runtime::publish_registered_commands(lua, &plugin)?;
     Ok(())
 }
 

@@ -1,13 +1,28 @@
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+use maki_commands::{
+    ArgumentArity, CommandBehavior, CommandDocs, CommandError, CommandFuture, CommandInvocation,
+    CommandSpec, Producer, Registration,
+};
 use serde::Deserialize;
 use tracing::{debug, warn};
 
 const PROJECT_COMMAND_DIRS: &[&str] = &[".maki/commands", ".claude/commands"];
 const GLOBAL_THIRD_PARTY_COMMAND_DIRS: &[&str] = &[".claude/commands"];
 const ARGUMENTS_PLACEHOLDER: &str = "$ARGUMENTS";
+
+pub trait PromptSink: Send + Sync + 'static {
+    fn submit(
+        &self,
+        prompt: String,
+        invocation: CommandInvocation,
+    ) -> CommandFuture<Result<(), CommandError>>;
+}
 
 #[derive(Debug, Default, Deserialize)]
 struct Frontmatter {
@@ -60,6 +75,52 @@ pub struct CustomCommand {
     pub content: String,
     pub scope: CommandScope,
     pub accepts_args: bool,
+}
+
+#[derive(Clone)]
+struct CustomCommandBehavior {
+    command: CustomCommand,
+    sink: Arc<dyn PromptSink>,
+}
+
+impl CommandBehavior for CustomCommandBehavior {
+    fn execute(&self, invocation: CommandInvocation) -> CommandFuture<Result<(), CommandError>> {
+        self.sink
+            .submit(self.command.render(&invocation.arguments), invocation)
+    }
+}
+
+pub fn register_commands(
+    producer: &Producer,
+    commands: &[CustomCommand],
+    sink: Arc<dyn PromptSink>,
+) -> Result<(), maki_commands::RegistrationError> {
+    producer.replace(
+        commands
+            .iter()
+            .cloned()
+            .map(|command| Registration {
+                spec: CommandSpec {
+                    name: Arc::from(command.display_name()),
+                    aliases: Arc::from([]),
+                    arguments: if command.has_args() {
+                        ArgumentArity::ANY
+                    } else {
+                        ArgumentArity::NONE
+                    },
+                    docs: CommandDocs {
+                        summary: Arc::from(command.description.clone()),
+                        argument_hint: None,
+                    },
+                },
+                behavior: Arc::new(CustomCommandBehavior {
+                    command,
+                    sink: Arc::clone(&sink),
+                }),
+                completion: None,
+            })
+            .collect(),
+    )
 }
 
 impl CustomCommand {
@@ -205,6 +266,50 @@ mod tests {
         assert_eq!(cmd.name, expected_name);
         assert_eq!(cmd.description, expected_desc);
         assert_eq!(cmd.has_args(), expected_has_args);
+    }
+
+    #[test]
+    fn registered_command_renders_and_submits_to_sink() {
+        struct Sink(Arc<std::sync::Mutex<Vec<String>>>);
+
+        impl PromptSink for Sink {
+            fn submit(
+                &self,
+                prompt: String,
+                invocation: CommandInvocation,
+            ) -> CommandFuture<Result<(), CommandError>> {
+                self.0.lock().unwrap().push(prompt);
+                invocation
+                    .lifecycle
+                    .transition(maki_commands::CommandClassification::Completed);
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let registry = maki_commands::CommandRegistry::new();
+        let producer = registry.create_producer(maki_commands::ProducerPrecedence::Application);
+        let submitted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        register_commands(
+            &producer,
+            &[CustomCommand {
+                name: "review".into(),
+                description: "Code review".into(),
+                content: "Review $ARGUMENTS".into(),
+                scope: CommandScope::Project,
+                accepts_args: true,
+            }],
+            Arc::new(Sink(Arc::clone(&submitted))),
+        )
+        .unwrap();
+
+        smol::block_on(registry.dispatch_input(
+            "/project:review src/lib.rs",
+            0,
+            registry.create_target(),
+        ))
+        .unwrap();
+
+        assert_eq!(submitted.lock().unwrap().as_slice(), ["Review src/lib.rs"]);
     }
 
     #[test]

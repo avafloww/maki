@@ -24,8 +24,7 @@ use maki_agent::{
 };
 use maki_config::{ModelPolicy, UiConfig};
 use maki_lua::{
-    EventHandle, HintReader, KeymapReader, LuaCommandReader, ModelRequest, SessionRequest,
-    UiAction, UiReply,
+    EventHandle, HintReader, KeymapReader, ModelRequest, SessionRequest, UiAction, UiReply,
 };
 use maki_providers::Timeouts;
 use maki_providers::provider::{Provider, fetch_all_models, from_model};
@@ -87,7 +86,7 @@ pub struct EventLoopParams {
     pub permissions: Arc<PermissionManager>,
     pub timeouts: Timeouts,
     pub exit_on_done: bool,
-    pub lua_command_reader: LuaCommandReader,
+    pub command_registry: maki_commands::CommandRegistry,
     pub keymap_reader: KeymapReader,
     pub hint_reader: HintReader,
     pub ui_action_rx: flume::Receiver<UiAction>,
@@ -310,8 +309,6 @@ struct SpawnCtx {
     /// rules stay per-session.
     permissions: Arc<PermissionManager>,
     timeouts: Timeouts,
-    custom_commands: Arc<[CustomCommand]>,
-    lua_command_reader: LuaCommandReader,
     keymap_reader: KeymapReader,
     hint_reader: HintReader,
     lua_event_handle: EventHandle,
@@ -350,14 +347,12 @@ impl SpawnCtx {
             Arc::clone(&self.available_models),
             handles.mcp_reader(),
             handles.mcp_config_errors.clone(),
-            self.lua_command_reader.clone(),
             self.keymap_reader.clone(),
             self.hint_reader.clone(),
             Arc::clone(&self.storage_writer),
             self.ui_config.clone(),
             self.input_history_size,
             permissions,
-            Arc::clone(&self.custom_commands),
             self.lua_event_handle.clone(),
             Arc::clone(&self.model_policy),
             crate::theme::default_provider().clone(),
@@ -392,8 +387,6 @@ pub(crate) struct EventLoop<'t> {
     warn_tx: flume::Sender<String>,
     ui_action_rx: flume::Receiver<UiAction>,
     command_rx: flume::Receiver<RoutedCommand>,
-    mcp_generation: u64,
-    lua_generation: u64,
     _model_fetch_task: smol::Task<()>,
 }
 
@@ -503,7 +496,7 @@ impl<'t> EventLoop<'t> {
             permissions,
             timeouts,
             exit_on_done,
-            lua_command_reader,
+            command_registry,
             keymap_reader,
             hint_reader,
             ui_action_rx,
@@ -539,7 +532,6 @@ impl<'t> EventLoop<'t> {
         });
 
         let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-        let (mcp_handle, mcp_config_errors) = smol::block_on(mcp::start(&cwd));
 
         let provider: Arc<dyn Provider> = if needs_login {
             Arc::from(maki_providers::provider::from_model_fallback(
@@ -556,24 +548,22 @@ impl<'t> EventLoop<'t> {
         let storage_writer = Arc::new(StorageWriter::new(storage.clone(), bg.warn_tx.clone()));
 
         let notifier = terminal::TerminalNotifier::new(ui_config.notifications);
-        let mcp_prompts = mcp_handle
-            .as_ref()
-            .map(|handle| handle.reader().load().prompts.clone())
-            .unwrap_or_default();
-        let lua_commands = lua_command_reader.load().commands.clone();
         let model_completion = Arc::new(ModelArgSource::new(Arc::clone(&bg.available)));
         let theme_completion = Arc::new(ThemeArgSource::new(
             crate::theme::default_provider().clone(),
         ));
-        let (command_runtime, command_rx) = CommandRuntime::new(
+        let (command_runtime, command_rx, mcp_prompt_sink) = CommandRuntime::new(
             &commands,
-            &mcp_prompts,
-            &lua_commands,
+            command_registry,
             model_completion,
             theme_completion,
-            lua_event_handle.clone(),
         );
         let command_runtime = Arc::new(command_runtime);
+        let (mcp_handle, mcp_config_errors) = smol::block_on(mcp::start_with_commands(
+            &cwd,
+            command_runtime.registry.clone(),
+            mcp_prompt_sink,
+        ));
         let ctx = SpawnCtx {
             storage,
             config,
@@ -581,8 +571,6 @@ impl<'t> EventLoop<'t> {
             input_history_size,
             permissions,
             timeouts,
-            custom_commands: Arc::from(commands),
-            lua_command_reader,
             keymap_reader,
             hint_reader,
             lua_event_handle,
@@ -633,8 +621,6 @@ impl<'t> EventLoop<'t> {
             warn_tx: bg.warn_tx,
             ui_action_rx,
             command_rx,
-            mcp_generation: 0,
-            lua_generation: 0,
             _model_fetch_task: bg.task,
         })
     }
@@ -777,22 +763,6 @@ impl<'t> EventLoop<'t> {
     /// still drain their floats, or a plugin writing to a window nobody is
     /// looking at would lose the output.
     fn tick(&mut self) -> Dirty {
-        let mcp = self
-            .ctx
-            .mcp_handle
-            .as_ref()
-            .map(|handle| handle.reader().load());
-        let lua = self.ctx.lua_command_reader.load();
-        if let Some(snapshot) = mcp.as_ref()
-            && snapshot.generation != self.mcp_generation
-        {
-            self.ctx.command_runtime.replace_mcp(&snapshot.prompts);
-            self.mcp_generation = snapshot.generation;
-        }
-        if lua.generation != self.lua_generation {
-            self.ctx.command_runtime.replace_lua(&lua.commands);
-            self.lua_generation = lua.generation;
-        }
         let mut dirty = Dirty::NO;
         let mut login_actions: Vec<(usize, Vec<Action>)> = Vec::new();
         for (i, rt) in self.sessions.iter_mut().enumerate() {
