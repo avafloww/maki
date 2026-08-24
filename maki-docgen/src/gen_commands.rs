@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use maki_ui::BUILTIN_COMMANDS;
+use maki_commands::BUILTIN_COMMANDS;
 
 use crate::lua_util;
 
@@ -48,7 +48,13 @@ pub fn generate() -> String {
     writeln!(out).unwrap();
     writeln!(
         out,
-        "Type `/` in the input box to open the command palette."
+        "Type `/` in the TUI input box to open the command palette. A leading slash command is also recognized in `--print`, SDK stream mode, and ACP. Command names use exact ASCII-insensitive matching. Unknown slash-prefixed text remains a model prompt. A known command with invalid arguments, or an effect unsupported by the current frontend, returns an error instead of becoming a prompt."
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "The active registry combines built-ins, custom Markdown commands, MCP prompts, and Lua commands. Lua commands have the highest collision priority, followed by MCP prompts, custom commands, and built-ins. Registrations can change when plugins reload or MCP servers reconnect. The palette and protocol command lists show the current winners. Root CLI subcommands such as `maki auth` are separate from slash commands."
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -227,4 +233,31 @@ pub fn generate() -> String {
         out.pop();
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use maki_commands::BUILTIN_COMMANDS;
+
+    use super::generate;
+
+    #[test]
+    fn doc_projection_matches_builtin_specs() {
+        let generated = generate();
+        let mut previous = 0;
+        for command in BUILTIN_COMMANDS {
+            let row = format!("| `{}` | {} |", command.name, command.description);
+            let position = generated[previous..]
+                .find(&row)
+                .map(|position| previous + position)
+                .unwrap_or_else(|| panic!("missing command row: {row}"));
+            assert!(position >= previous);
+            previous = position + row.len();
+            for alias in command.aliases {
+                assert!(
+                    generated.contains(&format!("| `{alias}` | Alias for `{}` |", command.name))
+                );
+            }
+        }
+    }
 }

@@ -11,7 +11,6 @@ mod clock;
 mod color_compat;
 mod command_runtime;
 mod components;
-pub use components::command::{BUILTIN_COMMANDS, BuiltinCommand};
 pub use components::keybindings;
 mod highlight;
 pub use highlight::highlight_ansi;

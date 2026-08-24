@@ -214,6 +214,17 @@ impl McpPromptSink for CommandInputSink {
     }
 }
 
+struct CompletedBuiltin;
+
+impl CommandBehavior for CompletedBuiltin {
+    fn execute(&self, invocation: CommandInvocation) -> CommandFuture<Result<(), CommandError>> {
+        invocation
+            .lifecycle
+            .transition(CommandClassification::Completed);
+        Box::pin(async { Ok(()) })
+    }
+}
+
 struct UnsupportedBuiltin(Arc<str>);
 
 impl CommandBehavior for UnsupportedBuiltin {
@@ -246,7 +257,11 @@ fn register_print_commands(
                         argument_hint: None,
                     },
                 },
-                behavior: Arc::new(UnsupportedBuiltin(Arc::from(command.name))),
+                behavior: if command.name == "/exit" {
+                    Arc::new(CompletedBuiltin)
+                } else {
+                    Arc::new(UnsupportedBuiltin(Arc::from(command.name)))
+                },
                 completion: None,
             })
             .collect(),
@@ -680,6 +695,22 @@ mod tests {
             Ok(())
         })
         .unwrap();
+        assert!(!ran);
+    }
+
+    #[test]
+    fn exit_command_completes_without_runner() {
+        let registry = CommandRegistry::new();
+        let sink = sink();
+        register_print_commands(&registry, &[], Arc::clone(&sink)).unwrap();
+        let mut ran = false;
+
+        drive_print(&registry, &sink, input("/exit"), |_| {
+            ran = true;
+            Ok(())
+        })
+        .unwrap();
+
         assert!(!ran);
     }
 

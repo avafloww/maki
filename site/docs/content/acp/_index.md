@@ -42,6 +42,9 @@ The `model` value is a `provider/model-id` spec, same format as `maki --model`.
 - **Questions.** The `question` tool becomes a native form in the editor (ACP elicitation). If the client does not support elicitation, the tool is dropped and the model asks in plain text.
 - **Live tool calls.** Tool progress streams as it happens, including sub-agents and batched calls.
 - **Images and context.** Prompts can include images and editor-attached files.
+- **Slash commands.** The editor receives the active command list and updates when plugin or MCP registrations change. A known leading slash command runs before model input. Unknown slash-prefixed text remains a model prompt. Known commands cannot include images.
+
+ACP supports `/model <spec>` through its model-control path. TUI-only built-ins remain visible but return an unsupported-frontend error when invoked. Custom Markdown commands, MCP prompts, and Lua commands use the same registry and collision rules as the TUI. See [Commands](/docs/commands/).
 
 Authentication, providers, and permissions come from your normal Maki config. Set up [providers](/docs/providers/) first and ACP sessions just work.
 

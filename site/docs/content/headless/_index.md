@@ -35,6 +35,14 @@ JSON output includes `type`, `subtype`, `is_error`, `duration_ms`, `num_turns`, 
 
 Add `--verbose` to include full turn-by-turn messages in the output.
 
+## Slash commands
+
+A prompt whose first token is a known slash command runs that command before Maki creates model input. Custom Markdown commands, MCP prompts, and Lua commands can produce a normal agent turn. A side-effect-only command succeeds with empty output. A known command that is invalid or unsupported in headless mode exits with an error. Unknown slash-prefixed text remains a model prompt.
+
+SDK stream mode supports `/model <spec>`. One-shot print mode supports `/exit`. TUI-only built-ins are recognized but return an unsupported-frontend error. Slash commands cannot include image attachments.
+
+See [Commands](/docs/commands/) for matching, collision priority, and the generated command list.
+
 ## Claude Code Compatibility
 
 Maki's `--print` is a drop-in replacement for Claude Code:
@@ -70,7 +78,7 @@ your orchestrator                     maki --print --input-format stream-json
         │  one JSON object per line       (stdout)    │
 ```
 
-Inbound messages (`user`, `control_request`, `control_response`, `control_cancel_request`) drive the agent; outbound messages match the Claude Code SDK shape. Under the hood it reuses the same driver as the TUI and ACP server, so sessions, tools, and permissions all work the same way.
+Inbound messages (`user`, `control_request`, `control_response`, `control_cancel_request`) drive the agent; outbound messages match the Claude Code SDK shape. The initialization and control projections list the active slash commands. A `system/commands_update` event reports registry changes after plugin reloads or MCP updates. Under the hood it reuses the same driver as the TUI and ACP server, so sessions, tools, and permissions all work the same way.
 
 SDK-only flags (`--max-turns`, `--session-id`, `--fork-session`, `--permission-mode`, `--include-partial-messages`, ...) are listed in the [CLI flag matrix](/docs/cli/#flags-by-run-path). `--system-prompt` / `--append-system-prompt` apply in every run path.
 

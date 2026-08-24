@@ -7,7 +7,9 @@ group = "Reference"
 
 # Commands
 
-Type `/` in the input box to open the command palette.
+Type `/` in the TUI input box to open the command palette. A leading slash command is also recognized in `--print`, SDK stream mode, and ACP. Command names use exact ASCII-insensitive matching. Unknown slash-prefixed text remains a model prompt. A known command with invalid arguments, or an effect unsupported by the current frontend, returns an error instead of becoming a prompt.
+
+The active registry combines built-ins, custom Markdown commands, MCP prompts, and Lua commands. Lua commands have the highest collision priority, followed by MCP prompts, custom commands, and built-ins. Registrations can change when plugins reload or MCP servers reconnect. The palette and protocol command lists show the current winners. Root CLI subcommands such as `maki auth` are separate from slash commands.
 
 ## Built-in commands
 

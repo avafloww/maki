@@ -20,8 +20,6 @@ const TICK_TIMEOUT_MS: u64 = 10;
 /// Note appended to builtin alias rows: `(Alias for /new)`.
 const ALIAS_NOTE: &str = " (Alias for ";
 
-pub use maki_commands::{BUILTIN_COMMANDS, BuiltinCommand};
-
 #[cfg(test)]
 pub struct ParsedCommand {
     pub name: String,
