@@ -26,9 +26,12 @@ use crate::AppSession;
 use crate::chat::Chat;
 use crate::chat::{CANCELLED_TEXT, ChatEventResult, DONE_TEXT, ERROR_TEXT};
 use crate::clipboard::ClipboardState;
-use crate::components::arg_completion::{LuaArgumentSource, ModelArgSource, ThemeArgSource};
+use crate::command_runtime::{BuiltinRoute, CommandRoute, CommandRuntime, RoutedCommand, complete};
+
 use crate::components::btw_modal::BtwModal;
-use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
+#[cfg(test)]
+use crate::components::command::ParsedCommand;
+use crate::components::command::{CommandAction, CommandPalette, ConfirmedCommand};
 use crate::components::file_completion::{
     CompletionAction, CompletionItem, FileCompletionMenu, at_token_range,
 };
@@ -63,6 +66,7 @@ use maki_agent::{
     AgentEvent, Envelope, ImageSource, McpConfigErrors, McpPromptInfo, McpSnapshotReader,
     SharedMessages, SubagentInfo,
 };
+use maki_commands::InvocationTargetId;
 use maki_config::{ModelPolicy, UiConfig};
 use maki_lua::{
     BuiltinAction, CompletionCtx, EventHandle, HintReader, HintSnapshot, ItemSpec, KeymapReader,
@@ -134,6 +138,36 @@ const SNIPPET_CHARS: usize = 64;
 pub(crate) const MAX_COMMAND_DEPTH: u8 = 8;
 pub(crate) const COMMAND_DEPTH_MSG: &str = "slash command nested too deeply (alias cycle?)";
 const NOTIFICATION_PREVIEW_CHARS: usize = 120;
+
+struct RouteOutcome {
+    actions: Vec<Action>,
+    classification: maki_commands::CommandClassification,
+}
+
+impl RouteOutcome {
+    fn completed(actions: Vec<Action>) -> Self {
+        Self {
+            actions,
+            classification: maki_commands::CommandClassification::Completed,
+        }
+    }
+
+    fn accepted(actions: Vec<Action>) -> Self {
+        Self {
+            actions,
+            classification: maki_commands::CommandClassification::AgentTurnAccepted,
+        }
+    }
+
+    fn failed(error: impl Into<Arc<str>>) -> Self {
+        Self {
+            actions: Vec::new(),
+            classification: maki_commands::CommandClassification::Failed(
+                maki_commands::CommandError::Producer(error.into()),
+            ),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Notification {
@@ -291,6 +325,8 @@ pub struct App {
     pub(super) chat_index: HashMap<String, usize>,
     pub(crate) input_box: InputBox,
     pub(super) command_palette: CommandPalette,
+    pub(crate) command_runtime: Arc<CommandRuntime>,
+    pub(crate) command_target: InvocationTargetId,
     pub(super) task_picker: ListPicker<TaskEntry>,
     pub(super) task_picker_original: Option<usize>,
     pub(super) lua_picker: LuaPicker,
@@ -359,17 +395,18 @@ impl App {
         available_models: Arc<ArcSwapOption<Vec<String>>>,
         mcp_reader: McpSnapshotReader,
         mcp_config_errors: McpConfigErrors,
-        lua_command_reader: LuaCommandReader,
+        _lua_command_reader: LuaCommandReader,
         keymap_reader: KeymapReader,
         hint_reader: HintReader,
         storage_writer: Arc<StorageWriter>,
         ui_config: UiConfig,
         input_history_size: usize,
         permissions: Arc<PermissionManager>,
-        custom_commands: Arc<[maki_agent::command::CustomCommand]>,
+        _custom_commands: Arc<[maki_agent::command::CustomCommand]>,
         lua_event_handle: EventHandle,
         model_policy: Arc<ModelPolicy>,
         theme_provider: Arc<dyn ThemesProvider>,
+        command_runtime: Arc<CommandRuntime>,
     ) -> Self {
         scrollbar::set_enabled(ui_config.scrollbar);
         let state = SessionState::from_session(session, model, &storage, &model_policy);
@@ -379,6 +416,7 @@ impl App {
             InputHistory::load(&storage, input_history_size),
             ui_config.max_input_lines,
         );
+        let command_target = command_runtime.registry.create_target();
         let mut app = Self {
             chats: vec![Chat::new(
                 "Main".into(),
@@ -389,14 +427,9 @@ impl App {
             active_chat: 0,
             chat_index: HashMap::new(),
             input_box,
-            command_palette: CommandPalette::new(
-                custom_commands,
-                mcp_reader.clone(),
-                lua_command_reader,
-                ModelArgSource::new(Arc::clone(&available_models)),
-                ThemeArgSource::new(Arc::clone(&theme_provider)),
-                LuaArgumentSource::new(lua_event_handle.clone()),
-            ),
+            command_runtime: Arc::clone(&command_runtime),
+            command_target,
+            command_palette: CommandPalette::new(command_runtime.registry.clone(), command_target),
             task_picker: ListPicker::new(),
             task_picker_original: None,
             lua_picker: LuaPicker::new(lua_event_handle.clone()),
@@ -754,7 +787,14 @@ impl App {
             return Some(self.run_builtin(BuiltinAction::Tasks));
         }
         if key::SESSIONS.matches(key) {
-            self.run_lua_command(SESSIONS_COMMAND, String::new(), 0);
+            if let Ok(command) = self.command_runtime.registry.resolve(SESSIONS_COMMAND) {
+                let _ = smol::block_on(self.command_runtime.registry.dispatch_command(
+                    command,
+                    "",
+                    0,
+                    self.command_target,
+                ));
+            }
             return Some(vec![]);
         }
         if key::SCROLL_HALF_UP.matches(key) {
@@ -1174,7 +1214,12 @@ impl App {
             CommandAction::Execute(cmd) => {
                 self.input_box.discard();
                 self.file_completion.close();
-                return self.execute_command(cmd, 0);
+                return self
+                    .dispatch_confirmed_command(cmd, 0)
+                    .unwrap_or_else(|error| {
+                        self.flash(error);
+                        Vec::new()
+                    });
             }
             CommandAction::AcceptArgument { text, cursor } => {
                 self.command_palette.sync(&text);
@@ -1744,47 +1789,127 @@ impl App {
     /// name and args the input bar would hand over, leading slash optional.
     /// `Err` means nothing ran at all, so the Lua caller can say why.
     pub(crate) fn run_cmdline(&mut self, cmdline: &str, depth: u8) -> Result<Vec<Action>, String> {
+        let trimmed = cmdline.trim();
+        let input = format!("/{}", trimmed.trim_start_matches('/'));
+        self.dispatch_command_line(&input, depth)
+    }
+
+    #[cfg(test)]
+    fn execute_command(&mut self, command: ParsedCommand, depth: u8) -> Vec<Action> {
+        self.dispatch_command_line(&format!("{} {}", command.name, command.args), depth)
+            .unwrap_or_default()
+    }
+
+    fn dispatch_confirmed_command(
+        &mut self,
+        command: ConfirmedCommand,
+        depth: u8,
+    ) -> Result<Vec<Action>, String> {
+        if let Err(error) = smol::block_on(self.command_runtime.registry.dispatch_command(
+            command.command,
+            &command.args,
+            depth.into(),
+            self.command_target,
+        )) {
+            self.command_runtime
+                .finish_theme_preview(self.command_target, false);
+            return Err(error.to_string());
+        }
+        #[cfg(test)]
+        return Ok(self.execute_pending_commands());
+        #[cfg(not(test))]
+        Ok(Vec::new())
+    }
+
+    fn dispatch_command_line(&mut self, input: &str, depth: u8) -> Result<Vec<Action>, String> {
         if depth > MAX_COMMAND_DEPTH {
             return Err(COMMAND_DEPTH_MSG.to_string());
         }
-        let trimmed = cmdline.trim();
-        let (name, args) = trimmed
-            .split_once(char::is_whitespace)
-            .unwrap_or((trimmed, ""));
-        let resolved = self
-            .command_palette
-            .resolve(&format!("/{}", name.trim_start_matches('/')))
-            .ok_or_else(|| format!("unknown command '{name}'"))?;
-        Ok(self.execute_command(
-            ParsedCommand {
-                name: resolved,
-                args: args.trim().to_string(),
-            },
-            depth,
+        let dispatch = smol::block_on(self.command_runtime.registry.dispatch_input(
+            input,
+            depth.into(),
+            self.command_target,
         ))
+        .map_err(|error| error.to_string())?;
+        if !matches!(dispatch, maki_commands::InputDispatch::Dispatched(_)) {
+            let name = input.split_whitespace().next().unwrap_or(input);
+            return Err(format!("unknown command '{name}'"));
+        }
+        #[cfg(test)]
+        return Ok(self.execute_pending_commands());
+        #[cfg(not(test))]
+        Ok(Vec::new())
+    }
+
+    #[cfg(test)]
+    fn execute_pending_commands(&mut self) -> Vec<Action> {
+        let mut actions = Vec::new();
+        while let Some(command) = self.command_runtime.try_recv_for_test() {
+            if command.target == self.command_target {
+                actions.extend(self.execute_routed_command(command));
+            }
+        }
+        actions
+    }
+
+    pub(crate) fn execute_routed_command(&mut self, command: RoutedCommand) -> Vec<Action> {
+        let outcome = match &command.route {
+            CommandRoute::Builtin(route) => {
+                self.execute_builtin_route(*route, command.arguments.clone(), command.depth as u8)
+            }
+            CommandRoute::Custom(custom) => self.execute_custom(command.arguments.as_str(), custom),
+            CommandRoute::Mcp(prompt) => self.execute_mcp(prompt, &command.arguments),
+            CommandRoute::Lua { plugin, name } => {
+                self.lua_event_handle.run_command(
+                    Arc::clone(plugin),
+                    Arc::clone(name),
+                    command.arguments.clone(),
+                    command.depth as u8,
+                );
+                RouteOutcome::completed(Vec::new())
+            }
+        };
+        if matches!(command.route, CommandRoute::Builtin(BuiltinRoute::Theme)) {
+            self.command_runtime.finish_theme_preview(
+                command.target,
+                !matches!(
+                    outcome.classification,
+                    maki_commands::CommandClassification::Failed(_)
+                ),
+            );
+        }
+        complete(&command, outcome.classification);
+        outcome.actions
     }
 
     /// {depth} is the `maki.api.run_command` hop count, forwarded to a Lua
     /// handler so an alias cycle keeps counting. 0 when the user typed it.
-    fn execute_command(&mut self, cmd: ParsedCommand, depth: u8) -> Vec<Action> {
-        match cmd.name.as_str() {
-            "/tasks" => {
+    fn execute_builtin_route(
+        &mut self,
+        route: BuiltinRoute,
+        args: String,
+        _depth: u8,
+    ) -> RouteOutcome {
+        let actions = match route {
+            BuiltinRoute::Tasks => {
                 self.open_tasks();
                 vec![]
             }
-            "/compact" => {
+            BuiltinRoute::Compact => {
                 if self.status == Status::Streaming {
-                    self.queue_compact();
-                    return vec![];
+                    if !self.queue_compact() {
+                        return RouteOutcome::failed("agent queue is unavailable");
+                    }
+                    return RouteOutcome::completed(Vec::new());
                 }
                 self.status = Status::Streaming;
                 vec![Action::Compact]
             }
-            "/help" => {
+            BuiltinRoute::Help => {
                 self.help_modal.toggle();
                 vec![]
             }
-            "/usage" => {
+            BuiltinRoute::Usage => {
                 self.usage_modal.toggle();
                 if self.usage_modal.is_open() {
                     vec![Action::RefreshUsage]
@@ -1792,8 +1917,8 @@ impl App {
                     vec![]
                 }
             }
-            "/btw" => {
-                let question = cmd.args.trim().to_string();
+            BuiltinRoute::Btw => {
+                let question = args.trim().to_string();
                 if question.is_empty() {
                     self.flash("Usage: /btw <question>".into());
                     vec![]
@@ -1801,13 +1926,13 @@ impl App {
                     vec![Action::Btw(question)]
                 }
             }
-            "/new" => self.reset_session(),
-            "/queue" => {
+            BuiltinRoute::New => self.reset_session(),
+            BuiltinRoute::Queue => {
                 self.queue.set_focus();
                 vec![]
             }
-            "/model" => {
-                let arg = cmd.args.trim();
+            BuiltinRoute::Model => {
+                let arg = args.trim();
                 if arg.is_empty() {
                     self.model_picker.open(&self.state.model.spec());
                     vec![Action::RefreshModels]
@@ -1815,25 +1940,27 @@ impl App {
                     self.resolve_model_arg(arg)
                 }
             }
-            "/theme" => {
-                let arg = cmd.args.trim();
+            BuiltinRoute::Theme => {
+                let arg = args.trim();
                 if arg.is_empty() {
                     self.theme_picker.open();
                     vec![]
+                } else if !self.resolve_theme_arg(arg) {
+                    return RouteOutcome::failed("theme resolution failed");
                 } else {
-                    self.resolve_theme_arg(arg)
+                    vec![]
                 }
             }
-            "/mcp" => {
+            BuiltinRoute::Mcp => {
                 self.mcp_picker.open();
                 vec![]
             }
-            "/login" => {
+            BuiltinRoute::Login => {
                 self.login_picker.open(self.storage.clone());
                 vec![]
             }
-            "/cd" => self.cmd_cd(&cmd.args),
-            "/yolo" => {
+            BuiltinRoute::Cd => self.cmd_cd(&args),
+            BuiltinRoute::Yolo => {
                 let enabled = self.permissions.toggle_yolo();
                 let msg = if enabled {
                     "YOLO mode enabled"
@@ -1843,16 +1970,12 @@ impl App {
                 self.flash(msg.into());
                 vec![]
             }
-            "/thinking" => {
-                if self.command_palette.find_lua_command("/thinking").is_some() {
-                    self.run_lua_command("/thinking", cmd.args, depth);
-                    return vec![];
-                }
+            BuiltinRoute::Thinking => {
                 if !self.state.model.supports_thinking() {
                     self.flash("Thinking requires a model that supports it".into());
-                    return vec![];
+                    return RouteOutcome::completed(Vec::new());
                 }
-                match ThinkingConfig::parse(cmd.args.trim(), self.state.thinking) {
+                match ThinkingConfig::parse(args.trim(), self.state.thinking) {
                     Ok(thinking) => {
                         self.state.thinking = thinking;
                         self.flash(format!("Thinking: {thinking}"));
@@ -1861,10 +1984,10 @@ impl App {
                 }
                 vec![]
             }
-            "/fast" => {
+            BuiltinRoute::Fast => {
                 if !self.state.model.supports_fast() {
                     self.flash(FAST_UNSUPPORTED_MSG.into());
-                    return vec![];
+                    return RouteOutcome::completed(Vec::new());
                 }
                 self.state.fast = !self.state.fast;
                 self.flash(
@@ -1877,7 +2000,7 @@ impl App {
                 );
                 vec![]
             }
-            "/workflow" => {
+            BuiltinRoute::Workflow => {
                 self.state.workflow = !self.state.workflow;
                 self.flash(
                     if self.state.workflow {
@@ -1889,38 +2012,32 @@ impl App {
                 );
                 vec![]
             }
-            "/exit" => self.quit(),
-            "/reload" => self.quit_with(ExitRequest::Reload),
-            name if name.starts_with("/project:") || name.starts_with("/user:") => {
-                self.execute_custom_command(name, &cmd.args)
+            BuiltinRoute::Exit => self.quit(),
+            BuiltinRoute::Reload => self.quit_with(ExitRequest::Reload),
+        };
+        let classification = match route {
+            BuiltinRoute::Btw if args.trim().is_empty() => {
+                return RouteOutcome::failed("/btw requires a question");
             }
-            name if self.command_palette.find_mcp_prompt(name).is_some() => {
-                self.execute_mcp_prompt(name, &cmd.args)
+            BuiltinRoute::Btw => maki_commands::CommandClassification::AgentTurnAccepted,
+            BuiltinRoute::Compact
+                if actions
+                    .iter()
+                    .any(|action| matches!(action, Action::Compact)) =>
+            {
+                maki_commands::CommandClassification::AgentTurnAccepted
             }
-            name if self.command_palette.find_lua_command(name).is_some() => {
-                self.run_lua_command(name, cmd.args, depth);
-                vec![]
-            }
-            _ => vec![],
+            BuiltinRoute::Compact => maki_commands::CommandClassification::Completed,
+            _ => maki_commands::CommandClassification::Completed,
+        };
+        RouteOutcome {
+            actions,
+            classification,
         }
     }
 
-    fn run_lua_command(&self, name: &str, args: String, depth: u8) {
-        let Some(lua_cmd) = self.command_palette.find_lua_command(name) else {
-            return;
-        };
-        self.lua_event_handle.run_command(
-            Arc::clone(&lua_cmd.plugin),
-            Arc::clone(&lua_cmd.name),
-            args,
-            depth,
-        );
-    }
-
-    fn execute_mcp_prompt(&mut self, name: &str, args: &str) -> Vec<Action> {
-        let prompt = self.command_palette.find_mcp_prompt(name).unwrap().clone();
-
-        let arguments = Self::parse_prompt_args(&prompt, args);
+    fn execute_mcp(&mut self, prompt: &McpPromptInfo, args: &str) -> RouteOutcome {
+        let arguments = Self::parse_prompt_args(prompt, args);
         let missing: Vec<_> = prompt
             .arguments
             .iter()
@@ -1928,16 +2045,21 @@ impl App {
             .map(|a| format!("<{}>", a.name))
             .collect();
         if !missing.is_empty() {
-            self.flash(format!("Usage: {} {}", name, missing.join(" ")));
-            return vec![];
+            self.flash(format!(
+                "Usage: /{} {}",
+                prompt.display_name,
+                missing.join(" ")
+            ));
+            return RouteOutcome::failed("required MCP prompt arguments are missing");
         }
 
         let prompt_ref = maki_agent::McpPromptRef {
             qualified_name: prompt.qualified_name.clone(),
             arguments,
         };
+        let name = format!("/{}", prompt.display_name);
         let display_text = if args.trim().is_empty() {
-            name.to_string()
+            name
         } else {
             format!("{name} {args}")
         };
@@ -1947,7 +2069,7 @@ impl App {
             Ok(text) => text,
             Err(e) => {
                 self.flash(e);
-                return vec![];
+                return RouteOutcome::failed("MCP prompt argument expansion failed");
             }
         };
         let mut input = self.build_agent_input(&QueuedMessage {
@@ -1958,9 +2080,9 @@ impl App {
 
         if self.status == Status::Streaming {
             self.flash("Agent is busy, try again later".into());
-            vec![]
+            RouteOutcome::failed("agent is busy")
         } else {
-            self.start_run(input, display_text)
+            RouteOutcome::accepted(self.start_run(input, display_text))
         }
     }
 
@@ -1988,15 +2110,22 @@ impl App {
         result
     }
 
-    fn execute_custom_command(&mut self, name: &str, args: &str) -> Vec<Action> {
-        let Some(cmd) = self.command_palette.find_custom_command(name) else {
-            self.flash(format!("Unknown command: {name}"));
-            return vec![];
-        };
-        self.submit_or_queue(QueuedMessage {
-            text: cmd.render(args),
+    fn execute_custom(
+        &mut self,
+        args: &str,
+        command: &maki_agent::command::CustomCommand,
+    ) -> RouteOutcome {
+        match self.submit_prompt(QueuedMessage {
+            text: command.render(args),
             images: Vec::new(),
-        })
+        }) {
+            SubmitOutcome::Started(actions) => RouteOutcome::accepted(actions),
+            SubmitOutcome::Queued => RouteOutcome::completed(Vec::new()),
+            SubmitOutcome::Rejected(error) => {
+                self.flash(error.clone());
+                RouteOutcome::failed(error)
+            }
+        }
     }
 
     /// Resolve a `/model <arg>` argument without the picker. An explicit
@@ -2044,7 +2173,7 @@ impl App {
     /// installed (palette store, highlighter refresh, generation bump) and
     /// persisted under the app's `StateDir`, then flashed; unknown or ambiguous
     /// arguments flash and change nothing.
-    fn resolve_theme_arg(&mut self, arg: &str) -> Vec<Action> {
+    fn resolve_theme_arg(&mut self, arg: &str) -> bool {
         let names = self.theme_provider.names();
         match fuzzy_resolve(arg, &names) {
             Resolution::Unique(index) => {
@@ -2053,18 +2182,19 @@ impl App {
                     Ok(()) => {
                         self.theme_provider.persist(&name);
                         self.flash(format!("{THEME_APPLIED_PREFIX}: {name}"));
+                        return true;
                     }
                     Err(error) => self.flash(error),
                 }
-                vec![]
+                false
             }
             Resolution::NoMatch => {
                 self.flash(format!("{THEME_UNKNOWN_MSG}: {arg}"));
-                vec![]
+                false
             }
             Resolution::Ambiguous => {
                 self.flash(format!("{THEME_AMBIGUOUS_MSG}: {arg}"));
-                vec![]
+                false
             }
         }
     }

@@ -14,6 +14,125 @@ pub type CommandFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
 pub const MAX_COMMAND_DEPTH: usize = 8;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinCommand {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub max_args: usize,
+    pub aliases: &'static [&'static str],
+}
+
+pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
+    BuiltinCommand {
+        name: "/tasks",
+        description: "Browse and search tasks",
+        max_args: 0,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/compact",
+        description: "Summarize and compact conversation history",
+        max_args: 0,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/new",
+        description: "Start a new session",
+        max_args: 0,
+        aliases: &["/clear"],
+    },
+    BuiltinCommand {
+        name: "/help",
+        description: "Show keybindings",
+        max_args: 0,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/usage",
+        description: "Show token usage breakdown",
+        max_args: 0,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/queue",
+        description: "Remove items from queue",
+        max_args: 0,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/model",
+        description: "Switch model",
+        max_args: 1,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/theme",
+        description: "Switch color theme",
+        max_args: 1,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/mcp",
+        description: "Configure MCP servers",
+        max_args: 0,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/login",
+        description: "Authenticate with an LLM provider",
+        max_args: 0,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/cd",
+        description: "Change working directory",
+        max_args: 1,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/btw",
+        description: "Ask a quick question (no tools, no history pollution)",
+        max_args: usize::MAX,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/yolo",
+        description: "Toggle YOLO mode (skip all permission prompts)",
+        max_args: 0,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/thinking",
+        description: "Toggle extended thinking (off, adaptive, effort level, or budget)",
+        max_args: 1,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/fast",
+        description: "Toggle Anthropic fast mode (Opus only)",
+        max_args: 0,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/workflow",
+        description: "Toggle workflow mode (task callable inside code_execution)",
+        max_args: 0,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/exit",
+        description: "Exit the application",
+        max_args: 0,
+        aliases: &[],
+    },
+    BuiltinCommand {
+        name: "/reload",
+        description: "Reload plugins and config",
+        max_args: 0,
+        aliases: &[],
+    },
+];
+
 static NEXT_REGISTRY_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +210,6 @@ macro_rules! opaque_id {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub struct $name(RegistryId, u64);
 
-        #[allow(dead_code)]
         impl $name {
             pub(crate) const fn new(registry_id: RegistryId, value: u64) -> Self {
                 Self(registry_id, value)
@@ -473,6 +591,24 @@ impl DispatchCommands for CommandRegistry {
 }
 
 impl CommandRegistry {
+    pub fn dispatch_command(
+        &self,
+        command: ResolvedCommand,
+        arguments: &str,
+        depth: usize,
+        target_id: InvocationTargetId,
+    ) -> CommandFuture<Result<CommandDispatch, CommandError>> {
+        let (lifecycle, classification) = classification_channel();
+        let registry = self.clone();
+        let arguments = arguments.to_owned();
+        Box::pin(async move {
+            registry
+                .dispatch_resolved(command, &arguments, depth, target_id, lifecycle)
+                .await?;
+            Ok(CommandDispatch::new(classification))
+        })
+    }
+
     pub fn dispatch_resolved(
         &self,
         command: ResolvedCommand,
@@ -1481,9 +1617,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        ArgumentArity, CancellationToken, CommandBehavior, CommandCompletion, CommandDocs,
-        CommandFuture, CommandInvocation, CommandSpec, CompletionContext, CompletionItem,
-        Registration,
+        ArgumentArity, BUILTIN_COMMANDS, CancellationToken, CommandBehavior, CommandCompletion,
+        CommandDocs, CommandFuture, CommandInvocation, CommandSpec, CompletionContext,
+        CompletionItem, Registration,
     };
 
     struct Behavior;
@@ -1507,6 +1643,36 @@ mod tests {
         ) -> CommandFuture<Result<Vec<CompletionItem>, super::CompletionError>> {
             Box::pin(async { Ok(Vec::new()) })
         }
+    }
+
+    #[test]
+    fn builtin_metadata_matches_ui_dispatch() {
+        let expected = [
+            ("/tasks", 0),
+            ("/compact", 0),
+            ("/new", 0),
+            ("/help", 0),
+            ("/usage", 0),
+            ("/queue", 0),
+            ("/model", 1),
+            ("/theme", 1),
+            ("/mcp", 0),
+            ("/login", 0),
+            ("/cd", 1),
+            ("/btw", usize::MAX),
+            ("/yolo", 0),
+            ("/thinking", 1),
+            ("/fast", 0),
+            ("/workflow", 0),
+            ("/exit", 0),
+            ("/reload", 0),
+        ];
+
+        assert_eq!(BUILTIN_COMMANDS.len(), expected.len());
+        for (command, expected) in BUILTIN_COMMANDS.iter().zip(expected) {
+            assert_eq!((command.name, command.max_args), expected);
+        }
+        assert_eq!(BUILTIN_COMMANDS[2].aliases, ["/clear"]);
     }
 
     #[test]

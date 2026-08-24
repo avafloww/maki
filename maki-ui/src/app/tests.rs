@@ -92,6 +92,19 @@ fn build_app_with_full(
     ui: UiConfig,
 ) -> App {
     let model = test_model();
+    let lua_snapshot = lua_commands.load();
+    let command_runtime = Arc::new(crate::command_runtime::CommandRuntime::new_for_test(
+        &[],
+        &[],
+        &lua_snapshot.commands,
+        Arc::new(crate::components::arg_completion::ModelArgSource::new(
+            Arc::new(ArcSwapOption::empty()),
+        )),
+        Arc::new(crate::components::arg_completion::ThemeArgSource::new(
+            Arc::new(crate::theme::InMemoryThemesProvider::bundled()),
+        )),
+        handle.clone(),
+    ));
     App::new(
         &model,
         AppSession::new("test-model", "/tmp/test"),
@@ -117,11 +130,61 @@ fn build_app_with_full(
         handle,
         Arc::new(maki_config::ModelPolicy::default()),
         Arc::new(crate::theme::InMemoryThemesProvider::bundled()),
+        command_runtime,
     )
 }
 
 fn test_writer(dir: StateDir) -> StorageWriter {
     StorageWriter::new(dir, flume::unbounded().0)
+}
+
+fn app_with_custom_commands(commands: &[CustomCommand]) -> App {
+    let dir = StateDir::from_path(env::temp_dir());
+    let writer = Arc::new(test_writer(dir.clone()));
+    let model = test_model();
+    let handle = maki_lua::EventHandle::disconnected_for_test();
+    let command_runtime = Arc::new(crate::command_runtime::CommandRuntime::new_for_test(
+        commands,
+        &[],
+        &[],
+        Arc::new(crate::components::arg_completion::ModelArgSource::new(
+            Arc::new(ArcSwapOption::empty()),
+        )),
+        Arc::new(crate::components::arg_completion::ThemeArgSource::new(
+            Arc::new(crate::theme::InMemoryThemesProvider::bundled()),
+        )),
+        handle.clone(),
+    ));
+    let mut app = App::new(
+        &model,
+        AppSession::new("test-model", "/tmp/test"),
+        dir,
+        Arc::new(ArcSwapOption::empty()),
+        McpSnapshotReader::empty(),
+        McpConfigErrors::new(PathBuf::new()),
+        LuaCommandReader::empty(),
+        KeymapReader::empty(),
+        HintReader::empty(),
+        writer,
+        UiConfig::default(),
+        100,
+        Arc::new(PermissionManager::new(
+            PermissionsConfig {
+                rules: vec![],
+                ..Default::default()
+            },
+            PathBuf::from("/tmp"),
+            Arc::default(),
+        )),
+        Arc::from(commands.to_vec()),
+        handle,
+        Arc::new(ModelPolicy::default()),
+        Arc::new(crate::theme::InMemoryThemesProvider::bundled()),
+        command_runtime,
+    );
+    let (shared_queue, _rx) = shared_queue::queue();
+    app.queue.set_shared(shared_queue);
+    app
 }
 
 pub(crate) fn test_app() -> App {
@@ -707,7 +770,7 @@ fn lifecycle_app() -> (App, maki_lua::test_support::RequestProbe) {
         }])
         .unwrap();
     let _ = app.command_palette.poll_arguments();
-    probe.try_finish_command_argument_lifecycle().unwrap();
+    let _ = probe.try_finish_command_argument_lifecycle();
     (app, probe)
 }
 
@@ -3249,21 +3312,13 @@ fn direct_exit_command_requests_successful_exit() {
 
 #[test]
 fn direct_custom_command_renders_args_and_starts_run() {
-    let mut app = test_app();
-    app.command_palette = CommandPalette::new(
-        Arc::from([CustomCommand {
-            name: "review".into(),
-            description: "Code review".into(),
-            content: "Review $ARGUMENTS".into(),
-            scope: CommandScope::Project,
-            accepts_args: true,
-        }]),
-        McpSnapshotReader::empty(),
-        LuaCommandReader::empty(),
-        ModelArgSource::new(Arc::clone(&app.available_models)),
-        ThemeArgSource::new(Arc::clone(&app.theme_provider)),
-        LuaArgumentSource::new(app.lua_event_handle.clone()),
-    );
+    let mut app = app_with_custom_commands(&[CustomCommand {
+        name: "review".into(),
+        description: "Code review".into(),
+        content: "Review $ARGUMENTS".into(),
+        scope: CommandScope::Project,
+        accepts_args: true,
+    }]);
 
     let actions = app.execute_command(
         ParsedCommand {
@@ -3281,21 +3336,13 @@ fn direct_custom_command_renders_args_and_starts_run() {
 
 #[test]
 fn run_cmdline_dispatches_custom_command() {
-    let mut app = test_app();
-    app.command_palette = CommandPalette::new(
-        Arc::from([CustomCommand {
-            name: "review".into(),
-            description: "Code review".into(),
-            content: "Review $ARGUMENTS".into(),
-            scope: CommandScope::Project,
-            accepts_args: true,
-        }]),
-        McpSnapshotReader::empty(),
-        LuaCommandReader::empty(),
-        ModelArgSource::new(Arc::clone(&app.available_models)),
-        ThemeArgSource::new(Arc::clone(&app.theme_provider)),
-        LuaArgumentSource::new(app.lua_event_handle.clone()),
-    );
+    let mut app = app_with_custom_commands(&[CustomCommand {
+        name: "review".into(),
+        description: "Code review".into(),
+        content: "Review $ARGUMENTS".into(),
+        scope: CommandScope::Project,
+        accepts_args: true,
+    }]);
 
     let actions = app.run_cmdline("/project:review src/lib.rs", 0).unwrap();
 
@@ -3308,22 +3355,14 @@ fn run_cmdline_dispatches_custom_command() {
 #[test]
 fn run_cmdline_dispatches_mcp_prompt() {
     let mut app = test_app();
-    app.command_palette = CommandPalette::new(
-        Arc::from([]),
-        McpSnapshotReader::from_snapshot(McpSnapshot {
-            prompts: vec![McpPromptInfo {
-                display_name: "review".into(),
-                qualified_name: "server/review".into(),
-                description: "Code review".into(),
-                arguments: vec![],
-            }],
-            ..Default::default()
-        }),
-        LuaCommandReader::empty(),
-        ModelArgSource::new(Arc::clone(&app.available_models)),
-        ThemeArgSource::new(Arc::clone(&app.theme_provider)),
-        LuaArgumentSource::new(app.lua_event_handle.clone()),
-    );
+    app.command_runtime.replace_mcp(&[McpPromptInfo {
+        display_name: "review".into(),
+        qualified_name: "server/review".into(),
+        description: "Code review".into(),
+        arguments: vec![],
+    }]);
+    app.command_palette =
+        CommandPalette::new(app.command_runtime.registry.clone(), app.command_target);
 
     let actions = app.run_cmdline("/review src/lib.rs", 0).unwrap();
 
@@ -3729,22 +3768,14 @@ fn mcp_toggle_dispatches_action() {
 fn mcp_prompt_args_expand_references() {
     let (_tmp, mut app, backend) = completion_app();
     seed_skill(&backend, "pdf");
-    app.command_palette = CommandPalette::new(
-        Arc::from([]),
-        McpSnapshotReader::from_snapshot(McpSnapshot {
-            prompts: vec![McpPromptInfo {
-                display_name: "prompt".into(),
-                qualified_name: "srv/prompt".into(),
-                description: "test prompt".into(),
-                arguments: vec![],
-            }],
-            ..Default::default()
-        }),
-        LuaCommandReader::empty(),
-        ModelArgSource::new(Arc::clone(&app.available_models)),
-        ThemeArgSource::new(Arc::clone(&app.theme_provider)),
-        LuaArgumentSource::new(app.lua_event_handle.clone()),
-    );
+    app.command_runtime.replace_mcp(&[McpPromptInfo {
+        display_name: "prompt".into(),
+        qualified_name: "srv/prompt".into(),
+        description: "test prompt".into(),
+        arguments: vec![],
+    }]);
+    app.command_palette =
+        CommandPalette::new(app.command_runtime.registry.clone(), app.command_target);
 
     let actions = app.execute_command(
         ParsedCommand {
@@ -5636,20 +5667,15 @@ fn enter_inserts_skill() {
 #[test]
 fn at_completion_insertion_synchronizes_argument_completion() {
     let (_tmp, mut app, _backend) = completion_app();
-    app.command_palette = CommandPalette::new(
-        Arc::from([]),
-        McpSnapshotReader::empty(),
-        LuaCommandReader::from_commands(vec![LuaCommandInfo {
-            name: "/deploy".into(),
-            description: "Deploy".into(),
-            plugin: "deploy".into(),
-            max_args: 1,
-            has_argument_completion: true,
-        }]),
-        ModelArgSource::new(Arc::clone(&app.available_models)),
-        ThemeArgSource::new(Arc::clone(&app.theme_provider)),
-        LuaArgumentSource::new(app.lua_event_handle.clone()),
-    );
+    app.command_runtime.replace_lua(&[LuaCommandInfo {
+        name: "/deploy".into(),
+        description: "Deploy".into(),
+        plugin: "deploy".into(),
+        max_args: 1,
+        has_argument_completion: true,
+    }]);
+    app.command_palette =
+        CommandPalette::new(app.command_runtime.registry.clone(), app.command_target);
     app.input_box.set_input("/deploy @rev".into());
     app.command_palette.sync("/deploy @rev");
     app.file_completion

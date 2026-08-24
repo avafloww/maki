@@ -3007,6 +3007,7 @@ dependencies = [
  "jiff",
  "libc",
  "maki-agent",
+ "maki-commands",
  "maki-config",
  "maki-highlight",
  "maki-lua",

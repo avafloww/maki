@@ -44,6 +44,8 @@ use crate::agent::{
 use crate::app::shell::{ShellEvent, spawn_shell};
 use crate::app::{App, Msg, Notification, QueuedMessage, SubmitOutcome, turn_response};
 use crate::color_compat;
+use crate::command_runtime::{CommandRuntime, RoutedCommand};
+use crate::components::arg_completion::{ModelArgSource, ThemeArgSource};
 use crate::components::input::Submission;
 use crate::components::usage_modal::UsageFetchState;
 use crate::components::{Action, ExitRequest, Status};
@@ -320,6 +322,7 @@ struct SpawnCtx {
     storage_writer: Arc<StorageWriter>,
     model_policy: Arc<ModelPolicy>,
     system_prompt: SystemPromptOverride,
+    command_runtime: Arc<CommandRuntime>,
 }
 
 impl SpawnCtx {
@@ -358,6 +361,7 @@ impl SpawnCtx {
             self.lua_event_handle.clone(),
             Arc::clone(&self.model_policy),
             crate::theme::default_provider().clone(),
+            Arc::clone(&self.command_runtime),
         );
         handles.apply_to_app(&mut app);
         if resumed {
@@ -387,6 +391,9 @@ pub(crate) struct EventLoop<'t> {
     warn_rx: flume::Receiver<String>,
     warn_tx: flume::Sender<String>,
     ui_action_rx: flume::Receiver<UiAction>,
+    command_rx: flume::Receiver<RoutedCommand>,
+    mcp_generation: u64,
+    lua_generation: u64,
     _model_fetch_task: smol::Task<()>,
 }
 
@@ -399,6 +406,7 @@ enum Wake {
     Agent(usize, Box<maki_agent::Envelope>),
     Shell(usize, ShellEvent),
     Warn(String),
+    Command(RoutedCommand),
 }
 
 struct BackgroundModels {
@@ -548,6 +556,24 @@ impl<'t> EventLoop<'t> {
         let storage_writer = Arc::new(StorageWriter::new(storage.clone(), bg.warn_tx.clone()));
 
         let notifier = terminal::TerminalNotifier::new(ui_config.notifications);
+        let mcp_prompts = mcp_handle
+            .as_ref()
+            .map(|handle| handle.reader().load().prompts.clone())
+            .unwrap_or_default();
+        let lua_commands = lua_command_reader.load().commands.clone();
+        let model_completion = Arc::new(ModelArgSource::new(Arc::clone(&bg.available)));
+        let theme_completion = Arc::new(ThemeArgSource::new(
+            crate::theme::default_provider().clone(),
+        ));
+        let (command_runtime, command_rx) = CommandRuntime::new(
+            &commands,
+            &mcp_prompts,
+            &lua_commands,
+            model_completion,
+            theme_completion,
+            lua_event_handle.clone(),
+        );
+        let command_runtime = Arc::new(command_runtime);
         let ctx = SpawnCtx {
             storage,
             config,
@@ -570,6 +596,7 @@ impl<'t> EventLoop<'t> {
                 override_text: system_prompt_override,
                 append_text: append_system_prompt,
             },
+            command_runtime,
         };
 
         let mut runtimes: Vec<SessionRuntime> = sessions
@@ -605,6 +632,9 @@ impl<'t> EventLoop<'t> {
             warn_rx: bg.warn_rx,
             warn_tx: bg.warn_tx,
             ui_action_rx,
+            command_rx,
+            mcp_generation: 0,
+            lua_generation: 0,
             _model_fetch_task: bg.task,
         })
     }
@@ -689,6 +719,7 @@ impl<'t> EventLoop<'t> {
             sel = sel.recv(&self.ui_action_rx, |res| res.ok().map(Wake::Ui));
         }
         sel = sel.recv(&self.warn_rx, |res| res.ok().map(Wake::Warn));
+        sel = sel.recv(&self.command_rx, |res| res.ok().map(Wake::Command));
         for (i, rt) in self.sessions.iter().enumerate() {
             if !rt.handles.agent_rx.is_disconnected() {
                 sel = sel.recv(&rt.handles.agent_rx, move |res| {
@@ -710,6 +741,7 @@ impl<'t> EventLoop<'t> {
             Wake::Agent(i, envelope) => self.handle_agent(i, envelope),
             Wake::Shell(i, event) => self.sessions[i].app.handle_shell_event(event),
             Wake::Warn(warning) => self.focused_app().flash(warning),
+            Wake::Command(command) => self.handle_command(command),
         }
         Ok(())
     }
@@ -717,6 +749,23 @@ impl<'t> EventLoop<'t> {
     /// The one save trigger. A checkpoint writes only on a real change, so
     /// every tool result reaches disk within a frame while an idle session
     /// writes nothing.
+    fn handle_command(&mut self, command: RoutedCommand) {
+        let Some(index) = self
+            .sessions
+            .iter()
+            .position(|runtime| runtime.app.command_target == command.target)
+        else {
+            command
+                .lifecycle
+                .transition(maki_commands::CommandClassification::Failed(
+                    maki_commands::CommandError::StaleTarget,
+                ));
+            return;
+        };
+        let actions = self.sessions[index].app.execute_routed_command(command);
+        self.dispatch(index, actions);
+    }
+
     fn checkpoint_all(&mut self) {
         for rt in &mut self.sessions {
             rt.app.checkpoint();
@@ -728,6 +777,22 @@ impl<'t> EventLoop<'t> {
     /// still drain their floats, or a plugin writing to a window nobody is
     /// looking at would lose the output.
     fn tick(&mut self) -> Dirty {
+        let mcp = self
+            .ctx
+            .mcp_handle
+            .as_ref()
+            .map(|handle| handle.reader().load());
+        let lua = self.ctx.lua_command_reader.load();
+        if let Some(snapshot) = mcp.as_ref()
+            && snapshot.generation != self.mcp_generation
+        {
+            self.ctx.command_runtime.replace_mcp(&snapshot.prompts);
+            self.mcp_generation = snapshot.generation;
+        }
+        if lua.generation != self.lua_generation {
+            self.ctx.command_runtime.replace_lua(&lua.commands);
+            self.lua_generation = lua.generation;
+        }
         let mut dirty = Dirty::NO;
         let mut login_actions: Vec<(usize, Vec<Action>)> = Vec::new();
         for (i, rt) in self.sessions.iter_mut().enumerate() {
@@ -1169,7 +1234,7 @@ impl<'t> EventLoop<'t> {
                 fast,
             } => {
                 if let Some(spec) = spec {
-                    self.change_model(&spec)?;
+                    self.change_model(self.focused, &spec)?;
                 }
                 let app = self.focused_app();
                 if let Some(thinking) = thinking {
@@ -1409,8 +1474,8 @@ impl<'t> EventLoop<'t> {
                 self.respawn_agent(idx, loaded.messages);
             }
             Action::ChangeModel(spec) => {
-                if let Err(e) = self.change_model(&spec) {
-                    self.focused_app().flash(e);
+                if let Err(error) = self.change_model(idx, &spec) {
+                    self.sessions[idx].app.flash(error);
                 }
             }
             Action::RefreshProvider { slug } => self.refresh_provider(slug),
@@ -1482,12 +1547,12 @@ impl<'t> EventLoop<'t> {
             }
             Action::Bell => ring_bell(),
             Action::RefreshModels => self.refresh_models(),
-            Action::RefreshUsage => self.refresh_usage(),
+            Action::RefreshUsage => self.refresh_usage(idx),
             Action::ManualExit => self.sessions[idx].notifications.on_manual_exit(),
         }
     }
 
-    fn change_model(&mut self, spec: &str) -> Result<(), String> {
+    fn change_model(&mut self, idx: usize, spec: &str) -> Result<(), String> {
         if !self.ctx.model_policy.allows(spec) {
             return Err(format!("{MODEL_POLICY_ERR}: {spec}"));
         }
@@ -1495,7 +1560,7 @@ impl<'t> EventLoop<'t> {
             Model::from_spec(spec).map_err(|e| format!("{INVALID_MODEL_ERR}: {e}"))?;
         let new_provider = from_model(&mut new_model, self.ctx.timeouts)
             .map_err(|e| format!("{PROVIDER_INIT_ERR}: {e}"))?;
-        let app = self.focused_app();
+        let app = &mut self.sessions[idx].app;
         app.update_model(&new_model);
         app.record_recent_model(spec);
         app.usage_slot.store(None);
@@ -1522,9 +1587,9 @@ impl<'t> EventLoop<'t> {
         .detach();
     }
 
-    fn refresh_usage(&mut self) {
+    fn refresh_usage(&mut self, idx: usize) {
         let provider = Arc::clone(&self.ctx.model_slot.load().provider);
-        let slot = Arc::clone(&self.focused_app().usage_slot);
+        let slot = Arc::clone(&self.sessions[idx].app.usage_slot);
         slot.store(Some(Arc::new(UsageFetchState::Loading)));
         smol::spawn(async move {
             let state = match provider.fetch_usage().await {
@@ -1550,7 +1615,7 @@ impl<'t> EventLoop<'t> {
                 }));
             }
         } else if let Some(builtin) = maki_config::providers::builtin_provider(&slug)
-            && let Err(e) = self.change_model(builtin.default_model)
+            && let Err(e) = self.change_model(self.focused, builtin.default_model)
         {
             self.focused_app().flash(e);
         }
