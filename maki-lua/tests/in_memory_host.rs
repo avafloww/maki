@@ -247,7 +247,7 @@ fn splash_picker_repairs_unknown_selection() {
 
     // The first frame rolls the stale selection back to the fallback and
     // serves it, then the repair task rewrites the file.
-    let frame = pull_frame(&handle, Some("luna-maki"));
+    let frame = pull_frame(&handle, Some("makima"));
     assert!(!frame.rows.is_empty(), "fallback frame has rows");
     let content = wait_for_selection(&guard, SELECTION_DEFAULT);
     assert!(content.contains("name"), "repaired file: {content}");
@@ -265,7 +265,7 @@ fn splash_picker_repairs_malformed_selection() {
         None,
     );
 
-    let frame = pull_frame(&handle, Some("luna-maki"));
+    let frame = pull_frame(&handle, Some("makima"));
     assert!(!frame.rows.is_empty());
     let content = wait_for_selection(&guard, SELECTION_DEFAULT);
     assert!(content.contains("name"), "repaired file: {content}");
@@ -285,7 +285,7 @@ fn splash_picker_default_runs_chain_below() {
 
     let frame = pull_frame(&handle, Some("www"));
     assert!(
-        !frame_text(&frame).contains("luna-maki"),
+        !frame_text(&frame).contains("makima"),
         "picker must not bypass the chain below it"
     );
 }
@@ -302,7 +302,7 @@ fn splash_picker_renders_user_contribution() {
 
     let frame = pull_frame(&handle, Some("sss"));
     assert!(
-        !frame_text(&frame).contains("luna-maki"),
+        !frame_text(&frame).contains("makima"),
         "the contributed splash draws the screen"
     );
     assert!(
@@ -399,7 +399,7 @@ fn splash_picker_command_switches_to_default() {
     // text cannot spell the starfield logo.
     let frame = pull_frame(&handle, None);
     assert!(
-        !frame_text(&frame).contains("luna-maki"),
+        !frame_text(&frame).contains("makima"),
         "the committed matrix splash serves frames before the switch"
     );
 
@@ -412,7 +412,7 @@ fn splash_picker_command_switches_to_default() {
 
     // The fallback path must serve the starfield through the chain below the
     // picker; a failing delegation rolls the selection back to matrix.
-    let frame = pull_frame(&handle, Some("luna-maki"));
+    let frame = pull_frame(&handle, Some("makima"));
     assert!(!frame.rows.is_empty(), "the default splash serves frames");
     let content = wait_for_selection(&guard, SELECTION_DEFAULT);
     assert!(
@@ -557,7 +557,7 @@ fn splash_picker_re_resolves_after_contribution_unloads() {
     // The seeded selection is the user contribution; the first frame serves it.
     let frame = pull_frame(&handle, Some("sss"));
     assert!(
-        !frame_text(&frame).contains("luna-maki"),
+        !frame_text(&frame).contains("makima"),
         "the committed contribution draws"
     );
 
@@ -565,7 +565,7 @@ fn splash_picker_re_resolves_after_contribution_unloads() {
 
     // The picker must drop the stale renderer, find the name unknown, roll
     // back to the fallback, and repair the persisted selection.
-    let frame = pull_frame(&handle, Some("luna-maki"));
+    let frame = pull_frame(&handle, Some("makima"));
     assert!(!frame.rows.is_empty(), "fallback frame after unload");
     let content = wait_for_selection(&guard, SELECTION_DEFAULT);
     assert!(content.contains("name"), "repaired file: {content}");
@@ -599,7 +599,7 @@ fn splash_picker_startup_option_wins_over_saved() {
     // The option applies during boot, before the first frame is pulled.
     let frame = pull_frame(&handle, None);
     assert!(
-        !frame_text(&frame).contains("luna-maki"),
+        !frame_text(&frame).contains("makima"),
         "the option splash draws, not the starfield"
     );
     let content = wait_for_selection(&guard, "voronoi");
@@ -635,7 +635,7 @@ fn splash_picker_startup_option_typo_keeps_fallback() {
         splash_opts("nope"),
     );
 
-    let frame = pull_frame(&handle, Some("luna-maki"));
+    let frame = pull_frame(&handle, Some("makima"));
     assert!(!frame.rows.is_empty(), "the fallback splash serves frames");
     assert!(
         selection_content(&guard).is_none(),
@@ -657,7 +657,7 @@ fn splash_picker_splash_select_commits_and_persists() {
     assert!(content.contains("name"), "persisted file: {content}");
     let frame = pull_frame(&handle, None);
     assert!(
-        !frame_text(&frame).contains("luna-maki"),
+        !frame_text(&frame).contains("makima"),
         "the selected splash serves frames"
     );
 }
@@ -675,7 +675,7 @@ fn splash_picker_splash_select_transient_keeps_file() {
     // matrix (persisted) is committed from the seeded file.
     let frame = pull_frame(&handle, None);
     assert!(
-        !frame_text(&frame).contains("luna-maki"),
+        !frame_text(&frame).contains("makima"),
         "the seeded selection draws before the switch"
     );
 
@@ -685,7 +685,7 @@ fn splash_picker_splash_select_transient_keeps_file() {
     );
     let frame = pull_frame(&handle, None);
     assert!(
-        !frame_text(&frame).contains("luna-maki"),
+        !frame_text(&frame).contains("makima"),
         "the transient selection serves frames"
     );
     let content = wait_for_selection(&guard, SELECTION_MATRIX);
@@ -705,7 +705,7 @@ fn splash_picker_splash_select_rejects_bad_data() {
     );
 
     handle.fire_autocmd("SplashSelect", serde_json::json!({}));
-    let frame = pull_frame(&handle, Some("luna-maki"));
+    let frame = pull_frame(&handle, Some("makima"));
     assert!(!frame.rows.is_empty(), "the fallback splash serves frames");
     assert!(
         selection_content(&guard).is_none(),

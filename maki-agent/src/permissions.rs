@@ -1438,7 +1438,7 @@ mod tests {
     #[test_case("edit", true ; "edit_tool_allowed")]
     #[test_case("bash", false ; "non_write_tool_prompts")]
     fn plan_path_auto_allows_file_write_tools_only(tool: &str, expect_allowed: bool) {
-        let plan = "/home/user/.local/state/maki/plans/test.md";
+        let plan = "/home/user/.local/state/makima/plans/test.md";
         let plan_path = Path::new(plan);
         let mgr = default_mgr();
         assert_eq!(
@@ -1485,7 +1485,7 @@ mod tests {
 
     #[test]
     fn plan_path_multi_scope_all_must_match() {
-        let plan = "/home/user/.local/state/maki/plans/test.md";
+        let plan = "/home/user/.local/state/makima/plans/test.md";
         let plan_path = Path::new(plan);
         let mgr = default_mgr();
 

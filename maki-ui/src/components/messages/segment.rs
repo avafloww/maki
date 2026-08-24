@@ -1,5 +1,4 @@
 use crate::render_worker::RenderWorker;
-use crate::theme;
 
 use super::super::code_view::SectionFlags;
 use super::super::tool_display::{HighlightRequest, ToolLines};
@@ -34,13 +33,13 @@ struct HighlightKey {
 }
 
 impl HighlightKey {
-    /// The generation is read here rather than passed in: a theme only swaps
-    /// from `update`, never mid-`view`, and a missed call site would silently
-    /// splice old-palette lines back in.
-    fn from_request(hl: Option<&HighlightRequest>) -> Self {
+    /// The caller passes the generation rather than the key reading a global:
+    /// the panel holds the provider that owns it, and a missed call site would
+    /// silently splice old-palette lines back in.
+    fn from_request(hl: Option<&HighlightRequest>, theme_gen: u64) -> Self {
         Self {
             has_output: hl.is_some_and(|h| h.output.is_some()),
-            theme_gen: theme::generation(),
+            theme_gen,
         }
     }
 }
@@ -192,10 +191,10 @@ impl Segment {
         Some(self.lines[s..e].to_vec())
     }
 
-    pub fn apply_highlight(&mut self, tl: ToolLines, worker: &RenderWorker) {
+    pub fn apply_highlight(&mut self, tl: ToolLines, worker: &RenderWorker, theme_gen: u64) {
         self.pending_highlight = tl.send_highlight(worker);
         self.highlight_range = tl.highlight.as_ref().map(|h| h.range);
-        self.highlight_key = HighlightKey::from_request(tl.highlight.as_ref());
+        self.highlight_key = HighlightKey::from_request(tl.highlight.as_ref(), theme_gen);
         self.spinner_lines = tl.spinner_lines;
         self.snapshot_base = tl.snapshot_base;
         self.content_indent = tl.content_indent;
@@ -203,8 +202,8 @@ impl Segment {
         self.set_lines(tl.lines);
     }
 
-    pub fn update_with_reuse(&mut self, mut tl: ToolLines, worker: &RenderWorker) {
-        let key = HighlightKey::from_request(tl.highlight.as_ref());
+    pub fn update_with_reuse(&mut self, mut tl: ToolLines, worker: &RenderWorker, theme_gen: u64) {
+        let key = HighlightKey::from_request(tl.highlight.as_ref(), theme_gen);
         let reused = tl.highlight.as_ref().and_then(|req| {
             let hl_lines = self.reuse_highlight(&key, req.range)?;
             let (s, _) = req.range;
@@ -221,7 +220,7 @@ impl Segment {
             self.snapshot_base = tl.snapshot_base;
             self.content_indent = tl.content_indent;
         } else {
-            self.apply_highlight(tl, worker);
+            self.apply_highlight(tl, worker, theme_gen);
         }
     }
 
@@ -402,6 +401,8 @@ pub(super) fn wrapped_line_count(lines: &[Line<'_>], width: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme;
+    use crate::theme::ThemesProvider;
     use test_case::test_case;
 
     const OTHER_THEME: &str = "dracula";
@@ -444,6 +445,8 @@ mod tests {
         use maki_agent::ToolOutput;
         use std::sync::Arc;
 
+        let _guard = theme::theme_test_guard();
+        let p = theme::InMemoryThemesProvider::bundled();
         let output = Arc::new(ToolOutput::ReadCode {
             path: "f.rs".into(),
             start_line: 1,
@@ -452,15 +455,18 @@ mod tests {
             instructions: None,
         });
         let key = || {
-            HighlightKey::from_request(Some(&HighlightRequest {
-                range: (1, 3),
-                input: None,
-                output: Some(Arc::clone(&output)),
-                limits: RenderLimits {
-                    script: 0,
-                    output: 0,
-                },
-            }))
+            HighlightKey::from_request(
+                Some(&HighlightRequest {
+                    range: (1, 3),
+                    input: None,
+                    output: Some(Arc::clone(&output)),
+                    limits: RenderLimits {
+                        script: 0,
+                        output: 0,
+                    },
+                }),
+                p.generation(),
+            )
         };
         let seg = Segment {
             highlight_key: key(),
@@ -481,7 +487,7 @@ mod tests {
             "reuse must fire across a width change; highlight lines are width-independent"
         );
 
-        theme::set(theme::load_by_name(OTHER_THEME).unwrap());
+        p.install(OTHER_THEME).unwrap();
         assert!(
             seg.reuse_highlight(&key(), (1, 3)).is_none(),
             "theme mismatch must force a fresh highlight, not splice old-palette lines"

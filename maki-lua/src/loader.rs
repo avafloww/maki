@@ -274,7 +274,11 @@ impl PluginHost {
                 break;
             }
         }
-        self.run_init_file(&cwd.join(".maki/init.lua"), "project/init.lua", &mut merged)?;
+        self.run_init_file(
+            &cwd.join(".makima/init.lua"),
+            "project/init.lua",
+            &mut merged,
+        )?;
 
         Ok(merged)
     }
@@ -1341,9 +1345,9 @@ mod tests {
     #[test]
     fn load_init_files_or_skip_respects_flag() {
         let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".maki")).unwrap();
+        fs::create_dir_all(dir.path().join(".makima")).unwrap();
         fs::write(
-            dir.path().join(".maki/init.lua"),
+            dir.path().join(".makima/init.lua"),
             "error('broken init lua must not run')",
         )
         .unwrap();

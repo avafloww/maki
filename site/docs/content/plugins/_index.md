@@ -16,9 +16,9 @@ reference is at the end of this document.
 
 Plugins live in the maki config dir. There are two of them, same layout:
 
-- `~/.config/maki/` - global, every project (if `~/.maki/` exists, maki reads
+- `~/.config/makima/` - global, every project (if `~/.makima/` exists, makima reads
   that one instead)
-- `<project>/.maki/` - this project only
+- `<project>/.makima/` - this project only
 
 ```
 init.lua        the only file maki runs; require()s plugins, calls maki.setup()
@@ -33,9 +33,9 @@ that directory, you cannot reach files outside it.
 
 ## Creating a plugin
 
-1. Write the code in `~/.config/maki/lua/<name>.lua`. The `maki` global is
+1. Write the code in `~/.config/makima/lua/<name>.lua`. The `maki` global is
    already there, nothing to import. For a project-only plugin use
-   `<project>/.maki/` here and in every step below.
+   `<project>/.makima/` here and in every step below.
 
 ```lua
 maki.api.register_tool({
@@ -48,13 +48,13 @@ maki.api.register_tool({
 })
 ```
 
-2. Load it from `~/.config/maki/init.lua`, creating that file if missing:
+2. Load it from `~/.config/makima/init.lua`, creating that file if missing:
 
 ```lua
 require("hello")
 ```
 
-3. Grant the permissions it needs in `~/.config/maki/plugin.toml`, creating
+3. Grant the permissions it needs in `~/.config/makima/plugin.toml`, creating
    that file if missing. Without the file every gated call is denied.
 
 ```toml
@@ -82,8 +82,8 @@ in [the reference](/docs/lua-api/#plugin-permissions).
 runs, an edited plugin is still the old one.
 
 To debug, add `maki.log.info|warn|error(...)` calls. They write to `maki.log`
-in the dir `maki.env.logs_dir()` returns (Linux: `~/.local/logs/maki/`). When
-a backtrace comes out useless, start maki with `--no-jit`: plugins then run on
+in the dir `maki.env.logs_dir()` returns (Linux: `~/.local/logs/makima/`). When
+a backtrace comes out useless, start makima with `--no-jit`: plugins then run on
 the interpreter, with full debug info.
 
 ## Conventions
@@ -100,7 +100,6 @@ handling, LLM output truncation, collapsible UI view. It is a bundled plugin,
 so it opens with `register_options`, which your own plugin skips:
 
 ```lua
-local truncate = require("maki.truncate")
 local ToolView = require("maki.tool_view")
 local shorten_path = require("maki.shorten_path")
 local output_limits = require("maki.output_limits")
@@ -177,7 +176,7 @@ maki.api.register_tool({
       lines[i] = shorten_path(f)
     end
     local text = table.concat(lines, "\n")
-    local llm_output = truncate(text, max_lines, max_bytes)
+    local llm_output = maki.text.truncate_file(text, max_lines, max_bytes, nil)
 
     local buf = maki.ui.buf()
     local view = ToolView.new(buf, glob_view_opts(ctx))

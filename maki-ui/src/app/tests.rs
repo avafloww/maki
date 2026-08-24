@@ -21,7 +21,7 @@ use maki_lua::{
     BuiltinAction, CommandArgumentItem, HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader,
 };
 use maki_providers::{ContentBlock, Effort, Message, Role, TokenUsage};
-use maki_storage::sessions::{StoredMode, StoredThinking};
+use maki_storage::sessions::{StoredMode, StoredSubagent, StoredThinking};
 use ratatui::layout::Rect;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -34,6 +34,10 @@ const TASK_ID: &str = "task1";
 const SUB_TOOL_ID: &str = "sub_t1";
 const TOOL_OUTPUT_LINE: &str = "hello from the subagent";
 const LATE_MODEL_SPEC: &str = "zai/glm-5";
+const MODEL_SPEC_GLM4: &str = "zai/glm-4";
+const MODEL_SPEC_OPUS: &str = "anthropic/claude-opus-4-5";
+const MODEL_SPEC_GPT9: &str = "openai/gpt-9";
+const MODEL_SPEC_CLAUDE: &str = "anthropic/claude-sonnet-4-20250514";
 const HINT_PLUGIN: &str = "statusline";
 const HINT_TEXT: &str = "2/4 staged";
 const HINT_STYLE: &str = "fg";
@@ -110,6 +114,7 @@ fn build_app_with_full(
         Arc::from([]),
         handle,
         Arc::new(maki_config::ModelPolicy::default()),
+        Arc::new(crate::theme::InMemoryThemesProvider::bundled()),
     )
 }
 
@@ -690,12 +695,8 @@ fn lifecycle_app() -> (App, maki_lua::test_support::RequestProbe) {
     );
     app.input_box.set_input("/deploy a".into());
     app.command_palette.sync("/deploy a");
-    app.command_palette.sync_arguments(
-        "/deploy a",
-        9,
-        &app.lua_event_handle,
-        &app.state.mode.id_key(),
-    );
+    app.command_palette
+        .sync_arguments("/deploy a", 9, &app.state.mode.id_key());
     probe
         .try_finish_command_arguments(vec![CommandArgumentItem {
             label: "alpha".into(),
@@ -703,7 +704,7 @@ fn lifecycle_app() -> (App, maki_lua::test_support::RequestProbe) {
             description: None,
         }])
         .unwrap();
-    let _ = app.command_palette.poll_arguments(&app.lua_event_handle);
+    let _ = app.command_palette.poll_arguments();
     probe.try_finish_command_argument_lifecycle().unwrap();
     (app, probe)
 }
@@ -1345,6 +1346,238 @@ fn ctrl_x_toggles_tasks_picker() {
     assert!(!app.task_picker.is_open());
 }
 
+#[test]
+fn open_tasks_picker_highlights_active_chat_after_sort() {
+    // task1 (chat index 1) finishes, task2 (chat index 2) stays running. The
+    // picker sorts running first, so row order != chat_index; opening while
+    // active on the finished task must still highlight that task, not row N.
+    let mut app = app_with_subagent_id("task1");
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "y".into() },
+        "task2",
+        Some("build"),
+    ));
+    finish_subagent(&mut app, "task1", false);
+    app.active_chat = 1;
+
+    app.update(Msg::Key(kb::TASKS.to_key_event()));
+    assert!(app.task_picker.is_open());
+    assert_eq!(
+        app.task_picker.selected_item().unwrap().chat_index,
+        1,
+        "picker highlights the active chat, not the sorted row"
+    );
+}
+
+#[test]
+fn ago_formats_relative_start_time() {
+    let now = Instant::now();
+    assert_eq!(ago(now), "just now");
+    assert_eq!(ago(now - Duration::from_secs(5 * 60)), "5min ago");
+    assert_eq!(ago(now - Duration::from_secs(2 * 60 * 60)), "2h ago");
+    assert_eq!(ago(now - Duration::from_secs(3 * 24 * 60 * 60)), "3d ago");
+}
+
+#[test]
+fn task_entries_sorted_running_first() {
+    let mut app = app_with_subagent_id("task1");
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "y".into() },
+        "task2",
+        Some("build"),
+    ));
+    finish_subagent(&mut app, "task1", false);
+
+    let entries = app.task_entries();
+    assert_eq!(entries[0].chat_index, 0, "main chat stays first");
+    assert!(
+        !entries[1].is_finished(),
+        "running subagent before finished"
+    );
+    assert!(entries[1].is_spinning());
+    assert!(entries[2].is_finished(), "finished subagent last");
+}
+
+#[test]
+fn task_entry_shows_context_and_ago() {
+    let mut app = app_with_subagent();
+    app.chats[1].context_size = 5000;
+    let entries = app.task_entries();
+
+    let sub = entries.iter().find(|e| e.chat_index == 1).unwrap();
+    assert_eq!(sub.context_str(), Some("5.0k"));
+    assert!(sub.ago().is_some_and(|s| !s.is_empty()));
+
+    let main = &entries[0];
+    assert_eq!(main.context_str(), None);
+    assert_eq!(main.ago(), None);
+}
+
+#[test]
+fn finished_subagent_entry_is_finished_flag() {
+    let mut app = app_with_subagent();
+    let entries = app.task_entries();
+    assert!(!entries[0].is_finished(), "main chat is not finished");
+    assert!(
+        !entries[1].is_finished(),
+        "running subagent is not finished"
+    );
+
+    finish_subagent_task(&mut app, false);
+    let done_entries = app.task_entries();
+    let done = done_entries.iter().find(|e| e.chat_index == 1).unwrap();
+    assert!(done.is_finished());
+}
+
+fn rendered_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.view(frame)).unwrap();
+    let buf = terminal.backend().buffer();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| {
+                    buf.cell(ratatui::layout::Position::new(x, y))
+                        .map(|c| c.symbol())
+                        .unwrap_or(" ")
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn top_bar_is_always_one_row() {
+    let area = Rect::new(0, 0, 80, 24);
+    // Persistent even with no subagents.
+    assert_eq!(test_app().top_bar_rect(area).height, 1);
+
+    // Stays one row regardless of how many subagents are running.
+    let mut app = app_with_subagent();
+    assert_eq!(app.top_bar_rect(area).height, 1);
+    for i in 2..=6 {
+        app.update(subagent_msg(
+            AgentEvent::TextDelta { text: "x".into() },
+            &format!("task{i}"),
+            Some("name"),
+        ));
+    }
+    assert_eq!(app.top_bar_rect(area).height, 1, "top bar stays one row");
+}
+
+#[test]
+fn top_bar_shows_active_chat_running_count_and_cwd() {
+    let mut app = app_with_subagent_id("task1");
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "y".into() },
+        "task2",
+        Some("build"),
+    ));
+    finish_subagent(&mut app, "task2", false);
+
+    let bar_h = app.top_bar_rect(Rect::new(0, 0, 120, 24)).height;
+    let rows = rendered_rows(&mut app, 120, 24);
+    let bar: String = rows
+        .iter()
+        .take(bar_h as usize)
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Active chat badge for the main chat.
+    assert!(bar.contains("[Main]"), "active badge: {bar}");
+    // One running subagent besides the main chat.
+    assert!(bar.contains("1 tasks"), "running count: {bar}");
+    assert!(bar.contains(kb::TASKS.label), "ctrl-x hint: {bar}");
+    // cwd:branch lives on the right, sourced from the status bar's cache.
+    assert!(
+        bar.contains(app.status_bar.cwd_branch()),
+        "cwd shown: {bar}"
+    );
+    // No per-subagent rows in the bar.
+    assert!(!bar.contains("research"), "no name rows: {bar}");
+
+    // A second running subagent bumps the count.
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "z".into() },
+        "task3",
+        Some("third"),
+    ));
+    let rows = rendered_rows(&mut app, 80, 24);
+    let bar: String = rows
+        .iter()
+        .take(bar_h as usize)
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(bar.contains("2 tasks"), "two running: {bar}");
+}
+
+#[test]
+fn top_bar_shows_task_hint_when_no_subagents_are_running() {
+    let mut app = test_app();
+    let rows = rendered_rows(&mut app, 80, 24);
+    let bar: String = rows.first().map(|s| s.as_str()).unwrap_or("").to_string();
+    assert!(bar.contains("[Main]"), "badge always present: {bar}");
+    assert!(
+        bar.contains("to see tasks"),
+        "task hint always present: {bar}"
+    );
+    assert!(bar.contains(kb::TASKS.label), "ctrl-x hint: {bar}");
+}
+
+#[test]
+fn top_bar_shows_subagent_badge_when_tabbed_into_subagent() {
+    let mut app = app_with_subagent();
+    app.active_chat = 1;
+    let rows = rendered_rows(&mut app, 80, 24);
+    let bar: String = rows.first().map(|s| s.as_str()).unwrap_or("").to_string();
+    assert!(bar.contains("↳"), "subagent badge: {bar}");
+    assert!(bar.contains("research"), "subagent name: {bar}");
+    // The task hint includes all non-main subagents, including the active one.
+    assert!(bar.contains("1 tasks"), "running count: {bar}");
+}
+
+#[test]
+fn top_bar_hint_excludes_finished_subagents() {
+    let mut app = app_with_subagent_id("task1");
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "y".into() },
+        "task2",
+        Some("build"),
+    ));
+    finish_subagent(&mut app, "task1", false);
+    // task2 still running, task1 finished: from Main, one more running.
+    let rows = rendered_rows(&mut app, 80, 24);
+    let bar: String = rows.first().map(|s| s.as_str()).unwrap_or("").to_string();
+    assert!(bar.contains("1 tasks"), "only running counted: {bar}");
+}
+
+#[test]
+fn restored_subagents_have_no_ago_and_are_finished() {
+    let mut app = test_app();
+    let id = "restored-sub".to_string();
+    app.state.session_mut().set_subagents(vec![StoredSubagent {
+        tool_use_id: id.clone(),
+        name: "old task".into(),
+        model: None,
+    }]);
+    app.state
+        .session_mut()
+        .set_subagent_messages(id.clone(), vec![Message::user("hi".into())]);
+    app.restore_display();
+
+    assert_eq!(app.chats.len(), 2);
+    assert!(app.chats[1].is_finished());
+    assert_eq!(app.chats[1].started_at(), None);
+
+    let entries = app.task_entries();
+    let sub = entries.iter().find(|e| e.chat_index == 1).unwrap();
+    assert!(sub.is_finished());
+    assert_eq!(sub.ago(), None);
+}
+
 fn streaming_app() -> App {
     let mut app = test_app();
     app.status = Status::Streaming;
@@ -1796,6 +2029,261 @@ fn model_list_arriving_in_the_background_owes_a_frame() {
     assert_owes_one_frame(&mut app, || {
         models.store(Some(Arc::new(vec![LATE_MODEL_SPEC.into()])));
     });
+}
+
+/// `/model <provider/id>` emits `ChangeModel` for the spec without the picker,
+/// even when the spec is absent from the discovered list (explicit specs
+/// bypass the list).
+#[test]
+fn model_arg_spec_emits_change_model() {
+    let (mut app, models) = app_with_model_slot();
+    models.store(Some(Arc::new(vec![LATE_MODEL_SPEC.into()])));
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: LATE_MODEL_SPEC.into(),
+        },
+        0,
+    );
+    assert!(matches!(&actions[..], [Action::ChangeModel(spec)] if spec == LATE_MODEL_SPEC));
+    assert!(!app.model_picker.is_open());
+
+    // A spec not in the discovered list still emits ChangeModel.
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: MODEL_SPEC_GPT9.into(),
+        },
+        0,
+    );
+    assert!(matches!(&actions[..], [Action::ChangeModel(spec)] if spec == MODEL_SPEC_GPT9));
+    assert!(!app.model_picker.is_open());
+}
+
+/// `/model <fragment>` that fuzzy-resolves to a unique spec emits
+/// `ChangeModel(resolved)` without the picker.
+#[test]
+fn model_arg_fuzzy_unique_emits_change_model() {
+    let (mut app, models) = app_with_model_slot();
+    models.store(Some(Arc::new(vec![
+        LATE_MODEL_SPEC.into(),
+        MODEL_SPEC_OPUS.into(),
+    ])));
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: "glm".into(),
+        },
+        0,
+    );
+    assert!(matches!(&actions[..], [Action::ChangeModel(spec)] if spec == LATE_MODEL_SPEC));
+    assert!(!app.model_picker.is_open());
+}
+
+/// `/model <fragment>` with 2+ fuzzy matches flashes, emits nothing, and leaves
+/// the session model unchanged with the picker closed.
+#[test]
+fn model_arg_ambiguous_flashes() {
+    let (mut app, models) = app_with_model_slot();
+    models.store(Some(Arc::new(vec![
+        MODEL_SPEC_GLM4.into(),
+        LATE_MODEL_SPEC.into(),
+    ])));
+    let before = app.state.model.spec();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: "glm".into(),
+        },
+        0,
+    );
+    assert!(actions.is_empty());
+    assert!(!app.model_picker.is_open());
+    assert_eq!(app.state.model.spec(), before);
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        format!("{MODEL_AMBIGUOUS_MSG}: glm")
+    );
+}
+
+/// `/model <fragment>` with zero fuzzy matches flashes, emits nothing, and
+/// leaves the session model unchanged with the picker closed.
+#[test]
+fn model_arg_no_match_flashes() {
+    let (mut app, models) = app_with_model_slot();
+    models.store(Some(Arc::new(vec![LATE_MODEL_SPEC.into()])));
+    let before = app.state.model.spec();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: "xyz".into(),
+        },
+        0,
+    );
+    assert!(actions.is_empty());
+    assert!(!app.model_picker.is_open());
+    assert_eq!(app.state.model.spec(), before);
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        format!("{MODEL_NO_MATCH_MSG}: xyz")
+    );
+}
+
+#[test]
+fn model_arg_matches_provider_section() {
+    let (mut app, models) = app_with_model_slot();
+    models.store(Some(Arc::new(vec![
+        MODEL_SPEC_CLAUDE.into(),
+        LATE_MODEL_SPEC.into(),
+    ])));
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: "anthropic".into(),
+        },
+        0,
+    );
+    assert!(matches!(&actions[..], [Action::ChangeModel(spec)] if spec == MODEL_SPEC_CLAUDE));
+}
+
+#[test]
+fn malformed_model_arg_flashes_invalid_model() {
+    let (mut app, _models) = app_with_model_slot();
+    let before = app.state.model.spec();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/model".into(),
+            args: "anthropic/".into(),
+        },
+        0,
+    );
+    assert!(actions.is_empty());
+    assert_eq!(app.state.model.spec(), before);
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        "Invalid model: model must be in 'provider/model' format (e.g. anthropic/claude-sonnet-4-20250514)"
+    );
+}
+
+/// `/model` with no argument still opens the picker and refreshes the list.
+#[test]
+fn model_no_arg_opens_picker_and_refreshes() {
+    let (mut app, _models) = app_with_model_slot();
+    let actions = app.execute_command(cmd("/model"), 0);
+    assert!(app.model_picker.is_open());
+    assert!(matches!(&actions[..], [Action::RefreshModels]));
+}
+
+/// `/theme <name>` (exact) applies and persists the theme on a tempdir-backed
+/// disk provider: generation bumps, the current name updates, the pick is
+/// readable back from the `StateDir`, and the flash names the theme.
+#[test]
+fn theme_arg_exact_applies_and_persists() {
+    let _guard = crate::theme::theme_test_guard();
+    let (tmp, dir, _writer, mut app) = tempdir_app();
+    app.theme_provider = Arc::new(crate::theme::DiskThemesProvider::new(
+        Some(dir.clone()),
+        tmp.path().to_path_buf(),
+    ));
+    let gen_before = app.theme_provider.generation();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/theme".into(),
+            args: "zenburn".into(),
+        },
+        0,
+    );
+    assert!(actions.is_empty());
+    assert!(!app.theme_picker.is_open());
+    assert!(app.theme_provider.generation() > gen_before);
+    assert_eq!(app.theme_provider.current_theme_name(), "zenburn");
+    assert_eq!(
+        maki_storage::theme::read_theme_name(&dir).as_deref(),
+        Some("zenburn")
+    );
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        format!("{THEME_APPLIED_PREFIX}: zenburn")
+    );
+}
+
+/// `/theme <fragment>` that fuzzy-resolves to a unique name applies it
+/// (in-memory provider, no disk write).
+#[test]
+fn theme_arg_fuzzy_unique_applies() {
+    let _guard = crate::theme::theme_test_guard();
+    let mut app = test_app();
+    let gen_before = app.theme_provider.generation();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/theme".into(),
+            args: "toky".into(),
+        },
+        0,
+    );
+    assert!(actions.is_empty());
+    assert!(!app.theme_picker.is_open());
+    assert!(app.theme_provider.generation() > gen_before);
+    assert_eq!(app.theme_provider.current_theme_name(), "tokyonight");
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        format!("{THEME_APPLIED_PREFIX}: tokyonight")
+    );
+}
+
+/// `/theme <name>` that is not in the catalog flashes `load`'s unknown-theme
+/// error and changes nothing.
+#[test]
+fn theme_arg_unknown_flashes() {
+    let _guard = crate::theme::theme_test_guard();
+    let mut app = test_app();
+    let gen_before = app.theme_provider.generation();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/theme".into(),
+            args: "nonexistent".into(),
+        },
+        0,
+    );
+    assert!(actions.is_empty());
+    assert!(!app.theme_picker.is_open());
+    assert_eq!(app.theme_provider.generation(), gen_before);
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        format!("{THEME_UNKNOWN_MSG}: nonexistent")
+    );
+}
+
+/// `/theme <fragment>` with 2+ fuzzy matches flashes and changes nothing.
+#[test]
+fn theme_arg_ambiguous_flashes() {
+    let _guard = crate::theme::theme_test_guard();
+    let mut app = test_app();
+    let gen_before = app.theme_provider.generation();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/theme".into(),
+            args: "catppuccin".into(),
+        },
+        0,
+    );
+    assert!(actions.is_empty());
+    assert!(!app.theme_picker.is_open());
+    assert_eq!(app.theme_provider.generation(), gen_before);
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        format!("{THEME_AMBIGUOUS_MSG}: catppuccin")
+    );
 }
 
 /// Tool output streams into a subagent's chat while the parent chat is the one
@@ -3158,6 +3646,9 @@ fn mcp_prompt_args_expand_references() {
             ..Default::default()
         }),
         LuaCommandReader::empty(),
+        ModelArgSource::new(Arc::clone(&app.available_models)),
+        ThemeArgSource::new(Arc::clone(&app.theme_provider)),
+        LuaArgumentSource::new(app.lua_event_handle.clone()),
     );
 
     let actions = app.execute_command(
@@ -5060,6 +5551,9 @@ fn at_completion_insertion_synchronizes_argument_completion() {
             max_args: 1,
             has_argument_completion: true,
         }]),
+        ModelArgSource::new(Arc::clone(&app.available_models)),
+        ThemeArgSource::new(Arc::clone(&app.theme_provider)),
+        LuaArgumentSource::new(app.lua_event_handle.clone()),
     );
     app.input_box.set_input("/deploy @rev".into());
     app.command_palette.sync("/deploy @rev");
@@ -5594,7 +6088,7 @@ fn test_idle_splash_pulls_lua_frame() {
             continue;
         };
         let all: String = frame.rows.iter().map(|r| r.glyphs.as_str()).collect();
-        if all.contains("luna-maki") {
+        if all.contains("makima") {
             break all;
         }
         assert!(
@@ -5603,7 +6097,7 @@ fn test_idle_splash_pulls_lua_frame() {
         );
     };
     assert!(
-        all.contains("luna-maki"),
+        all.contains("makima"),
         "idle splash renders the bundled logo"
     );
 }
@@ -5698,7 +6192,7 @@ fn test_splash_survives_reset_to_empty_session() {
             continue;
         };
         let all: String = frame.rows.iter().map(|r| r.glyphs.as_str()).collect();
-        if all.contains("luna-maki") {
+        if all.contains("makima") {
             break;
         }
         assert!(
@@ -5746,7 +6240,7 @@ fn test_splash_survives_reset_to_empty_session() {
             .map(|f| f.rows.iter().map(|r| r.glyphs.as_str()).collect())
             .unwrap_or_default();
         assert!(
-            all.contains("luna-maki"),
+            all.contains("makima"),
             "splash vanished {}s after the reset to an empty session\n{timeline:?}",
             reset_at.elapsed().as_secs_f32()
         );
@@ -5820,7 +6314,7 @@ fn test_splash_still_repulls_once_on_version_change() {
         let all: String = frame
             .map(|f| f.rows.iter().map(|r| r.glyphs.as_str()).collect())
             .unwrap_or_default();
-        if all.contains("run maki update to get v9.9.9") {
+        if all.contains("run makima update to get v9.9.9") {
             break;
         }
         assert!(

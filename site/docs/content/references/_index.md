@@ -7,7 +7,7 @@ group = "Reference"
 
 # `@` References
 
-Type `@` in the input box and Maki opens a completion popup. File completions are built in, but skills, subagents, and models come from plugins via the completion-source API. The built-in `skill`, `task`, and `model` plugins provide the defaults, and you are free to implement your own completion sources and expanders (see the [Lua API](/docs/lua-api/#maki-api-register_completion_source)).
+Type `@` in the input box and Makima opens a completion popup. File completions are built in, but skills, subagents, and models come from plugins via the completion-source API. The built-in `skill`, `task`, and `model` plugins provide the defaults, and you are free to implement your own completion sources and expanders (see the [Lua API](/docs/lua-api/#maki-api-register_completion_source)).
 
 Each reference has a long prefix, a one-letter short form, and a fixed meaning at submit time. At submit, a recognized `@prefix:value` token is replaced in place with an intent token like `<skill:name>`, `<subagent:type>`, or `<model:spec>`; the agent acts on it per its instructions. Unknown prefixes pass through verbatim.
 
@@ -22,7 +22,7 @@ Each reference has a long prefix, a one-letter short form, and a fixed meaning a
 
 Prefixes are case-insensitive, so `@SKILL:pdf` and `@s:pdf` are the same. A bare `@skill:` with nothing after it is not a reference yet, it is just the popup waiting for you to type.
 
-File references are the odd one out. They are never expanded or stripped. Maki does not inject file contents at submit time. The agent gets the path as text and decides when to read it. This keeps big files out of context until they are actually needed.
+File references are the odd one out. They are never expanded or stripped. Makima does not inject file contents at submit time. The agent gets the path as text and decides when to read it. This keeps big files out of context until they are actually needed.
 
 ## Subagents
 
@@ -52,7 +52,7 @@ A `<model:spec>` reference without a subagent has no effect. Use the `/model` co
 
 ## What passes through
 
-Not every `@` is a reference. Maki only treats `@` as a reference start when it begins a token, meaning nothing but whitespace comes before it on the line. So `foo@bar`, email addresses, and unknown prefixes like `@nothing:whatever` are left alone and sent to the agent verbatim.
+Not every `@` is a reference. Makima only treats `@` as a reference start when it begins a token, meaning nothing but whitespace comes before it on the line. So `foo@bar`, email addresses, and unknown prefixes like `@nothing:whatever` are left alone and sent to the agent verbatim.
 
 ## Custom completion sources
 

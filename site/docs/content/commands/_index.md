@@ -41,9 +41,16 @@ Type `/` in the input box to open the command palette.
 | `/splash` | Preview and select a splash renderer |
 | `/thinking` | Set thinking effort (bare opens a selector) |
 
+### Command arguments
+
+`/model` and `/theme` also accept an argument. While you type it, the palette lists the possible values (model specs, theme names), and submitting resolves the argument without opening the picker:
+
+- **`/model <spec>`**: a full `provider/id` spec is used as-is, even if it is not in the discovered list. A fragment is fuzzy-matched against the discovered specs, and a unique match switches to it. Zero or multiple matches flash a note and keep the current model.
+- **`/theme <name>`**: the exact name is applied and persisted. A fragment that matches one theme name (like `toky` for `tokyonight`) is resolved the same way; unknown or ambiguous names flash a note and leave the current theme. With no argument, the picker opens and previews each theme as you navigate.
+
 ## Sessions
 
-Sessions run concurrently. `/new` starts a fresh session while the old one keeps working in the background, and `/sessions` shows the live status of each (working, needs input, idle) so you can jump between them. When a background session finishes or needs input, Maki flashes a note in the status bar. `/rename` renames the current session; in the session picker, `Ctrl+N` / `Ctrl+R` / `Ctrl+D` create, rename, and delete.
+Sessions run concurrently. `/new` starts a fresh session while the old one keeps working in the background, and `/sessions` shows the live status of each (working, needs input, idle) so you can jump between them. When a background session finishes or needs input, Makima flashes a note in the status bar. `/rename` renames the current session; in the session picker, `Ctrl+N` / `Ctrl+R` / `Ctrl+D` create, rename, and delete.
 
 ## Modes and toggles
 
@@ -64,9 +71,9 @@ You can define your own slash commands as Markdown files. Empty files are skippe
 
 Later sources override earlier ones when the command **name** matches (the stem of the file, or `name` in frontmatter):
 
-1. User config: `~/.config/maki/commands/` (and legacy `~/.maki/commands/` if present)
+1. User config: `~/.config/makima/commands/` (and legacy `~/.makima/commands/` if present)
 2. User third-party: `~/.claude/commands/`
-3. Project dirs, walking from the current working directory up to the nearest `.git` root. At each level: `.maki/commands/`, then `.claude/commands/`
+3. Project dirs, walking from the current working directory up to the nearest `.git` root. At each level: `.makima/commands/`, then `.claude/commands/`
 
 Because the walk goes cwd → … → git root, a command at the **repository root overrides** the same name found only under a nested cwd. Project commands override user commands. Palette names are `/project:<name>` or `/user:<name>` depending on which scope won.
 
@@ -95,7 +102,7 @@ For example, `/project:review main.rs` replaces `$ARGUMENTS` with `main.rs`.
 Prefer a different name for a command? `maki.api.run_command` runs any slash command exactly as typing it would, so an alias is a one-line handler in your `init.lua` instead of a reimplementation.
 
 ```lua
--- ~/.config/maki/init.lua
+-- ~/.config/makima/init.lua
 local aliases = {
     { name = "/clear", target = "/new", description = "Alias for /new" },
     { name = "/resume", target = "/sessions", description = "Alias for /sessions" },

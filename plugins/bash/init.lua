@@ -1,4 +1,3 @@
-local truncate = require("maki.truncate")
 local ToolView = require("maki.tool_view")
 local output_limits = require("maki.output_limits")
 local bh = require("bash_helpers")
@@ -404,7 +403,7 @@ maki.api.register_tool({
       end
       finished = true
       local output = table.concat(output_parts)
-      output = truncate(output, max_lines, max_bytes)
+      output = maki.text.truncate_file(output, max_lines, max_bytes)
 
       local is_error = exit_code ~= 0
       local llm_output
@@ -464,7 +463,7 @@ maki.api.register_tool({
         return
       end
       finished = true
-      local out = truncate(table.concat(output_parts), max_lines, max_bytes)
+      local out = maki.text.truncate_file(table.concat(output_parts), max_lines, max_bytes, nil)
       ctx:finish(partial.cut(view, out, reason, timeout_secs))
     end)
 

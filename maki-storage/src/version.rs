@@ -6,7 +6,7 @@ use isahc::config::Configurable;
 use isahc::{AsyncReadResponseExt, ReadResponseExt, Request};
 
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
-const RELEASES_URL: &str = "https://api.github.com/repos/lun-4/maki/releases/latest";
+const RELEASES_URL: &str = "https://api.github.com/repos/lun-4/makima/releases/latest";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -48,7 +48,7 @@ fn client() -> Result<isahc::HttpClient, VersionError> {
 fn request() -> Result<isahc::Request<()>, VersionError> {
     Ok(Request::get(RELEASES_URL)
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "maki")
+        .header("User-Agent", "makima")
         .body(())?)
 }
 
@@ -68,7 +68,7 @@ fn parse_tag(bytes: &[u8]) -> Result<String, VersionError> {
 pub fn curl_fetch(url: &str) -> io::Result<Vec<u8>> {
     let max_time = CONNECT_TIMEOUT + REQUEST_TIMEOUT;
     let out = Command::new("curl")
-        .args(["-fsSL", "-A", "maki", "--max-time"])
+        .args(["-fsSL", "-A", "makima", "--max-time"])
         .arg(max_time.as_secs().to_string())
         .arg(url)
         .output()?;

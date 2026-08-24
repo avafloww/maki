@@ -8,8 +8,8 @@ use maki_agent::command::CustomCommand;
 use maki_agent::{CancelToken, CancelTrigger};
 use maki_agent::{McpPromptInfo, McpSnapshotReader};
 use maki_lua::{
-    CommandArgumentContext, CommandArgumentItem, CommandArgumentLifecycle, EventHandle,
-    LuaCommandInfo, LuaCommandReader,
+    CommandArgumentContext, CommandArgumentItem, CommandArgumentLifecycle, LuaCommandInfo,
+    LuaCommandReader,
 };
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Matcher, Nucleo, Utf32String};
@@ -19,17 +19,30 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
+use crate::components::arg_completion::{
+    ArgumentSource, LuaArgumentSource, ModelArgSource, SourceKind, ThemeArgSource,
+};
 use crate::{repaint::Dirty, theme};
 
 const TICK_TIMEOUT_MS: u64 = 10;
 /// Note appended to builtin alias rows: `(Alias for /new)`.
 const ALIAS_NOTE: &str = " (Alias for ";
 
+/// Which live source feeds a builtin's argument popup; a descriptor only, the
+/// live instances are palette fields built by [`crate::app::App`].
+#[derive(Clone, Copy, PartialEq)]
+pub enum BuiltinArgSource {
+    None,
+    Models,
+    Themes,
+}
+
 pub struct BuiltinCommand {
     pub name: &'static str,
     pub description: &'static str,
     pub max_args: usize,
     pub aliases: &'static [&'static str],
+    pub arg_source: BuiltinArgSource,
 }
 
 pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
@@ -38,108 +51,126 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Browse and search tasks",
         max_args: 0,
         aliases: &[],
+        arg_source: BuiltinArgSource::None,
     },
     BuiltinCommand {
         name: "/compact",
         description: "Summarize and compact conversation history",
         max_args: 0,
         aliases: &[],
+        arg_source: BuiltinArgSource::None,
     },
     BuiltinCommand {
         name: "/new",
         description: "Start a new session",
         max_args: 0,
         aliases: &["/clear"],
+        arg_source: BuiltinArgSource::None,
     },
     BuiltinCommand {
         name: "/help",
         description: "Show keybindings",
         max_args: 0,
         aliases: &[],
+        arg_source: BuiltinArgSource::None,
     },
     BuiltinCommand {
         name: "/usage",
         description: "Show token usage breakdown",
         max_args: 0,
         aliases: &[],
+        arg_source: BuiltinArgSource::None,
     },
     BuiltinCommand {
         name: "/queue",
         description: "Remove items from queue",
         max_args: 0,
         aliases: &[],
+        arg_source: BuiltinArgSource::None,
     },
     BuiltinCommand {
         name: "/model",
         description: "Switch model",
-        max_args: 0,
+        max_args: 1,
         aliases: &[],
+        arg_source: BuiltinArgSource::Models,
     },
     BuiltinCommand {
         name: "/theme",
         description: "Switch color theme",
-        max_args: 0,
+        max_args: 1,
         aliases: &[],
+        arg_source: BuiltinArgSource::Themes,
     },
     BuiltinCommand {
         name: "/mcp",
         description: "Configure MCP servers",
         max_args: 0,
         aliases: &[],
+        arg_source: BuiltinArgSource::None,
     },
     BuiltinCommand {
         name: "/login",
         description: "Authenticate with an LLM provider",
         max_args: 0,
         aliases: &[],
+        arg_source: BuiltinArgSource::None,
     },
     BuiltinCommand {
         name: "/cd",
         description: "Change working directory",
         max_args: 1,
         aliases: &[],
+        arg_source: BuiltinArgSource::None,
     },
     BuiltinCommand {
         name: "/btw",
         description: "Ask a quick question (no tools, no history pollution)",
         max_args: usize::MAX,
         aliases: &[],
+        arg_source: BuiltinArgSource::None,
     },
     BuiltinCommand {
         name: "/yolo",
         description: "Toggle YOLO mode (skip all permission prompts)",
         max_args: 0,
         aliases: &[],
+        arg_source: BuiltinArgSource::None,
     },
     BuiltinCommand {
         name: "/thinking",
         description: "Toggle extended thinking (off, adaptive, effort level, or budget)",
         max_args: 1,
         aliases: &[],
+        arg_source: BuiltinArgSource::None,
     },
     BuiltinCommand {
         name: "/fast",
         description: "Toggle Anthropic fast mode (Opus only)",
         max_args: 0,
         aliases: &[],
+        arg_source: BuiltinArgSource::None,
     },
     BuiltinCommand {
         name: "/workflow",
         description: "Toggle workflow mode (task callable inside code_execution)",
         max_args: 0,
         aliases: &[],
+        arg_source: BuiltinArgSource::None,
     },
     BuiltinCommand {
         name: "/exit",
         description: "Exit the application",
         max_args: 0,
         aliases: &[],
+        arg_source: BuiltinArgSource::None,
     },
     BuiltinCommand {
         name: "/reload",
         description: "Reload plugins and config",
         max_args: 0,
         aliases: &[],
+        arg_source: BuiltinArgSource::None,
     },
 ];
 
@@ -199,6 +230,11 @@ pub struct CommandPalette {
     pending_cancel: Option<CancelTrigger>,
     lifecycle_cancel: Option<CancelTrigger>,
     accepted_argument_input: Option<String>,
+    model_source: ModelArgSource,
+    theme_source: ThemeArgSource,
+    lua_source: LuaArgumentSource,
+    /// Which live source serves the current argument session, if any.
+    active_source: Option<SourceKind>,
 }
 
 struct ArgumentMatch {
@@ -218,6 +254,9 @@ impl CommandPalette {
         custom_commands: Arc<[CustomCommand]>,
         mcp_reader: McpSnapshotReader,
         lua_reader: LuaCommandReader,
+        model_source: ModelArgSource,
+        theme_source: ThemeArgSource,
+        lua_source: LuaArgumentSource,
     ) -> Self {
         let snap = mcp_reader.load();
         let mcp_generation = snap.generation;
@@ -250,6 +289,10 @@ impl CommandPalette {
             pending_cancel: None,
             lifecycle_cancel: None,
             accepted_argument_input: None,
+            model_source,
+            theme_source,
+            lua_source,
+            active_source: None,
         }
     }
 
@@ -324,15 +367,10 @@ impl CommandPalette {
         nucleo
     }
 
-    pub fn handle_key(
-        &mut self,
-        key: KeyEvent,
-        input: &str,
-        handle: &EventHandle,
-    ) -> CommandAction {
+    pub fn handle_key(&mut self, key: KeyEvent, input: &str) -> CommandAction {
         if self.accepted_argument_input.as_deref() == Some(input) {
             return if key.code == KeyCode::Enter {
-                self.confirm_close(input, handle)
+                self.confirm_close(input)
             } else {
                 CommandAction::Passthrough
             };
@@ -344,7 +382,7 @@ impl CommandPalette {
             KeyCode::Up => {
                 if !self.argument_items.is_empty() {
                     self.selected = self.selected.saturating_sub(1);
-                    self.notify_lifecycle(handle, CommandArgumentLifecycle::Highlight);
+                    self.notify_lifecycle(CommandArgumentLifecycle::Highlight);
                     CommandAction::Consumed
                 } else {
                     self.move_up();
@@ -354,7 +392,7 @@ impl CommandPalette {
             KeyCode::Down => {
                 if !self.argument_items.is_empty() {
                     self.selected = (self.selected + 1).min(self.argument_items.len() - 1);
-                    self.notify_lifecycle(handle, CommandArgumentLifecycle::Highlight);
+                    self.notify_lifecycle(CommandArgumentLifecycle::Highlight);
                     CommandAction::Consumed
                 } else {
                     self.move_down();
@@ -362,7 +400,7 @@ impl CommandPalette {
                 }
             }
             KeyCode::Esc => {
-                self.close(handle);
+                self.close();
                 CommandAction::Consumed
             }
             KeyCode::Enter => {
@@ -377,14 +415,15 @@ impl CommandPalette {
                     // would change nothing: run the command instead of
                     // spending an Enter on a no-op accept.
                     let exact = input.get(range.0..range.1) == Some(insertion.as_str());
-                    self.notify_lifecycle(handle, CommandArgumentLifecycle::Accept);
+                    self.notify_lifecycle(CommandArgumentLifecycle::Accept);
                     self.argument_context = None;
+                    self.active_source = None;
                     self.lifecycle_cancel = None;
                     self.argument_items.clear();
                     self.argument_range = None;
                     self.pending_arguments = None;
                     if exact {
-                        self.confirm_close(input, handle)
+                        self.confirm_close(input)
                     } else {
                         self.accepted_argument_input = Some(text.clone());
                         CommandAction::AcceptArgument { text, cursor }
@@ -392,7 +431,7 @@ impl CommandPalette {
                 } else {
                     // Not settled: no items, or stale ones still on screen
                     // while the current query is in flight.
-                    self.confirm_close(input, handle)
+                    self.confirm_close(input)
                 }
             }
             KeyCode::Tab => {
@@ -401,8 +440,9 @@ impl CommandPalette {
                     .zip(self.argument_items.get(self.selected))
                 {
                     let insertion = item.item.insertion.clone();
-                    self.notify_lifecycle(handle, CommandArgumentLifecycle::Accept);
+                    self.notify_lifecycle(CommandArgumentLifecycle::Accept);
                     self.argument_context = None;
+                    self.active_source = None;
                     self.lifecycle_cancel = None;
                     let text = self.replace_argument(input, &insertion);
                     self.accepted_argument_input = Some(text.clone());
@@ -456,7 +496,73 @@ impl CommandPalette {
         self.selected = 0;
     }
 
-    pub fn sync_arguments(&mut self, input: &str, cursor: usize, handle: &EventHandle, mode: &str) {
+    /// The live source the selected row's argument session belongs to, if any:
+    /// builtins carry a descriptor, lua rows carry the command index, the rest
+    /// (custom, MCP prompts) complete nothing.
+    fn selected_source(&self) -> Option<(String, Arc<str>, SourceKind)> {
+        let selected = self.filtered.get(self.selected)?;
+        match &selected.command_type {
+            CommandType::Builtin(cmd) => match cmd.arg_source {
+                BuiltinArgSource::None => None,
+                BuiltinArgSource::Models => Some((
+                    selected.display.clone(),
+                    Arc::from(cmd.name),
+                    SourceKind::Model,
+                )),
+                BuiltinArgSource::Themes => Some((
+                    selected.display.clone(),
+                    Arc::from(cmd.name),
+                    SourceKind::Theme,
+                )),
+            },
+            CommandType::Lua(i) => self
+                .lua_commands
+                .get(*i)
+                .filter(|lua| lua.has_argument_completion)
+                .map(|lua| {
+                    (
+                        selected.display.clone(),
+                        Arc::clone(&lua.plugin),
+                        SourceKind::Lua,
+                    )
+                }),
+            CommandType::Custom(_) | CommandType::McpPrompt(_) => None,
+        }
+    }
+
+    fn collect_from(
+        &mut self,
+        kind: SourceKind,
+        ctx: &CommandArgumentContext,
+        token: CancelToken,
+    ) -> Option<flume::Receiver<Vec<CommandArgumentItem>>> {
+        match kind {
+            SourceKind::Model => self.model_source.collect(ctx, token),
+            SourceKind::Theme => self.theme_source.collect(ctx, token),
+            SourceKind::Lua => self.lua_source.collect(ctx, token),
+        }
+    }
+
+    fn lifecycle_to(
+        &mut self,
+        kind: SourceKind,
+        ctx: &CommandArgumentContext,
+        event: CommandArgumentLifecycle,
+        item: Option<CommandArgumentItem>,
+        token: CancelToken,
+    ) {
+        match kind {
+            SourceKind::Model => self
+                .model_source
+                .lifecycle(ctx, event, item.as_ref(), token),
+            SourceKind::Theme => self
+                .theme_source
+                .lifecycle(ctx, event, item.as_ref(), token),
+            SourceKind::Lua => self.lua_source.lifecycle(ctx, event, item.as_ref(), token),
+        }
+    }
+
+    pub fn sync_arguments(&mut self, input: &str, cursor: usize, mode: &str) {
         self.pending_cancel.take();
         self.argument_generation = self.argument_generation.wrapping_add(1);
         // The previous items stay on screen until the new query lands; the
@@ -467,21 +573,14 @@ impl CommandPalette {
             return;
         }
         self.accepted_argument_input = None;
-        let command = self
-            .filtered
-            .get(self.selected)
-            .map(|item| item.display.clone());
-        let lua = command
-            .as_deref()
-            .and_then(|command| self.find_lua_command(command))
-            .filter(|lua| lua.has_argument_completion)
-            .map(|lua| Arc::clone(&lua.plugin));
-        let Some((command, plugin, (start, end, arg, index))) = command
-            .zip(lua)
-            .zip(argument_at_cursor(input, cursor))
-            .map(|((command, plugin), argument)| (command, plugin, argument))
-        else {
-            self.cancel_arguments(handle);
+        let Some((command, plugin, kind)) = self.selected_source() else {
+            self.active_source = None;
+            self.cancel_arguments();
+            return;
+        };
+        let Some((start, end, arg, index)) = argument_at_cursor(input, cursor) else {
+            self.active_source = None;
+            self.cancel_arguments();
             return;
         };
         let same_session = self
@@ -489,11 +588,11 @@ impl CommandPalette {
             .as_ref()
             .is_some_and(|context| context.command.as_ref() == command && context.plugin == plugin);
         if !same_session {
-            self.cancel_arguments(handle);
+            self.cancel_arguments();
             self.argument_session = self.argument_session.wrapping_add(1);
         }
         let context = CommandArgumentContext {
-            command: Arc::from(command.as_str()),
+            command: Arc::from(command),
             plugin,
             args: command_args(input).to_string(),
             arg: arg.clone(),
@@ -503,9 +602,10 @@ impl CommandPalette {
             generation: self.argument_generation,
         };
         let (cancel, token) = CancelToken::new();
-        let Some(rx) = handle.collect_command_argument_items(context.clone(), token) else {
+        let Some(rx) = self.collect_from(kind, &context, token) else {
             return;
         };
+        self.active_source = Some(kind);
         self.argument_context = Some(context);
         self.pending_cancel = Some(cancel);
         self.pending_arguments = Some(PendingArguments {
@@ -516,7 +616,7 @@ impl CommandPalette {
         });
     }
 
-    pub fn poll_arguments(&mut self, handle: &EventHandle) -> Dirty {
+    pub fn poll_arguments(&mut self) -> Dirty {
         let Some(pending) = self.pending_arguments.take() else {
             return Dirty::NO;
         };
@@ -554,13 +654,13 @@ impl CommandPalette {
         self.argument_range = Some(pending.range);
         self.pending_cancel = None;
         if !self.argument_items.is_empty() {
-            self.notify_lifecycle(handle, CommandArgumentLifecycle::Highlight);
+            self.notify_lifecycle(CommandArgumentLifecycle::Highlight);
         }
         Dirty::YES
     }
 
-    fn notify_lifecycle(&mut self, handle: &EventHandle, event: CommandArgumentLifecycle) {
-        let Some(context) = self.argument_context.clone() else {
+    fn notify_lifecycle(&mut self, event: CommandArgumentLifecycle) {
+        let Some((kind, context)) = self.active_source.zip(self.argument_context.clone()) else {
             return;
         };
         let item = match event {
@@ -573,25 +673,27 @@ impl CommandPalette {
         self.lifecycle_cancel.take();
         if matches!(event, CommandArgumentLifecycle::Highlight) {
             let (cancel, token) = CancelToken::new();
-            handle.command_argument_lifecycle(context, event, item, token);
+            self.lifecycle_to(kind, &context, event, item, token);
             self.lifecycle_cancel = Some(cancel);
         } else {
-            handle.command_argument_lifecycle(context, event, item, CancelToken::none());
+            self.lifecycle_to(kind, &context, event, item, CancelToken::none());
         }
     }
 
-    pub fn cancel_arguments(&mut self, handle: &EventHandle) {
+    pub fn cancel_arguments(&mut self) {
         self.pending_cancel.take();
         self.lifecycle_cancel.take();
-        if let Some(context) = self.argument_context.clone() {
-            handle.command_argument_lifecycle(
-                context,
+        if let Some((kind, context)) = self.active_source.zip(self.argument_context.clone()) {
+            self.lifecycle_to(
+                kind,
+                &context,
                 CommandArgumentLifecycle::Cancel,
                 None,
                 CancelToken::none(),
             );
         }
         self.argument_context = None;
+        self.active_source = None;
         self.argument_items.clear();
         self.argument_range = None;
         self.pending_arguments = None;
@@ -693,8 +795,8 @@ impl CommandPalette {
         // and clears them when their session ends.
     }
 
-    pub fn close(&mut self, handle: &EventHandle) {
-        self.cancel_arguments(handle);
+    pub fn close(&mut self) {
+        self.cancel_arguments();
         self.filtered.clear();
         self.argument_items.clear();
         self.argument_range = None;
@@ -798,10 +900,10 @@ impl CommandPalette {
 
     /// Confirm the input as a command and close the palette; consume the key
     /// when the input no longer confirms (the command list went stale).
-    fn confirm_close(&mut self, input: &str, handle: &EventHandle) -> CommandAction {
+    fn confirm_close(&mut self, input: &str) -> CommandAction {
         match self.confirm(input) {
             Some(cmd) => {
-                self.close(handle);
+                self.close();
                 CommandAction::Execute(cmd)
             }
             None => CommandAction::Consumed,
@@ -1011,21 +1113,60 @@ fn argument_at_cursor(input: &str, cursor: usize) -> Option<(usize, usize, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arc_swap::ArcSwapOption;
     use maki_agent::{McpPromptArg, McpSnapshot};
+    use maki_lua::EventHandle;
     use test_case::test_case;
+
+    use crate::theme::ThemesProvider;
 
     fn empty_snapshot() -> McpSnapshotReader {
         McpSnapshotReader::empty()
     }
 
+    fn test_handle() -> EventHandle {
+        EventHandle::disconnected_for_test()
+    }
+
+    /// Palette with an in-memory theme catalog and the given model slot +
+    /// lua handle: no real state, no lua runtime.
+    fn build_palette(
+        custom: Arc<[CustomCommand]>,
+        mcp: McpSnapshotReader,
+        lua: LuaCommandReader,
+        models: Vec<String>,
+        handle: EventHandle,
+    ) -> CommandPalette {
+        CommandPalette::new(
+            custom,
+            mcp,
+            lua,
+            ModelArgSource::new(Arc::new(ArcSwapOption::from_pointee(models))),
+            ThemeArgSource::new(Arc::new(theme::InMemoryThemesProvider::bundled())),
+            LuaArgumentSource::new(handle),
+        )
+    }
+
     fn synced(input: &str) -> CommandPalette {
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), LuaCommandReader::empty());
+        let mut p = build_palette(
+            Arc::from([]),
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            Vec::new(),
+            test_handle(),
+        );
         p.sync(input);
         p
     }
 
     fn synced_with_custom(input: &str, custom: Arc<[CustomCommand]>) -> CommandPalette {
-        let mut p = CommandPalette::new(custom, empty_snapshot(), LuaCommandReader::empty());
+        let mut p = build_palette(
+            custom,
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            Vec::new(),
+            test_handle(),
+        );
         p.sync(input);
         p
     }
@@ -1070,7 +1211,13 @@ mod tests {
             max_args: 1,
             has_argument_completion: false,
         }]);
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), lua);
+        let mut p = build_palette(
+            Arc::from([]),
+            empty_snapshot(),
+            lua,
+            Vec::new(),
+            test_handle(),
+        );
         p.sync("/thinking");
         let count = p
             .filtered
@@ -1086,7 +1233,7 @@ mod tests {
     #[test]
     fn close_deactivates() {
         let mut p = synced("/");
-        p.close(&EventHandle::disconnected_for_test());
+        p.close();
         assert!(!p.is_active());
     }
 
@@ -1118,7 +1265,13 @@ mod tests {
 
     #[test]
     fn confirm_when_inactive_returns_none() {
-        let p = CommandPalette::new(Arc::from([]), empty_snapshot(), LuaCommandReader::empty());
+        let p = build_palette(
+            Arc::from([]),
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            Vec::new(),
+            test_handle(),
+        );
         assert!(p.confirm("").is_none());
     }
 
@@ -1144,6 +1297,8 @@ mod tests {
     #[test_case("/cd ~/foo", true   ; "one_arg_cmd_mid_arg")]
     #[test_case("/cd  ~/foo", true  ; "one_arg_cmd_double_space")]
     #[test_case("/cd ~/foo ", false ; "one_arg_cmd_second_space")]
+    #[test_case("/model ", true     ; "model_arg_with_space")]
+    #[test_case("/theme ", true     ; "theme_arg_with_space")]
     #[test_case("/btw hello world", true ; "btw_stays_active_with_many_args")]
     fn sync_respects_nargs(input: &str, expect_active: bool) {
         let p = synced(input);
@@ -1170,7 +1325,13 @@ mod tests {
     #[test_case("/pct", "/compact", ""    ; "fuzzy-match-2")]
     #[test_case("/btw hello world", "/btw", "hello world" ; "btw_multi_word")]
     fn confirm_parses_args(input: &str, expected_name: &str, expected_args: &str) {
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), LuaCommandReader::empty());
+        let mut p = build_palette(
+            Arc::from([]),
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            Vec::new(),
+            test_handle(),
+        );
         p.sync(input);
         let cmd = p.confirm(input).unwrap();
         assert_eq!(cmd.name, expected_name);
@@ -1221,7 +1382,13 @@ mod tests {
     #[test]
     fn confirm_custom_command() {
         let custom = sample_custom();
-        let mut p = CommandPalette::new(custom, empty_snapshot(), LuaCommandReader::empty());
+        let mut p = build_palette(
+            custom,
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            Vec::new(),
+            test_handle(),
+        );
         p.sync("/project:review");
         assert!(p.is_active());
         let cmd = p.confirm("/project:review some-file.rs").unwrap();
@@ -1232,7 +1399,13 @@ mod tests {
     #[test]
     fn find_custom_command_lookup() {
         let custom = sample_custom();
-        let p = CommandPalette::new(custom, empty_snapshot(), LuaCommandReader::empty());
+        let p = build_palette(
+            custom,
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            Vec::new(),
+            test_handle(),
+        );
         let found = p.find_custom_command("/project:review");
         assert!(found.is_some());
         assert_eq!(found.unwrap().content, "Review $ARGUMENTS");
@@ -1266,7 +1439,13 @@ mod tests {
     }
 
     fn synced_with_prompts(input: &str) -> CommandPalette {
-        let mut p = CommandPalette::new(Arc::from([]), sample_prompts(), LuaCommandReader::empty());
+        let mut p = build_palette(
+            Arc::from([]),
+            sample_prompts(),
+            LuaCommandReader::empty(),
+            Vec::new(),
+            test_handle(),
+        );
         p.sync(input);
         p
     }
@@ -1324,7 +1503,13 @@ mod tests {
     #[test]
     fn mcp_update_clears_old_prompts() {
         let reader = sample_prompts();
-        let mut p = CommandPalette::new(Arc::from([]), reader, LuaCommandReader::empty());
+        let mut p = build_palette(
+            Arc::from([]),
+            reader,
+            LuaCommandReader::empty(),
+            Vec::new(),
+            test_handle(),
+        );
 
         p.sync("/");
         let initial_count = p
@@ -1419,7 +1604,13 @@ mod tests {
             max_args,
             has_argument_completion: false,
         }]);
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), reader);
+        let mut p = build_palette(
+            Arc::from([]),
+            empty_snapshot(),
+            reader,
+            Vec::new(),
+            test_handle(),
+        );
         p.sync(input);
         p
     }
@@ -1465,7 +1656,13 @@ mod tests {
     }
 
     fn synced_with_lua(input: &str) -> CommandPalette {
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), sample_lua_commands());
+        let mut p = build_palette(
+            Arc::from([]),
+            empty_snapshot(),
+            sample_lua_commands(),
+            Vec::new(),
+            test_handle(),
+        );
         p.sync(input);
         p
     }
@@ -1503,7 +1700,13 @@ mod tests {
 
     #[test]
     fn confirm_lua_command_parses_args() {
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), sample_lua_commands());
+        let mut p = build_palette(
+            Arc::from([]),
+            empty_snapshot(),
+            sample_lua_commands(),
+            Vec::new(),
+            test_handle(),
+        );
         p.sync("/memory");
         let cmd = p.confirm("/memory some-arg").unwrap();
         assert_eq!(cmd.name, "/memory");
@@ -1535,12 +1738,17 @@ mod tests {
                 has_argument_completion: true,
             },
         ]);
-        let mut palette = CommandPalette::new(Arc::from([]), empty_snapshot(), lua);
+        let mut palette = build_palette(
+            Arc::from([]),
+            empty_snapshot(),
+            lua,
+            Vec::new(),
+            test_handle(),
+        );
         palette.sync("/ ");
-        let handle = EventHandle::disconnected_for_test();
 
         assert!(matches!(
-            palette.handle_key(KeyEvent::from(KeyCode::Down), "/ ", &handle),
+            palette.handle_key(KeyEvent::from(KeyCode::Down), "/ "),
             CommandAction::SelectionChanged
         ));
     }
@@ -1563,9 +1771,14 @@ mod tests {
                 has_argument_completion: true,
             },
         ]);
-        let mut palette = CommandPalette::new(Arc::from([]), empty_snapshot(), lua);
+        let mut palette = build_palette(
+            Arc::from([]),
+            empty_snapshot(),
+            lua,
+            Vec::new(),
+            test_handle(),
+        );
         palette.sync("/ ");
-        let handle = EventHandle::disconnected_for_test();
         let (tx, rx) = flume::bounded(1);
         palette.pending_arguments = Some(PendingArguments {
             rx,
@@ -1574,7 +1787,7 @@ mod tests {
             range: (2, 2),
         });
         assert!(matches!(
-            palette.handle_key(KeyEvent::from(KeyCode::Down), "/ ", &handle),
+            palette.handle_key(KeyEvent::from(KeyCode::Down), "/ "),
             CommandAction::SelectionChanged
         ));
         tx.send(vec![CommandArgumentItem {
@@ -1583,9 +1796,9 @@ mod tests {
             description: None,
         }])
         .unwrap();
-        palette.sync_arguments("/ ", 2, &handle, "build");
+        palette.sync_arguments("/ ", 2, "build");
 
-        assert_eq!(palette.poll_arguments(&handle), Dirty::NO);
+        assert_eq!(palette.poll_arguments(), Dirty::NO);
         assert!(palette.argument_items.is_empty());
     }
 
@@ -1601,15 +1814,14 @@ mod tests {
             },
         );
 
-        let handle = EventHandle::disconnected_for_test();
         assert!(matches!(
-            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename draft", &handle),
+            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename draft"),
             CommandAction::AcceptArgument { text, cursor }
                 if text == "/rename final" && cursor == 13
         ));
         assert!(!palette.is_active());
         assert!(matches!(
-            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename final", &handle),
+            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename final"),
             CommandAction::Execute(ParsedCommand { name, args })
                 if name == "/rename" && args == "final"
         ));
@@ -1627,9 +1839,8 @@ mod tests {
             },
         );
 
-        let handle = EventHandle::disconnected_for_test();
         assert!(matches!(
-            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename final", &handle),
+            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename final"),
             CommandAction::Execute(ParsedCommand { name, args })
                 if name == "/rename" && args == "final"
         ));
@@ -1645,8 +1856,8 @@ mod tests {
             max_args: usize::MAX,
             has_argument_completion: true,
         }]);
-        let mut palette = CommandPalette::new(Arc::from([]), empty_snapshot(), lua);
         let (handle, probe) = maki_lua::test_support::probed_event_handle();
+        let mut palette = build_palette(Arc::from([]), empty_snapshot(), lua, Vec::new(), handle);
         let items = vec![CommandArgumentItem {
             label: "final".into(),
             insertion: "final".into(),
@@ -1654,16 +1865,16 @@ mod tests {
         }];
 
         palette.sync("/rename final");
-        palette.sync_arguments("/rename final", 13, &handle, "build");
+        palette.sync_arguments("/rename final", 13, "build");
         probe.try_finish_command_arguments(items.clone()).unwrap();
-        let _ = palette.poll_arguments(&handle);
+        let _ = palette.poll_arguments();
         assert_eq!(
             probe.try_finish_command_argument_lifecycle(),
             Some(("highlight", Some("final".into()), true))
         );
 
         assert!(matches!(
-            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename final", &handle),
+            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename final"),
             CommandAction::Execute(ParsedCommand { name, args })
                 if name == "/rename" && args == "final"
         ));
@@ -1688,32 +1899,38 @@ mod tests {
             max_args: usize::MAX,
             has_argument_completion: true,
         }]);
-        let mut palette = CommandPalette::new(Arc::from([]), empty_snapshot(), lua);
         let (handle, probe) = maki_lua::test_support::probed_event_handle();
+        let mut palette = build_palette(
+            Arc::from([]),
+            empty_snapshot(),
+            lua,
+            Vec::new(),
+            handle.clone(),
+        );
         let final_item = CommandArgumentItem {
             label: "final".into(),
             insertion: "final".into(),
             description: None,
         };
         palette.sync("/rename final");
-        palette.sync_arguments("/rename final", 13, &handle, "build");
+        palette.sync_arguments("/rename final", 13, "build");
         probe
             .try_finish_command_arguments(vec![final_item.clone()])
             .unwrap();
-        let _ = palette.poll_arguments(&handle);
+        let _ = palette.poll_arguments();
         (palette, handle, probe, final_item)
     }
 
     #[test]
     fn stale_argument_items_stay_until_new_result_lands() {
-        let (mut palette, handle, probe, _) = settled_rename_palette();
+        let (mut palette, _handle, probe, _) = settled_rename_palette();
 
         // Keystroke: the app re-syncs the command list and re-queries.
         palette.sync("/rename final");
-        palette.sync_arguments("/rename final", 13, &handle, "build");
+        palette.sync_arguments("/rename final", 13, "build");
         // The previous items stay on screen while the new query is in flight.
         assert!(matches!(
-            palette.handle_key(KeyEvent::from(KeyCode::Down), "/rename final", &handle),
+            palette.handle_key(KeyEvent::from(KeyCode::Down), "/rename final"),
             CommandAction::Consumed
         ));
 
@@ -1723,22 +1940,22 @@ mod tests {
             description: None,
         };
         probe.try_finish_command_arguments(vec![finale]).unwrap();
-        let _ = palette.poll_arguments(&handle);
+        let _ = palette.poll_arguments();
         // The new result replaces the stale item: accepting now inserts it.
         assert!(matches!(
-            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename final", &handle),
+            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename final"),
             CommandAction::AcceptArgument { text, .. } if text == "/rename finale"
         ));
     }
 
     #[test]
     fn enter_while_argument_query_in_flight_executes_input() {
-        let (mut palette, handle, _, _) = settled_rename_palette();
+        let (mut palette, _, _, _) = settled_rename_palette();
         palette.sync("/rename final");
-        palette.sync_arguments("/rename final", 13, &handle, "build");
+        palette.sync_arguments("/rename final", 13, "build");
 
         assert!(matches!(
-            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename final", &handle),
+            palette.handle_key(KeyEvent::from(KeyCode::Enter), "/rename final"),
             CommandAction::Execute(ParsedCommand { name, args })
                 if name == "/rename" && args == "final"
         ));
@@ -1758,9 +1975,8 @@ mod tests {
         });
         palette.argument_range = Some((12, 17));
 
-        let handle = EventHandle::disconnected_for_test();
         assert!(matches!(
-            palette.handle_key(KeyEvent::from(KeyCode::Tab), "/rename one draft three", &handle),
+            palette.handle_key(KeyEvent::from(KeyCode::Tab), "/rename one draft three"),
             CommandAction::Complete { text, cursor }
                 if text == "/rename one final three" && cursor == 17
         ));
@@ -1775,8 +1991,8 @@ mod tests {
             max_args: 1,
             has_argument_completion: true,
         }]);
-        let mut palette = CommandPalette::new(Arc::from([]), empty_snapshot(), lua);
         let (handle, probe) = maki_lua::test_support::probed_event_handle();
+        let mut palette = build_palette(Arc::from([]), empty_snapshot(), lua, Vec::new(), handle);
         let items = vec![CommandArgumentItem {
             label: "alpha".into(),
             insertion: "alpha".into(),
@@ -1784,33 +2000,33 @@ mod tests {
         }];
 
         palette.sync("/deploy a");
-        palette.sync_arguments("/deploy a", 9, &handle, "build");
+        palette.sync_arguments("/deploy a", 9, "build");
         probe.try_finish_command_arguments(items.clone()).unwrap();
-        let _ = palette.poll_arguments(&handle);
+        let _ = palette.poll_arguments();
         assert_eq!(
             probe.try_finish_command_argument_lifecycle(),
             Some(("highlight", Some("alpha".into()), true))
         );
 
-        palette.sync_arguments("/deploy z", 9, &handle, "build");
+        palette.sync_arguments("/deploy z", 9, "build");
         probe.try_finish_command_arguments(items.clone()).unwrap();
-        let _ = palette.poll_arguments(&handle);
+        let _ = palette.poll_arguments();
         assert!(palette.is_active());
         assert!(probe.try_finish_command_argument_lifecycle().is_none());
 
-        palette.sync_arguments("/deploy a", 9, &handle, "build");
+        palette.sync_arguments("/deploy a", 9, "build");
         probe.try_finish_command_arguments(items).unwrap();
-        let _ = palette.poll_arguments(&handle);
+        let _ = palette.poll_arguments();
         assert_eq!(
             probe.try_finish_command_argument_lifecycle(),
             Some(("highlight", Some("alpha".into()), true))
         );
-        palette.close(&handle);
+        palette.close();
         assert_eq!(
             probe.try_finish_command_argument_lifecycle(),
             Some(("cancel", None, true))
         );
-        palette.close(&handle);
+        palette.close();
         assert!(probe.try_finish_command_argument_lifecycle().is_none());
     }
 
@@ -1824,7 +2040,13 @@ mod tests {
             max_args: 0,
             has_argument_completion: false,
         }]);
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), reader);
+        let mut p = build_palette(
+            Arc::from([]),
+            empty_snapshot(),
+            reader,
+            Vec::new(),
+            test_handle(),
+        );
         p.sync("/");
         let initial_lua = p
             .filtered
@@ -1858,5 +2080,92 @@ mod tests {
         assert_eq!(updated_lua, 2);
         assert!(p.find_lua_command("/old").is_none());
         assert!(p.find_lua_command("/new1").is_some());
+    }
+
+    #[test]
+    fn model_arg_completion_lists_specs() {
+        let models = vec![
+            "glm-4.5".to_string(),
+            "anthropic/claude-opus-4-5".to_string(),
+        ];
+        let mut p = build_palette(
+            Arc::from([]),
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            models,
+            test_handle(),
+        );
+        p.sync("/model gl");
+        p.sync_arguments("/model gl", 9, "build");
+        assert_eq!(p.poll_arguments(), Dirty::YES);
+        assert_eq!(p.argument_items.len(), 1);
+        assert_eq!(p.argument_items[0].item.insertion, "glm-4.5");
+        assert!(matches!(
+            p.handle_key(KeyEvent::from(KeyCode::Enter), "/model gl"),
+            CommandAction::AcceptArgument { text, cursor }
+                if text == "/model glm-4.5" && cursor == 14
+        ));
+    }
+
+    fn theme_completion_palette(provider: Arc<theme::InMemoryThemesProvider>) -> CommandPalette {
+        let provider: Arc<dyn ThemesProvider> = provider;
+        CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            ModelArgSource::new(Arc::new(ArcSwapOption::empty())),
+            ThemeArgSource::new(provider),
+            LuaArgumentSource::new(test_handle()),
+        )
+    }
+
+    #[test]
+    fn theme_arg_completion_previews_and_esc_restores() {
+        let _guard = theme::theme_test_guard();
+        let provider = Arc::new(theme::InMemoryThemesProvider::bundled());
+        // Pin the global palette to the name the source restores on cancel,
+        // whatever a parallel test left installed.
+        theme::apply_theme(provider.as_ref(), &provider.current_theme_name());
+        let baseline = theme::current();
+        let base_gen = provider.generation();
+
+        let mut p = theme_completion_palette(Arc::clone(&provider));
+        p.sync("/theme tok");
+        p.sync_arguments("/theme tok", 10, "build");
+        assert_eq!(p.poll_arguments(), Dirty::YES);
+        assert_eq!(p.argument_items.len(), 1);
+        assert_eq!(p.argument_items[0].item.insertion, "tokyonight");
+        assert_eq!(provider.generation(), base_gen + 1);
+        assert_ne!(**theme::current(), **baseline);
+
+        p.handle_key(KeyEvent::from(KeyCode::Esc), "/theme tok");
+        assert_eq!(provider.generation(), base_gen + 2);
+        assert_eq!(**theme::current(), **baseline);
+    }
+
+    #[test]
+    fn theme_arg_completion_accept_commit_reopen_esc_keeps_committed() {
+        let _guard = theme::theme_test_guard();
+        let provider = Arc::new(theme::InMemoryThemesProvider::bundled());
+        theme::apply_theme(provider.as_ref(), &provider.current_theme_name());
+
+        let mut p = theme_completion_palette(Arc::clone(&provider));
+        p.sync("/theme tok");
+        p.sync_arguments("/theme tok", 10, "build");
+        assert_eq!(p.poll_arguments(), Dirty::YES);
+        assert!(matches!(
+            p.handle_key(KeyEvent::from(KeyCode::Enter), "/theme tok"),
+            CommandAction::AcceptArgument { text, .. } if text == "/theme tokyonight"
+        ));
+        // The accept consumed the preview baseline; the app's commit owns it.
+        provider.persist("tokyonight");
+
+        p.sync("/theme tok");
+        p.sync_arguments("/theme tok", 10, "build");
+        assert_eq!(p.poll_arguments(), Dirty::YES);
+        p.handle_key(KeyEvent::from(KeyCode::Esc), "/theme tok");
+
+        assert_eq!(provider.current_theme_name(), "tokyonight");
+        assert_eq!(**theme::current(), provider.load("tokyonight").unwrap());
     }
 }

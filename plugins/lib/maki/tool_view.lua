@@ -41,7 +41,7 @@ local function utf8_truncate_bytes(s, max_bytes)
   if i <= 0 then
     return "…"
   end
-  return s:sub(1, i) .. "…"
+  return s:sub(1, i) .. "[line truncated]"
 end
 
 local function line_text_bytes(line)
@@ -85,6 +85,8 @@ local function truncate_line(line, max_bytes)
     local remaining = max_bytes - used
     if #text > remaining then
       text = utf8_truncate_bytes(text, remaining)
+      out[#out + 1] = style and { text, style } or text
+      break
     end
     if style then
       out[#out + 1] = { text, style }

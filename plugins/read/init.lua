@@ -3,7 +3,6 @@ local shorten_path = require("maki.shorten_path")
 local output_limits = require("maki.output_limits")
 local helpers = require("read_helpers")
 
-local truncate_bytes = helpers.truncate_bytes
 local split_lines = helpers.split_lines
 
 local DESCRIPTION = [[Read a file. Returns contents with line numbers (1-indexed).
@@ -22,10 +21,13 @@ local DESCRIPTION = [[Read a file. Returns contents with line numbers (1-indexed
 
 local DEFAULT_MAX_OUTPUT_LINES = 2000
 
-local opts = maki.api.register_options({
-  max_line_bytes = { default = 500, min = 80, desc = "Truncate lines longer than this many bytes." },
-  max_output_lines = output_limits.specs.max_output_lines,
-})
+local opts = maki.api.register_options(output_limits.extend({
+  max_line_bytes = {
+    default = output_limits.DEFAULT_MAX_LINE_BYTES,
+    min = 80,
+    desc = "Truncate lines longer than this many bytes.",
+  },
+}))
 
 local function read_view_opts(ctx)
   local tol = ctx:tool_output_lines()
@@ -94,13 +96,13 @@ local function read_file(path, offset, limit, ctx)
   local total_lines = #all_lines
 
   local start = math.max(math.floor(offset), 1)
-  local default_max = opts.max_output_lines or ctx:config("max_output_lines", DEFAULT_MAX_OUTPUT_LINES)
-  local max_lines = limit == 0 and default_max or math.min(limit, default_max)
+  local max_lines, max_bytes = output_limits.resolve(opts, ctx)
+  max_lines = limit == 0 and max_lines or math.min(limit, max_lines)
   local max_line_bytes = opts.max_line_bytes
 
   local lines = {}
   for i = start, math.min(start + max_lines - 1, total_lines) do
-    lines[#lines + 1] = truncate_bytes(all_lines[i], max_line_bytes)
+    lines[#lines + 1] = maki.text.truncate_line(all_lines[i], max_line_bytes)
   end
 
   ctx:record_read(path)
@@ -110,24 +112,13 @@ local function read_file(path, offset, limit, ctx)
   for i, line in ipairs(lines) do
     parts[#parts + 1] = string.format(nr_fmt, start + i - 1, line)
   end
-  local llm_output = table.concat(parts, "\n")
-
   local trunc_start = start + #lines
-  if trunc_start <= total_lines then
-    llm_output = llm_output
-      .. string.format(
-        "\n\n...\n\nTruncated lines: %d-%d. Use offset=%d to read further.",
-        trunc_start,
-        total_lines,
-        trunc_start
-      )
-  end
+  local remaining_lines = trunc_start <= total_lines and total_lines - trunc_start + 1 or 0
+  local llm_output = maki.text.truncate_file(table.concat(parts, "\n"), max_lines, max_bytes, remaining_lines)
 
   local shown = #lines
   local annotation = shown < total_lines and string.format("%d of %d lines", shown, total_lines)
     or string.format("%d lines", shown)
-
-  local prefix = start > 1 and table.concat(all_lines, "\n", 1, math.min(start - 1, total_lines)) or nil
 
   local basename = path:match("([^/]+)$")
   if not ctx:is_instruction_file(basename) then
@@ -137,7 +128,7 @@ local function read_file(path, offset, limit, ctx)
       if #instructions > 0 then
         return {
           llm_output = llm_output,
-          body = build_file_view(lines, start, total_lines, path, ctx, prefix),
+          body = ToolView.restore(llm_output, read_view_opts(ctx)),
           annotation = annotation,
           instructions = instructions,
         }
@@ -200,25 +191,7 @@ maki.api.register_tool({
   end,
 
   restore = function(input, output, _is_error, ctx)
-    local lines, start_line, total_lines = {}, nil, nil
-    for _, raw in ipairs(maki.split(output, "\n")) do
-      local nr, text = raw:match("^%s*(%d+): (.*)$")
-      if nr then
-        start_line = start_line or tonumber(nr)
-        lines[#lines + 1] = text
-      else
-        local trunc_end = raw:match("Truncated lines: %d+%-(%d+)")
-        if trunc_end then
-          total_lines = tonumber(trunc_end)
-        end
-      end
-    end
-    if #lines == 0 then
-      return ToolView.restore(output, read_view_opts(ctx))
-    end
-    start_line = start_line or 1
-    total_lines = total_lines or (start_line + #lines - 1)
-    return build_file_view(lines, start_line, total_lines, input.path or "", ctx)
+    return ToolView.restore(output, read_view_opts(ctx))
   end,
 
   handler = function(input, ctx)

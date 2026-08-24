@@ -60,7 +60,6 @@ local function strip_html(html)
   return result:match("^%s*(.-)%s*$")
 end
 
-local truncate = require("maki.truncate")
 local ToolView = require("maki.tool_view")
 local output_limits = require("maki.output_limits")
 
@@ -152,7 +151,7 @@ maki.api.register_tool({
       body = strip_html(body)
     end
 
-    local llm_output = truncate(body, max_lines, max_bytes)
+    local llm_output = maki.text.truncate_file(body, max_lines, max_bytes, nil)
 
     return {
       llm_output = llm_output,

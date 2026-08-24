@@ -1,10 +1,10 @@
-//! SDK streaming mode: `maki --print --input-format stream-json`.
+//! SDK streaming mode: `makima --print --input-format stream-json`.
 //!
 //! Wire protocol matches Claude Code's SDK interface so tools like Conductor, Windsurf, and custom
 //! orchestrators work without adaptation.
 //!
 //! Per-message wire ids (`uuid`, assistant `message.id`) use `uuid::Uuid::now_v7()` to emit the
-//! hyphenated-hex UUIDv7 shape that Claude Code SDK consumers expect, rather than maki's base58
+//! hyphenated-hex UUIDv7 shape that Claude Code SDK consumers expect, rather than makima's base58
 //! `MakiId` canonical form.
 
 use std::collections::{HashMap, HashSet};

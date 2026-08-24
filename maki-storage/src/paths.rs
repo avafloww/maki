@@ -4,8 +4,8 @@ use std::sync::OnceLock;
 
 use etcetera::base_strategy::BaseStrategy;
 
-const FALLBACK_DIR: &str = ".maki";
-const APP_NAME: &str = "maki";
+const FALLBACK_DIR: &str = ".makima";
+const APP_NAME: &str = "makima";
 
 static STRATEGY: OnceLock<Option<Paths>> = OnceLock::new();
 
@@ -272,7 +272,7 @@ pub fn legacy_home_dir() -> Option<PathBuf> {
 /// Candidate config directories for `subdir` from `home` and `xdg_config`.
 /// Pure: no env reads, no process-home fallback. Production callers pass
 /// `config_dir().ok()` as `xdg_config` (which honors `XDG_CONFIG_HOME`, the
-/// `~/.maki` fallback, and the Windows `AppData\Roaming` strategy via
+/// `~/.makima` fallback, and the Windows `AppData\Roaming` strategy via
 /// `resolve()`); tests pass tempdirs.
 pub fn user_config_dirs(
     home: Option<&Path>,

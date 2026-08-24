@@ -19,14 +19,13 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::repaint::{Cadence, Dirty};
 
 const TRUNCATE_PREFIX: &str = "..";
-const CWD_MODEL_SEPARATOR: &str = "  ";
 const FAST_LABEL: &str = " [fast]";
 const WORKFLOW_LABEL: &str = " [workflow]";
 const SUBAGENT_LABEL_PREFIX: &str = "\u{21b3} ";
 
 /// Distinct footer badge for a focused subagent chat, contrasted with the
 /// plain `[name]` used for the main chat.
-fn subagent_label(name: &str) -> String {
+pub(crate) fn subagent_label(name: &str) -> String {
     format!(" [{SUBAGENT_LABEL_PREFIX}{name}]")
 }
 
@@ -47,8 +46,6 @@ pub struct StatusBarContext<'a> {
     pub model_id: &'a str,
     pub stats: UsageStats,
     pub auto_scroll: bool,
-    pub chat_name: Option<&'a str>,
-    pub is_subagent: bool,
     pub retry_info: Option<&'a RetryInfo>,
     pub thinking_label: Option<Cow<'static, str>>,
     pub fast: bool,
@@ -86,6 +83,10 @@ impl StatusBar {
 
     pub fn refresh_cwd(&mut self) {
         self.cwd_branch = cwd_branch_label();
+    }
+
+    pub(crate) fn cwd_branch(&self) -> &str {
+        &self.cwd_branch
     }
 
     pub fn poll_branch_update(&mut self) -> Dirty {
@@ -144,17 +145,6 @@ impl StatusBar {
         }
 
         left_spans.push(Span::styled(format!(" {}", ctx.mode_label), ctx.mode_style));
-
-        if let Some(name) = ctx.chat_name {
-            if ctx.is_subagent {
-                left_spans.push(Span::styled(subagent_label(name), theme::current().accent));
-            } else {
-                left_spans.push(Span::styled(
-                    format!(" [{name}]"),
-                    theme::current().status_dim,
-                ));
-            }
-        }
 
         if !ctx.auto_scroll {
             left_spans.push(Span::styled(
@@ -230,18 +220,11 @@ impl StatusBar {
                     ));
                 }
 
-                let reserved = left_spans
-                    .iter()
-                    .chain(rest_spans.iter())
-                    .map(Span::width)
-                    .sum::<usize>()
-                    + CWD_MODEL_SEPARATOR.width();
-                let available = (area.width as usize).saturating_sub(reserved);
-                let model = truncate_tail(ctx.model_id, available / 2);
-                let cwd = truncate_tail(&self.cwd_branch, available.saturating_sub(model.width()));
+                let left_width: usize = left_spans.iter().map(Span::width).sum();
+                let rest_width: usize = rest_spans.iter().map(Span::width).sum();
+                let available = (area.width as usize).saturating_sub(left_width + rest_width);
+                let model = truncate_tail(ctx.model_id, available);
 
-                right_spans.push(Span::styled(cwd, theme::current().status_dim));
-                right_spans.push(Span::raw(CWD_MODEL_SEPARATOR));
                 right_spans.push(Span::styled(model, theme::current().status_dim));
                 right_spans.append(&mut rest_spans);
             }
@@ -268,7 +251,7 @@ impl StatusBar {
     }
 }
 
-fn truncate_tail(s: &str, max_width: usize) -> Cow<'_, str> {
+pub(crate) fn truncate_tail(s: &str, max_width: usize) -> Cow<'_, str> {
     if s.width() <= max_width {
         return Cow::Borrowed(s);
     }
@@ -390,8 +373,6 @@ mod tests {
                 show_global,
             },
             auto_scroll: true,
-            chat_name: None,
-            is_subagent: false,
             retry_info: None,
             thinking_label: None,
             fast: false,
@@ -531,14 +512,15 @@ mod tests {
         assert_eq!(subagent_label(name), expected);
     }
 
-    fn render_status(is_subagent: bool) -> String {
+    #[test]
+    fn status_bar_no_longer_renders_chat_badge() {
+        // The active-chat badge moved to the persistent top bar; the bottom
+        // status bar must not duplicate it.
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
-        let backend = TestBackend::new(120, 1);
-        let mut term = Terminal::new(backend).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 1)).unwrap();
         let bar = StatusBar::new(Duration::from_secs(999));
         let status = Status::Idle;
-
         let ctx = StatusBarContext {
             status: &status,
             mode_label: Cow::Borrowed("NORMAL"),
@@ -552,8 +534,6 @@ mod tests {
                 show_global: false,
             },
             auto_scroll: false,
-            chat_name: Some("task1"),
-            is_subagent,
             retry_info: None,
             thinking_label: None,
             fast: false,
@@ -562,15 +542,14 @@ mod tests {
         };
         term.draw(|frame| bar.view(frame, frame.area(), &ctx))
             .unwrap();
-        let buf = term.backend().buffer();
-        buf.content.iter().map(|c| c.symbol()).collect::<String>()
-    }
-
-    #[test]
-    fn subagent_chat_renders_distinct_badge() {
-        assert!(render_status(true).contains(" [↳ task1]"));
-        let main = render_status(false);
-        assert!(main.contains(" [task1]"));
-        assert!(!main.contains('↳'));
+        let text: String = term
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(!text.contains('↳'), "no subagent badge: {text}");
+        assert!(!text.contains("[task1]"), "no chat badge: {text}");
     }
 }

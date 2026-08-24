@@ -7,7 +7,7 @@
 //! Detection follows neovim: first the environment, then terminfo caps,
 //! and as a last resort a DECRQSS probe of the live terminal. The probe is
 //! what saves us over SSH, where env vars are often stripped.
-//! `MAKI_TRUECOLOR=1` or `=0` overrides everything.
+//! `MAKIMA_TRUECOLOR=1` or `=0` overrides everything.
 
 use std::sync::OnceLock;
 
@@ -71,10 +71,10 @@ fn detect() -> bool {
 /// `Some` is a definite answer; `None` means the env does not say, so the
 /// caller moves on to terminfo and the live probe.
 fn truecolor_from_env(get: impl Fn(&str) -> Option<String>) -> Option<bool> {
-    match get("MAKI_TRUECOLOR").as_deref() {
+    match get("MAKIMA_TRUECOLOR").as_deref() {
         Some("1" | "true") => return Some(true),
         Some("0" | "false") => return Some(false),
-        Some(other) => tracing::warn!(value = other, "ignoring invalid MAKI_TRUECOLOR"),
+        Some(other) => tracing::warn!(value = other, "ignoring invalid MAKIMA_TRUECOLOR"),
         None => {}
     }
     let has =
@@ -247,12 +247,12 @@ mod tests {
         assert_eq!(downgrade(input), expected);
     }
 
-    #[test_case(&[("MAKI_TRUECOLOR", "1")], Some(true); "override_forces_truecolor")]
-    #[test_case(&[("MAKI_TRUECOLOR", "0"), ("COLORTERM", "truecolor")], Some(false); "override_forces_downgrade")]
-    #[test_case(&[("MAKI_TRUECOLOR", "true")], Some(true); "override_word_true")]
-    #[test_case(&[("MAKI_TRUECOLOR", "false"), ("COLORTERM", "truecolor")], Some(false); "override_word_false")]
-    #[test_case(&[("MAKI_TRUECOLOR", "off")], None; "invalid_override_ignored")]
-    #[test_case(&[("MAKI_TRUECOLOR", "off"), ("COLORTERM", "truecolor")], Some(true); "invalid_override_falls_through")]
+    #[test_case(&[("MAKIMA_TRUECOLOR", "1")], Some(true); "override_forces_truecolor")]
+    #[test_case(&[("MAKIMA_TRUECOLOR", "0"), ("COLORTERM", "truecolor")], Some(false); "override_forces_downgrade")]
+    #[test_case(&[("MAKIMA_TRUECOLOR", "true")], Some(true); "override_word_true")]
+    #[test_case(&[("MAKIMA_TRUECOLOR", "false"), ("COLORTERM", "truecolor")], Some(false); "override_word_false")]
+    #[test_case(&[("MAKIMA_TRUECOLOR", "off")], None; "invalid_override_ignored")]
+    #[test_case(&[("MAKIMA_TRUECOLOR", "off"), ("COLORTERM", "truecolor")], Some(true); "invalid_override_falls_through")]
     #[test_case(&[("COLORTERM", "truecolor")], Some(true); "colorterm_advertises")]
     #[test_case(&[("TERM", "xterm-direct")], Some(true); "term_direct")]
     #[test_case(&[("TERM", "xterm-kitty")], Some(true); "term_in_truecolor_list")]

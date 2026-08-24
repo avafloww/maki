@@ -4,6 +4,10 @@ set -e
 # Cloudflare Pages build script
 # Assembles the static landing page + Zola docs into a single output dir.
 
+PREFIX="${SITE_PREFIX:-}"                            # e.g. "/makima"; empty = root domain
+PAGES_URL="${SITE_BASE_URL:-https://makima.ln4.net}" # absolute origin for llms/meta
+REPO_SLUG="${SITE_REPO:-lun-4/makima}"               # fork's "owner/repo" for GitHub links
+
 ZOLA_VERSION="${ZOLA_VERSION:-0.22.1}"
 
 if ! command -v zola >/dev/null 2>&1; then
@@ -38,11 +42,11 @@ cp site.webmanifest "$OUT/"
 
 # 2. Build Zola docs
 cd docs
-zola build -o "../_build/docs"
+zola build --base-url "${PREFIX}/docs" -o "../_build/docs"
 cd ..
 
 # 3. Markdown mirrors + llms.txt / llms-full.txt for LLM consumption
-BASE_URL="https://maki.sh"
+BASE_URL="$PAGES_URL"
 
 body() {
   awk '/^\+\+\+$/{c++; next} c>=2' "$1"
@@ -135,3 +139,34 @@ with open(out, "w", encoding="utf-8") as f:
 EOF
 
 cp "$OUT/llms.txt" "$OUT/llms-full.txt" "$OUT/docs/"
+
+# 5. Post-build prefix rewrite (only when publishing to a subpath such as Pages)
+if [ -n "$PREFIX" ]; then
+  # Prefix root-relative docs + asset links in rendered HTML (markdown cross-links,
+  # landing nav, CSS selector, landing head).
+  find "$OUT" -name '*.html' -exec sed -i \
+    -e "s|=\"/docs/|=\"${PREFIX}/docs/|g" \
+    -e "s|=\"/favicon.ico\"|=\"${PREFIX}/favicon.ico\"|g" \
+    -e "s|=\"/favicon-16x16.png\"|=\"${PREFIX}/favicon-16x16.png\"|g" \
+    -e "s|=\"/favicon-32x32.png\"|=\"${PREFIX}/favicon-32x32.png\"|g" \
+    -e "s|=\"/apple-touch-icon.png\"|=\"${PREFIX}/apple-touch-icon.png\"|g" \
+    -e "s|=\"/site.webmanifest\"|=\"${PREFIX}/site.webmanifest\"|g" \
+    {} +
+
+  # search.json hrefs are JSON (colon+space, no equals), so use a JSON-aware rule.
+  sed -i "s|\"href\": \"/docs/|\"href\": \"${PREFIX}/docs/|g" "$OUT/docs/search.json"
+
+  # webmanifest icon srcs (JSON).
+  sed -i "s|\"src\":\"/|\"src\":\"${PREFIX}/|g" "$OUT/site.webmanifest"
+
+  # Rewrite origin in HTML and LLM mirrors (sources use makima.ln4.net directly;
+  # this normalizes any absolute /docs URLs for the git-build docs pages).
+  MIRRORS=$(find "$OUT" -type f \( -name '*.md' -o -name '*.txt' \))
+  find "$OUT" -name '*.html' -exec sed -i -e "s|https://makima.ln4.net|${PAGES_URL}|g" {} +
+  [ -n "$MIRRORS" ] && echo "$MIRRORS" | xargs sed -i -e "s|https://makima.ln4.net|${PAGES_URL}|g" \
+    -e "s|href=\"/docs/|href=\"${PREFIX}/docs/|g" \
+    -e "s|\](/docs/|](${PREFIX}/docs/|g"
+
+  # Pages needs this to prevent Jekyll from stripping files.
+  touch "$OUT/.nojekyll"
+fi

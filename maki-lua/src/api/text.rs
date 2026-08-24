@@ -1,5 +1,7 @@
 use maki_lua_macro::{lua_fn, lua_table};
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, Result as LuaResult, Value};
+
+use maki_agent::tools::{truncate_file as truncate_file_text, truncate_line as truncate_line_text};
 
 use super::util::pair::{Pair, pair};
 
@@ -19,6 +21,50 @@ fn html_to_markdown(_lua: &Lua, html: String) -> LuaResult<Pair<String>> {
     ))
 }
 
+/// Truncate one line while preserving a UTF-8 boundary and adding `[line truncated]`.
+///
+/// @param text string The line to truncate.
+/// @param max_bytes integer Maximum source bytes to retain.
+/// @return string The truncated line.
+#[lua_fn]
+fn truncate_line(_lua: &Lua, text: String, max_bytes: usize) -> LuaResult<String> {
+    Ok(truncate_line_text(&text, max_bytes))
+}
+
+/// Truncate file output by line and byte limits, adding `[file truncated]` when needed.
+///
+/// @param text string The file output to truncate.
+/// @param max_lines integer Maximum lines to retain.
+/// @param max_bytes integer Maximum bytes to retain.
+/// @param remaining_lines integer? Number of source lines remaining after the output.
+/// @return string The truncated file output.
+#[lua_fn]
+fn truncate_file(
+    _lua: &Lua,
+    text: String,
+    max_lines: usize,
+    max_bytes: usize,
+    remaining_lines: Value,
+) -> LuaResult<String> {
+    let remaining_lines = match remaining_lines {
+        Value::Integer(lines) if lines > 0 => Some(lines as usize),
+        Value::Integer(_) | Value::Nil => None,
+        value => {
+            return Err(mlua::Error::FromLuaConversionError {
+                from: value.type_name(),
+                to: "integer or nil".to_owned(),
+                message: None,
+            });
+        }
+    };
+    Ok(truncate_file_text(
+        &text,
+        max_lines,
+        max_bytes,
+        remaining_lines,
+    ))
+}
+
 lua_table! {
     /// Text transformation utilities.
     ///
@@ -29,5 +75,7 @@ lua_table! {
     /// ```
     "maki.text" => pub(crate) fn create_text_table(), DOCS [
         html_to_markdown,
+        truncate_line,
+        truncate_file,
     ]
 }

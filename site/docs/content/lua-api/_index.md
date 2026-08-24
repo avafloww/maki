@@ -18,7 +18,7 @@ The API tries to mirror Neovim as much as possible (`maki.fs`, `maki.uv`,
 so code can be copy-pasted between the two without too many modifications.
 
 Plugins run compiled to native code (Luau JIT). If you are debugging a
-plugin and want full backtraces, start maki with `--no-jit`: it runs your
+plugin and want full backtraces, start makima with `--no-jit`: it runs your
 Lua on the interpreter with complete debug info instead.
 
 A small plugin looks like this:
@@ -60,7 +60,7 @@ A gated call without its permission raises
 `permission denied: '<name>' not granted for this plugin`.
 
 Grants come from a `plugin.toml` next to the Lua file (for
-`~/.config/maki/init.lua` that is `~/.config/maki/plugin.toml`):
+`~/.config/makima/init.lua` that is `~/.config/makima/plugin.toml`):
 
 ```toml
 [permissions]
@@ -73,7 +73,7 @@ env = true
 
 The rules:
 
-- No `plugin.toml` at all: every permission is denied, and maki logs a
+- No `plugin.toml` at all: every permission is denied, and makima logs a
   warning at load time.
 - `plugin.toml` exists: permissions default to granted; set a key to
   `false` to revoke it. An empty file grants everything.
@@ -92,7 +92,7 @@ The rules:
 | [`maki.async.Semaphore`](#maki-async-Semaphore) | A counting semaphore for limiting how many tasks run at once. |
 | [`maki.async.Permit`](#maki-async-Permit) | One slot in a semaphore, obtained from `Semaphore:acquire()`. |
 | [`maki.base64`](#maki-base64) | Base64 encoding and decoding, modelled after `vim.base64`. |
-| [`maki.env`](#maki-env) | Paths to maki's own directories (config, state, logs, legacy). |
+| [`maki.env`](#maki-env) | Paths to makima's own directories (config, state, logs, legacy). |
 | [`maki.fn`](#maki-fn) | Process and environment helpers, modeled after Neovim's `vim.fn` job |
 | [`maki.fs`](#maki-fs) | File-system utilities, modelled after `vim.fs` and `vim.uv`. |
 | [`maki.image`](#maki-image) | Small building blocks for working with images: probe metadata, decode |
@@ -108,6 +108,7 @@ The rules:
 | [`maki.net`](#maki-net) | HTTP client for fetching web content. |
 | [`maki.session`](#maki-session) | Host session primitives. |
 | [`maki.text`](#maki-text) | Text transformation utilities. |
+| [`maki.time`](#maki-time) | Wall-clock timestamps and relative-age formatting. |
 | [`maki.timer`](#maki-timer) | Recurring callbacks on the runtime's timer pump. |
 | [`maki.treesitter`](#maki-treesitter) | Tree-sitter parsing and query API. |
 | [`maki.treesitter.language`](#maki-treesitter-language) | Language registry for tree-sitter grammars. |
@@ -188,7 +189,7 @@ maki.split("\nhello\nworld\n", "\n", { trimempty = true }) -- { "hello", "world"
 maki.version()
 ```
 
-Read the current maki version and, if the built-in update check found one, the newer version. Rust owns the update check; plugins only mirror it, so the version text and update notice belong to whoever draws them.
+Read the current makima version and, if the built-in update check found one, the newer version. Rust owns the update check; plugins only mirror it, so the version text and update notice belong to whoever draws them.
 
 **Returns:** (`table`) { current = string, latest = string|nil, update_available = boolean }
 
@@ -197,14 +198,14 @@ Read the current maki version and, if the built-in update check found one, the n
 ```lua
 local v = maki.version()
 if v.update_available then
-  print("run maki update to get v" .. v.latest)
+  print("run makima update to get v" .. v.latest)
 end
 ```
 
 
 ## maki.api {#maki-api}
 
-Plugin registration. This is where you tell maki about your tools,
+Plugin registration. This is where you tell makima about your tools,
 slash commands, and prompt contributions.
 
 Most plugins only need `register_tool` and maybe `register_prompt_hint`.
@@ -973,7 +974,7 @@ prompt for a subagent session.
   Optional fields:
 
   - `instructions` (`string|boolean?`) extra text appended to the prompt.
-    `true` loads instructions from the project `.maki/instructions` file.
+    `true` loads instructions from the project `.makima/instructions` file.
     `false` or nil omits them.
 
 **Returns:** (`string?`, `string?`) The assembled prompt string, or `(nil, err)` on failure.
@@ -1093,7 +1094,8 @@ and tool set.
   - `local_tools` (`table?`) map of `name -> spec` for Lua-backed tools. Each spec
     requires `description` (string), `input_schema` (table), and
     `handler` (function). The handler receives the input table and must return
-    `(string)` or `(nil, err)`.
+    `(string)` or `(nil, err)`. Set `capture_input` to surface a successful
+    call's input as `captured` in the turn result.
   - `name` (`string?`) display name for logs and UI.
   - `audience` (`string?`) tool audience for capability gating. Default: `"general_sub"`.
   - `mcp` (`boolean?`) give the session access to MCP tools. Their
@@ -1113,6 +1115,8 @@ and tool set.
     usage into the parent session's UI or event stream. The session still
     completes and `:prompt()` still returns its result (including a commit
     set via a `local_tools` handler). Use for hidden one-shot classification.
+  - `semaphore` (`maki.async.Semaphore?`) concurrency limit acquired by the
+    driver immediately before each turn and released when that turn ends.
 
 **Returns:** ([`Session?`](#maki-agent-Session), `string?`) Session handle, or `(nil, err)` on failure.
 
@@ -1138,16 +1142,13 @@ sess:close()
 maki.agent.report_task_result({value})
 ```
 
-Commit a structured-output result from the currently-running subagent
-driver. The task plugin's `structured_output` local tool validates the
-value in Lua, then routes it here so the background driver can surface it
-as `captured` on completion.
+Commit a result to the session whose local tool is currently executing.
 
 **Parameters:**
 
-- `{value}` (`table`) The validated result to commit.
+- `{value}` (`table`) The result to commit.
 
-**Returns:** (`boolean?`, `string?`) `true` when a session is active, else `(nil, err)`.
+**Returns:** (`boolean?`, `string?`) `true` while a session-local tool is active.
 
 
 ## maki.agent.Session {#maki-agent-Session}
@@ -1577,7 +1578,7 @@ maki.base64.decode("aGVsbG8=") -- "hello"
 
 ## maki.env {#maki-env}
 
-Paths to maki's own directories (config, state, logs, legacy).
+Paths to makima's own directories (config, state, logs, legacy).
 
 Use these to locate config files or persistent state without hard-coding paths.
 
@@ -1593,8 +1594,8 @@ local cfg = maki.env.config_dir()
 maki.env.state_dir()
 ```
 
-Return the directory where maki stores runtime state (sessions, auth tokens, etc.).
-Typically something like `~/.local/state/maki`.
+Return the directory where makima stores runtime state (sessions, auth tokens, etc.).
+Typically something like `~/.local/state/makima`.
 
 Requires the `env` [plugin permission](#plugin-permissions).
 
@@ -1614,8 +1615,8 @@ local dir = maki.env.state_dir()
 maki.env.config_dir()
 ```
 
-Return the directory where maki looks for user configuration files.
-Typically something like `~/.config/maki`.
+Return the directory where makima looks for user configuration files.
+Typically something like `~/.config/makima`.
 
 Requires the `env` [plugin permission](#plugin-permissions).
 
@@ -1636,7 +1637,7 @@ maki.env.logs_dir()
 ```
 
 Return the directory where maki writes its log files (`maki.log`).
-Typically something like `~/.local/logs/maki`.
+Typically something like `~/.local/logs/makima`.
 
 Requires the `env` [plugin permission](#plugin-permissions).
 
@@ -1656,7 +1657,7 @@ local dir = maki.env.logs_dir()
 maki.env.legacy_dir()
 ```
 
-Return the legacy config path (`~/.maki`), if it exists on disk.
+Return the legacy config path (`~/.makima`), if it exists on disk.
 Useful for migration logic. Returns nil when there is no legacy directory.
 
 Requires the `env` [plugin permission](#plugin-permissions).
@@ -2779,7 +2780,7 @@ maki.keymap.del("n", "<C-t>")
 Structured logging for plugins.
 
 Each call emits a tracing event tagged with the calling plugin's name.
-Messages show up in maki's log output, which you can view with `maki --log`.
+Messages show up in makima's log output, which you can view with `makima --log`.
 
 ```lua
 maki.log.info("ready")
@@ -3473,6 +3474,143 @@ Useful for cleaning up web content fetched with `maki.webfetch`.
 local md, err = maki.text.html_to_markdown("<h1>Hello</h1><p>world</p>")
 if err then return end
 print(md) -- "# Hello\n\nworld"
+```
+
+---
+
+### `maki.text.truncate_line()` {#maki-text-truncate_line}
+
+```lua
+maki.text.truncate_line({text}, {max_bytes})
+```
+
+Truncate one line while preserving a UTF-8 boundary and adding `[line truncated]`.
+
+**Parameters:**
+
+- `{text}` (`string`) The line to truncate.
+- `{max_bytes}` (`integer`) Maximum source bytes to retain.
+
+**Returns:** string The truncated line.
+
+---
+
+### `maki.text.truncate_file()` {#maki-text-truncate_file}
+
+```lua
+maki.text.truncate_file({text}, {max_lines}, {max_bytes}, {remaining_lines})
+```
+
+Truncate file output by line and byte limits, adding `[file truncated]` when needed.
+
+**Parameters:**
+
+- `{text}` (`string`) The file output to truncate.
+- `{max_lines}` (`integer`) Maximum lines to retain.
+- `{max_bytes}` (`integer`) Maximum bytes to retain.
+- `{remaining_lines}` (`integer?`) Number of source lines remaining after the output.
+
+**Returns:** string The truncated file output.
+
+
+## maki.time {#maki-time}
+
+Wall-clock timestamps and relative-age formatting.
+
+`now` returns `{secs, nanosecs}` since the Unix epoch, the same clock
+the host uses for session `updated_at` but with full nanosecond
+precision. Timestamps are opaque objects you hand to `ago` — not raw
+numbers to subtract — so callers get one consistent relative-age
+format instead of reimplementing epoch math per plugin.
+
+```lua
+local t0 = maki.time.now()
+-- work...
+print(maki.time.ago(t0))
+```
+
+---
+
+### `maki.time.now()` {#maki-time-now}
+
+```lua
+maki.time.now()
+```
+
+Return the current wall-clock time as a timestamp table.
+
+The table is `{ secs = integer, nanosecs = integer }` where `secs` is
+whole seconds since the Unix epoch (`1970-01-01T00:00:00Z`) and `nanosecs`
+is the sub-second part, `0 .. 999_999_999`. Split like this, both fields
+stay exact in a Lua number (each under 2^53), so the timestamp keeps full
+nanosecond precision — the same clock the host uses for session
+`updated_at`, just finer than its whole seconds.
+
+Treat the returned table as opaque; pass it to `maki.time.ago` rather than
+doing epoch math by hand. To wrap a stored whole-second value (like a
+session's `updated_at`) use `maki.time.at`.
+
+**Returns:** (`table`) `{secs = integer, nanosecs = integer}` timestamp.
+
+**Example:**
+
+```lua
+local t0 = maki.time.now()
+-- ...work...
+print(maki.time.ago(t0))
+```
+
+---
+
+### `maki.time.at()` {#maki-time-at}
+
+```lua
+maki.time.at({secs})
+```
+
+Wrap a whole-second Unix timestamp (e.g. a session's `updated_at`) into a
+timestamp object readable by `maki.time.ago`.
+
+**Parameters:**
+
+- `{secs}` (`integer`) Whole seconds since the Unix epoch.
+
+**Returns:** (`table`) `{secs = secs, nanosecs = 0}` timestamp.
+
+**Example:**
+
+```lua
+print(maki.time.ago(maki.time.at(session.updated_at)))
+```
+
+---
+
+### `maki.time.ago()` {#maki-time-ago}
+
+```lua
+maki.time.ago({instant}, {reference?})
+```
+
+Format {instant} as a relative age like `3h ago`, or `just now` for less
+than a minute. {instant} is a timestamp from `maki.time.now` (or
+`maki.time.at`). If {reference} is given, age is measured from it instead
+of the current time.
+
+A timestamp in the future renders as `just now`.
+
+**Parameters:**
+
+- `{instant}` (`table`) Timestamp from `maki.time.now`/`maki.time.at`.
+- `{reference?}` (`table?`) Timestamp to measure from; defaults to `maki.time.now`.
+
+**Returns:** (`string`) Relative age, e.g. `42min ago`.
+
+**Example:**
+
+```lua
+local t0 = maki.time.now()
+-- ...work...
+print(maki.time.ago(t0))
 ```
 
 
@@ -5735,7 +5873,7 @@ function M.replace(content, old_string, new_string, replace_all)
 
 local DEFAULT_MAX_OUTPUT_LINES = 2000
 local DEFAULT_MAX_OUTPUT_BYTES = 50 * 1024
-local DEFAULT_MAX_LINE_BYTES = 500
+local DEFAULT_MAX_LINE_BYTES = 1000
 
 local M = {}
 
@@ -5973,43 +6111,5 @@ function ToolView.restore(output, opts)
 -- "markdown"`); {opts.width} is the wrap width. Errors stay plain, as they do
 -- live.
 function ToolView.restore_markdown(output, is_error, opts)
-```
-
-### `require("maki.truncate")`
-
-```lua
-local function truncate(text, max_lines, max_bytes)
-  if #text <= max_bytes then
-    local n = 0
-    for _ in text:gmatch("\n") do
-      n = n + 1
-    end
-    if n + 1 <= max_lines then
-      return text
-    end
-  end
-  local out = {}
-  local bytes = 0
-  local lines = 0
-  for line in text:gmatch("([^\n]*)\n?") do
-    lines = lines + 1
-    if lines > max_lines then
-      break
-    end
-    local new_bytes = bytes + #line + 1
-    if new_bytes > max_bytes then
-      break
-    end
-    out[#out + 1] = line
-    bytes = new_bytes
-  end
-  local result = table.concat(out, "\n")
-  if #result < #text then
-    result = result .. "\n\n[truncated " .. (#text - #result) .. " bytes]"
-  end
-  return result
-end
-
-return truncate
 ```
 

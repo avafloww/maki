@@ -59,7 +59,7 @@ pub fn initialize_params() -> Value {
         "protocolVersion": LATEST_PROTOCOL_VERSION,
         "capabilities": {},
         "clientInfo": {
-            "name": "maki",
+            "name": "makima",
             "version": env!("CARGO_PKG_VERSION"),
         }
     })

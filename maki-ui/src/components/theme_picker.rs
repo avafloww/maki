@@ -1,7 +1,9 @@
 use crate::components::Overlay;
 use crate::components::list_picker::{ListPicker, PickerAction};
 use crate::repaint::Cadence;
-use crate::theme;
+use crate::theme::{ThemesProvider, apply_theme};
+
+use std::sync::Arc;
 
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
@@ -17,20 +19,22 @@ pub enum ThemePickerAction {
 
 pub struct ThemePicker {
     picker: ListPicker<String>,
+    provider: Arc<dyn ThemesProvider>,
     original_theme_name: Option<String>,
 }
 
 impl ThemePicker {
-    pub fn new() -> Self {
+    pub fn new(provider: Arc<dyn ThemesProvider>) -> Self {
         Self {
             picker: ListPicker::new().with_max_visible(MAX_VISIBLE),
+            provider,
             original_theme_name: None,
         }
     }
 
     pub fn open(&mut self) {
-        let current_name = theme::current_theme_name();
-        let entries = theme::all_theme_names();
+        let current_name = self.provider.current_theme_name();
+        let entries = self.provider.names();
         let current_idx = entries
             .iter()
             .position(|name| *name == current_name)
@@ -56,7 +60,7 @@ impl ThemePicker {
                 ThemePickerAction::Consumed
             }
             PickerAction::Select(name) => {
-                theme::persist_theme(&name);
+                self.provider.persist(&name);
                 self.original_theme_name = None;
                 ThemePickerAction::Closed
             }
@@ -82,18 +86,14 @@ impl ThemePicker {
     }
 
     fn apply_preview(&self) {
-        if let Some(name) = self.picker.selected_item()
-            && let Ok(t) = theme::load_by_name(name)
-        {
-            theme::set(t);
+        if let Some(name) = self.picker.selected_item() {
+            apply_theme(self.provider.as_ref(), name);
         }
     }
 
     fn restore_original(&self) {
-        if let Some(ref name) = self.original_theme_name
-            && let Ok(t) = theme::load_by_name(name)
-        {
-            theme::set(t);
+        if let Some(ref name) = self.original_theme_name {
+            apply_theme(self.provider.as_ref(), name);
         }
     }
 }
@@ -117,12 +117,14 @@ mod tests {
     use super::*;
     use crate::components::key;
     use crate::components::keybindings::key as kb;
+    use crate::theme::{InMemoryThemesProvider, theme_test_guard};
     use crossterm::event::KeyCode;
     use test_case::test_case;
 
     #[test]
     fn enter_closes() {
-        let mut p = ThemePicker::new();
+        let _guard = theme_test_guard();
+        let mut p = ThemePicker::new(Arc::new(InMemoryThemesProvider::bundled()));
         p.open();
         let action = p.handle_key(key(KeyCode::Enter));
         assert!(matches!(action, ThemePickerAction::Closed));
@@ -132,7 +134,8 @@ mod tests {
     #[test_case(key(KeyCode::Esc) ; "escape_restores_and_closes")]
     #[test_case(kb::QUIT.to_key_event() ; "ctrl_c_restores_and_closes")]
     fn cancel_restores(cancel_key: crossterm::event::KeyEvent) {
-        let mut p = ThemePicker::new();
+        let _guard = theme_test_guard();
+        let mut p = ThemePicker::new(Arc::new(InMemoryThemesProvider::bundled()));
         p.open();
         p.handle_key(key(KeyCode::Down));
         let action = p.handle_key(cancel_key);
