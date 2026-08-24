@@ -10,10 +10,12 @@ use crate::repaint::expect::{OWED, QUIET};
 use crate::selection::{SelectableZone, SelectionState, SelectionZone};
 use arc_swap::ArcSwap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+use maki_agent::command::{CommandScope, CustomCommand};
 use maki_agent::permissions::PermissionManager;
 use maki_agent::{
-    DoneReason, ImageMediaType, McpConfigErrors, McpServerInfo, McpServerStatus, McpSnapshot,
-    McpSnapshotReader, ModeDefSpec, ToolDoneEvent, ToolOutput, ToolStartEvent, TurnCompleteEvent,
+    DoneReason, ImageMediaType, McpConfigErrors, McpPromptInfo, McpServerInfo, McpServerStatus,
+    McpSnapshot, McpSnapshotReader, ModeDefSpec, ToolDoneEvent, ToolOutput, ToolStartEvent,
+    TurnCompleteEvent,
 };
 use maki_config::{PermissionsConfig, UiConfig};
 use maki_lua::test_support::{HintWriterHandle, hint_writer_pair};
@@ -3213,6 +3215,126 @@ fn run_cmdline_splits_args_off_the_name() {
     let actions = app.run_cmdline("/btw what is rust?", 0).unwrap();
 
     assert!(matches!(&actions[..], [Action::Btw(q)] if q == "what is rust?"));
+}
+
+#[test]
+fn direct_tasks_command_opens_picker() {
+    let mut app = test_app();
+
+    let actions = app.execute_command(cmd("/tasks"), 0);
+
+    assert!(actions.is_empty());
+    assert!(app.task_picker.is_open());
+}
+
+#[test]
+fn direct_login_command_opens_picker() {
+    let mut app = test_app();
+
+    let actions = app.execute_command(cmd("/login"), 0);
+
+    assert!(actions.is_empty());
+    assert!(app.login_picker.is_open());
+}
+
+#[test]
+fn direct_exit_command_requests_successful_exit() {
+    let mut app = test_app();
+
+    let actions = app.execute_command(cmd("/exit"), 0);
+
+    assert_eq!(app.exit_request, ExitRequest::Success);
+    assert!(matches!(actions.as_slice(), [Action::ManualExit]));
+}
+
+#[test]
+fn direct_custom_command_renders_args_and_starts_run() {
+    let mut app = test_app();
+    app.command_palette = CommandPalette::new(
+        Arc::from([CustomCommand {
+            name: "review".into(),
+            description: "Code review".into(),
+            content: "Review $ARGUMENTS".into(),
+            scope: CommandScope::Project,
+            accepts_args: true,
+        }]),
+        McpSnapshotReader::empty(),
+        LuaCommandReader::empty(),
+        ModelArgSource::new(Arc::clone(&app.available_models)),
+        ThemeArgSource::new(Arc::clone(&app.theme_provider)),
+        LuaArgumentSource::new(app.lua_event_handle.clone()),
+    );
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/project:review".into(),
+            args: "src/lib.rs".into(),
+        },
+        0,
+    );
+
+    assert!(matches!(
+        actions.as_slice(),
+        [Action::SendMessage(input)] if input.message == "Review src/lib.rs"
+    ));
+}
+
+#[test]
+fn run_cmdline_dispatches_custom_command() {
+    let mut app = test_app();
+    app.command_palette = CommandPalette::new(
+        Arc::from([CustomCommand {
+            name: "review".into(),
+            description: "Code review".into(),
+            content: "Review $ARGUMENTS".into(),
+            scope: CommandScope::Project,
+            accepts_args: true,
+        }]),
+        McpSnapshotReader::empty(),
+        LuaCommandReader::empty(),
+        ModelArgSource::new(Arc::clone(&app.available_models)),
+        ThemeArgSource::new(Arc::clone(&app.theme_provider)),
+        LuaArgumentSource::new(app.lua_event_handle.clone()),
+    );
+
+    let actions = app.run_cmdline("/project:review src/lib.rs", 0).unwrap();
+
+    assert!(matches!(
+        actions.as_slice(),
+        [Action::SendMessage(input)] if input.message == "Review src/lib.rs"
+    ));
+}
+
+#[test]
+fn run_cmdline_dispatches_mcp_prompt() {
+    let mut app = test_app();
+    app.command_palette = CommandPalette::new(
+        Arc::from([]),
+        McpSnapshotReader::from_snapshot(McpSnapshot {
+            prompts: vec![McpPromptInfo {
+                display_name: "review".into(),
+                qualified_name: "server/review".into(),
+                description: "Code review".into(),
+                arguments: vec![],
+            }],
+            ..Default::default()
+        }),
+        LuaCommandReader::empty(),
+        ModelArgSource::new(Arc::clone(&app.available_models)),
+        ThemeArgSource::new(Arc::clone(&app.theme_provider)),
+        LuaArgumentSource::new(app.lua_event_handle.clone()),
+    );
+
+    let actions = app.run_cmdline("/review src/lib.rs", 0).unwrap();
+
+    let [Action::SendMessage(input)] = actions.as_slice() else {
+        panic!("expected one SendMessage action");
+    };
+    assert_eq!(input.message, "/review src/lib.rs");
+    assert_eq!(
+        input.prompt.as_ref().unwrap().qualified_name,
+        "server/review"
+    );
 }
 
 /// Only the typed path clears the input, so a keybind or autocmd reaching for

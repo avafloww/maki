@@ -48,6 +48,7 @@ members = [
   "maki-acp",
   "maki-agent",
   "maki-config",
+  "maki-commands",
   "maki-docgen",
   "maki-highlight",
   "maki-interpreter",
@@ -74,6 +75,7 @@ rust-version = "1.88"
 maki-agent = { path = "maki-agent" }
 maki-acp = { path = "maki-acp" }
 maki-config = { path = "maki-config" }
+maki-commands = { path = "maki-commands" }
 maki-interpreter = { path = "maki-interpreter" }
 maki-providers = { path = "maki-providers" }
 maki-storage = { path = "maki-storage" }

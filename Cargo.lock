@@ -2759,6 +2759,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "maki-commands"
+version = "0.4.11-luna"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "maki-config"
 version = "0.4.11-luna"
 dependencies = [
