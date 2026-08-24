@@ -7,7 +7,7 @@ group = "Reference"
 
 # Tools
 
-Maki ships with 26 built-in tools in this reference (24 on by default, 2 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
+Makima ships with 26 built-in tools in this reference (24 on by default, 2 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
 
 ## File Operations
 

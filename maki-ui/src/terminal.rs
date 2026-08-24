@@ -17,7 +17,7 @@ use crossterm::event::{DisableFocusChange, EnableFocusChange};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use maki_config::NotificationMethod;
 
-const FALLBACK_NOTIFICATION_MESSAGE: &str = "Maki needs attention";
+const FALLBACK_NOTIFICATION_MESSAGE: &str = "Makima needs attention";
 const BELL_SEQUENCE: &str = "\u{7}";
 /// Raw mode is already on when the tmux query runs, so a wedged tmux server
 /// must not be able to hang startup with Ctrl-C disabled.

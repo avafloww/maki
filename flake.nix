@@ -1,5 +1,5 @@
 {
-  description = "Maki - AI coding agent";
+  description = "Makima - AI coding agent";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

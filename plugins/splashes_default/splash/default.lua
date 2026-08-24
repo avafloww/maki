@@ -15,8 +15,8 @@ local BHASKARA_B = 4.0 / (PI * PI)
 
 local FSYM = { [1] = ".", [2] = ":", [3] = "+", [4] = "*" }
 
-local LOGO = "luna-maki"
-local TAGLINE = "luna's fucked up efficient coder"
+local LOGO = "makima"
+local TAGLINE = "less context, more control"
 local LOGO_DELAY = 0.2
 local LOGO_RAMP = 0.8
 
@@ -289,7 +289,7 @@ local function render_splash(w, h, t, fade)
   local version = maki.version()
   local version_text = "v" .. version.current
   if version.update_available then
-    version_text = version_text .. " run maki update to get v" .. (version.latest or "")
+    version_text = version_text .. " run makima update to get v" .. (version.latest or "")
   end
   place_text(rows, 1, w - charlen(version_text), version_text, text_color(FG, 0.4 * fade, false))
 

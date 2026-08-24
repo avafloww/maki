@@ -3,9 +3,9 @@ name: lunamaki-sync-with-upstream
 description: Sync the lunamaki fork with upstream maki additively, never dropping fork features
 ---
 
-# Syncing lunamaki with upstream maki
+# Syncing makima with upstream maki
 
-This is lunamaki, a fork of maki (the Rust AI coding agent). Every so often you
+This is makima, a fork of maki (the Rust AI coding agent). Every so often you
 must pull upstream changes in without breaking fork features. The golden rule:
 **additive only. Never remove a lunamaki feature; bring in every upstream
 improvement.**

@@ -354,7 +354,7 @@ pub fn load_config(cwd: &Path) -> (McpConfig, McpConfigErrors) {
         let global_path = global_dir.join(MCP_CONFIG_FILE);
         merge_config(&mut merged, &mut errors, &global_path);
     }
-    let project_path = cwd.join(".maki").join(MCP_CONFIG_FILE);
+    let project_path = cwd.join(".makima").join(MCP_CONFIG_FILE);
     merge_config(&mut merged, &mut errors, &project_path);
     (merged, errors)
 }
@@ -619,7 +619,7 @@ timeout = 5000
 
         let project_dir = dir.path().join("project");
         fs::create_dir_all(&project_dir).unwrap();
-        let project_maki_dir = project_dir.join(".maki");
+        let project_maki_dir = project_dir.join(".makima");
         fs::create_dir_all(&project_maki_dir).unwrap();
         fs::write(
             project_maki_dir.join("mcp.toml"),

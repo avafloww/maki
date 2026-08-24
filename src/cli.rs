@@ -24,7 +24,7 @@ pub enum InputFormat {
 }
 
 #[derive(Parser)]
-#[command(name = "maki", version, about = "AI coding agent for the terminal")]
+#[command(name = "makima", version, about = "AI coding agent for the terminal")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -61,7 +61,7 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = InputFormat::Text)]
     pub input_format: InputFormat,
 
-    /// Skip loading custom commands from .maki/commands, .claude/commands, etc.
+    /// Skip loading custom commands from .makima/commands, .claude/commands, etc.
     #[arg(long)]
     pub no_commands: bool,
 
@@ -264,7 +264,7 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum MigrateAction {
-    /// Migrate files from ~/.maki/ to XDG directories
+    /// Migrate files from ~/.makima/ to XDG directories
     Xdg,
 }
 

@@ -6,8 +6,8 @@ use agent_client_protocol_schema::{
 };
 use serde_json::Value;
 
-const FORM_TITLE: &str = "Maki question";
-const FORM_MESSAGE: &str = "Maki needs your input";
+const FORM_TITLE: &str = "Makima question";
+const FORM_MESSAGE: &str = "Makima needs your input";
 
 fn labels(options: Option<&Vec<Value>>) -> Vec<String> {
     options

@@ -213,7 +213,7 @@ fn move_logs(legacy: &Path, logs_dir: &Path) -> Result<()> {
         .filter(|e| {
             let name = e.file_name();
             let name = name.to_string_lossy();
-            name.starts_with("maki.") && name.ends_with(".log")
+            name.starts_with("makima.") && name.ends_with(".log")
         })
         .collect();
 
@@ -258,7 +258,7 @@ pub fn xdg() -> Result<()> {
         fs::create_dir_all(dir).with_context(|| format!("create {}", tilde(dir)))?;
     }
 
-    println!("Moving files from ~/.maki/ ...\n");
+    println!("Moving files from ~/.makima/ ...\n");
 
     move_auth(&legacy.join("auth"), &xdg.state.join("auth"))?;
 
@@ -297,29 +297,29 @@ pub fn xdg() -> Result<()> {
 
     move_logs(&legacy, &xdg.logs)?;
 
-    let lock_file = legacy.join("maki.log.lock");
+    let lock_file = legacy.join("makima.log.lock");
     if lock_file.exists() {
         fs::remove_file(&lock_file).ok();
     }
 
     let remaining = list_remaining(&legacy);
     let has_leftovers = !remaining.is_empty();
-    let backup = legacy.with_file_name(".maki.bak");
+    let backup = legacy.with_file_name(".makima.bak");
     if has_leftovers {
-        fs::create_dir_all(&backup).context("create ~/.maki.bak/")?;
+        fs::create_dir_all(&backup).context("create ~/.makima.bak/")?;
         for name in &remaining {
             let src = legacy.join(name);
             let dst = backup.join(name);
             if dst.exists() {
-                println!("  {name} (skipped, already in ~/.maki.bak/)");
+                println!("  {name} (skipped, already in ~/.makima.bak/)");
             } else if let Err(e) = fs::rename(&src, &dst) {
-                eprintln!("  warning: could not move {name} to ~/.maki.bak/: {e}");
+                eprintln!("  warning: could not move {name} to ~/.makima.bak/: {e}");
             }
         }
     }
 
     if legacy.is_dir() {
-        fs::remove_dir_all(&legacy).context("remove ~/.maki/")?;
+        fs::remove_dir_all(&legacy).context("remove ~/.makima/")?;
     }
 
     println!(
@@ -329,8 +329,8 @@ pub fn xdg() -> Result<()> {
          \x20 State    {}\n\
          \x20          sessions, auth, plans, memories, input history, preferences\n\n\
          \x20 Logs     {}\n\n\
-         Per-project settings (.maki/ in your repos) are not affected.\n\n\
-         Removed ~/.maki/.",
+         Per-project settings (.makima/ in your repos) are not affected.\n\n\
+         Removed ~/.makima/.",
         tilde(&xdg.config),
         tilde(&xdg.state),
         tilde(&xdg.logs),

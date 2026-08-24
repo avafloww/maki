@@ -3,35 +3,26 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>maki</title>
-  <meta name="description" content="An efficient AI coding agent. Native Rust TUI. Immediate startup, 60 FPS, low memory. Indexes files instead of reading them, chains tools in a sandbox interpreter. Anthropic, OpenAI, Google, Z.AI, OpenRouter, Synthetic, or any OpenAI / Anthropic compatible API.">
-  <meta name="theme-color" content="#f0ede2">
+  <title>makima - the tuned fork</title>
+  <meta name="description" content="A tuned fork of maki: an AI coding agent for the terminal. Less context, more control. Native Rust TUI, thinking that saves, async subagents you can talk to, plan mode. Anthropic, OpenAI, Google, Z.AI, OpenRouter, or any OpenAI / Anthropic compatible API.">
+  <meta name="theme-color" content="#120c0c">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://maki.sh/">
-  <meta property="og:title" content="maki - the efficient coder">
-  <meta property="og:description" content="An efficient AI coding agent. Native Rust TUI with novel context token reduction techniques: 2x cheaper and 2x faster in benchmarks.">
-  <meta property="og:image" content="https://maki.sh/android-chrome-512x512.png">
-  <meta property="og:site_name" content="maki">
+  <meta property="og:url" content="https://makima.ln4.net/">
+  <meta property="og:title" content="makima - the tuned fork">
+  <meta property="og:description" content="A tuned fork of maki: an AI coding agent for the terminal. Less context, more control.">
+  <meta property="og:image" content="https://makima.ln4.net/android-chrome-512x512.png">
+  <meta property="og:site_name" content="makima">
   <meta name="twitter:card" content="summary">
-  <meta name="twitter:title" content="maki - the efficient coder">
-  <meta name="twitter:description" content="An efficient AI coding agent. Native Rust TUI with novel context token reduction techniques: 2x cheaper and 2x faster in benchmarks.">
-  <meta name="twitter:image" content="https://maki.sh/android-chrome-512x512.png">
+  <meta name="twitter:title" content="makima - the tuned fork">
+  <meta name="twitter:description" content="A tuned fork of maki: an AI coding agent for the terminal. Less context, more control.">
+  <meta name="twitter:image" content="https://makima.ln4.net/android-chrome-512x512.png">
   <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
   <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="manifest" href="/site.webmanifest">
   <link rel="dns-prefetch" href="https://api.github.com">
-  <link rel="preload" href="demo.cast" as="fetch" crossorigin fetchpriority="high">
-  <link rel="preload" href="asciinema-player.min.js" as="script" fetchpriority="high">
-  <link rel="preload" href="asciinema-player.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Nunito:wght@400;700;800&display=swap" media="print" onload="this.media='all'">
-  <noscript>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Nunito:wght@400;700;800&display=swap">
-    <link rel="stylesheet" href="asciinema-player.css">
-  </noscript>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&display=swap" media="print" onload="this.media='all'">
   <style>
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     html {
@@ -40,27 +31,27 @@
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
     }
-    code, pre { font-family: 'JetBrains Mono', monospace; }
+    code, pre, .mono { font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace; }
 
     :root {
-      --lavender: oklch(85% 0.06 280);
-      --periwinkle: oklch(78% 0.08 275);
-      --soft-pink: oklch(82% 0.06 350);
-      --salmon: oklch(75% 0.12 40);
-      --cream: oklch(96% 0.02 90);
-      --deep-navy: oklch(25% 0.04 270);
-      --navy-light: oklch(35% 0.04 270);
-      --text-secondary: oklch(50% 0.03 270);
-      --muted: oklch(65% 0.03 270);
-      --surface-glow: oklch(90% 0.05 280);
-      --sky-start: oklch(92% 0.04 275);
-      --sky-end: oklch(88% 0.06 280);
+      --bg: #120c0c;
+      --surface: #0e0909;
+      --surface-2: #1f1414;
+      --border: #241818;
+      --border-2: #3a2323;
+      --ink: #e9dede;
+      --ink-dim: #c9b8b8;
+      --muted: #7a5c5c;
+      --accent: #ff4545;
+      --rose: #ff8080;
+      --amber: #e8b06a;
+      --peach: #ffb08a;
     }
 
     body {
-      font-family: 'Nunito', sans-serif;
-      color: var(--deep-navy);
-      background: var(--cream);
+      font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
       line-height: 1.6;
       overflow-x: hidden;
     }
@@ -68,50 +59,49 @@
     /* ── NAV ── */
     nav {
       position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
+      top: 0; left: 0; right: 0;
       z-index: 100;
       padding: 0.35rem 1rem;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      background: oklch(96% 0.02 90 / 0.85);
+      background: var(--bg / 0.85);
       backdrop-filter: blur(16px);
       -webkit-backdrop-filter: blur(16px);
-      border-bottom: 1px solid oklch(85% 0.04 280 / 0.3);
+      border-bottom: 1px solid var(--border);
       transition: box-shadow 0.3s ease;
     }
-    nav.scrolled { box-shadow: 0 4px 30px oklch(70% 0.06 280 / 0.1); }
+    nav.scrolled { box-shadow: 0 4px 30px rgba(0,0,0,0.4); }
     .nav-logo {
+      font-family: 'JetBrains Mono', monospace;
       font-weight: 800;
-      font-size: 1.4rem;
-      color: var(--deep-navy);
+      font-size: 1.3rem;
+      color: var(--ink);
       text-decoration: none;
       letter-spacing: -0.02em;
+      transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
     }
+    .nav-logo:hover { transform: scale(1.05); }
     .nav-right { display: flex; gap: 1.5rem; align-items: center; }
     .nav-right a {
       font-size: 0.92rem;
       font-weight: 700;
-      color: var(--text-secondary);
+      color: var(--ink-dim);
       text-decoration: none;
       transition: color 0.2s;
     }
-    .nav-right a:hover { color: var(--deep-navy); }
+    .nav-right a:hover { color: var(--ink); }
     .nav-cta {
       display: inline-flex;
       align-items: center;
       gap: 0.4rem;
-      background: var(--deep-navy) !important;
-      color: var(--cream) !important;
+      background: var(--accent) !important;
+      color: #120c0c !important;
       padding: 0.45rem 1.1rem;
-      border-radius: 8px;
+      border-radius: 4px;
       transition: opacity 0.2s !important;
     }
     .nav-cta:hover { opacity: 0.85; }
-
-    /* ── STAR BADGE ── */
     .star-badge {
       display: none;
       align-items: center;
@@ -119,28 +109,20 @@
       font-size: 0.78rem;
       font-weight: 700;
       font-family: 'JetBrains Mono', monospace;
-      letter-spacing: 0.01em;
       opacity: 0;
       transform: scale(0.8) translateY(2px);
       transition: opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1), transform 0.5s cubic-bezier(0.16, 1, 0.3, 1);
       pointer-events: none;
     }
-    .star-badge.loaded {
-      display: inline-flex;
-      opacity: 1;
-      transform: scale(1) translateY(0);
-    }
-    .star-badge svg {
-      flex-shrink: 0;
-    }
+    .star-badge.loaded { display: inline-flex; opacity: 1; transform: scale(1) translateY(0); }
     .nav-cta .star-badge.loaded,
     .btn-primary .star-badge.loaded {
       margin-left: 0.15rem;
       padding-left: 0.5rem;
-      border-left: 1px solid oklch(80% 0.02 90 / 0.25);
+      border-left: 1px solid rgba(18,12,12,0.25);
     }
     .nav-cta .star-badge svg,
-    .btn-primary .star-badge svg { fill: oklch(80% 0.10 85); }
+    .btn-primary .star-badge svg { fill: #120c0c; }
 
     /* ── HERO ── */
     .hero {
@@ -150,147 +132,46 @@
       justify-content: center;
       padding: 6rem clamp(2rem, 4vw, 4rem) 3rem;
       position: relative;
-      background: linear-gradient(180deg, var(--sky-start) 0%, var(--sky-end) 40%, var(--lavender) 70%, var(--soft-pink) 100%);
       overflow: hidden;
+    }
+    .hero::before {
+      content: '';
+      position: absolute;
+      top: -30%; right: -20%;
+      width: 60vw; height: 60vw;
+      background: radial-gradient(circle, #331d1d 0%, transparent 70%);
+      pointer-events: none;
     }
     .hero-grid {
       display: grid;
-      grid-template-columns: 30% 1fr;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       align-items: center;
-      gap: 2.5rem;
+      gap: 3rem;
       width: 100%;
       max-width: 1280px;
       position: relative;
       z-index: 2;
     }
-    .hero-intro {
-      position: relative;
-    }
-
-    .hero-clouds {
-      position: absolute;
-      inset: 0;
-      pointer-events: none;
-    }
-
-    .cloud-svg {
-      position: absolute;
-      pointer-events: none;
-    }
-
-    .cloud-bank {
-      position: absolute;
-      pointer-events: none;
-      will-change: transform;
-    }
-    .cloud-bank-1 { bottom: -2%; left: -8%; animation: drift-slow 18s ease-in-out infinite; }
-    .cloud-bank-2 { bottom: 6%; right: -6%; animation: drift-slow 14s ease-in-out infinite reverse; }
-    .cloud-bank-5 { bottom: 18%; left: 30%; animation: drift-slow 16s ease-in-out infinite; transform: scale(0.45); opacity: 0.5; }
-    .cloud-bank-7 { bottom: -4%; left: 20%; animation: drift-slow 21s ease-in-out infinite; transform: scale(0.9); }
-    .cloud-bank-8 { bottom: -6%; right: 15%; animation: drift-slow 18s ease-in-out infinite reverse; transform: scale(0.75); opacity: 0.85; }
-
-    .cloud-floor {
-      position: absolute;
-      bottom: -30px;
-      left: -5%;
-      right: -5%;
-      height: 120px;
-      background: linear-gradient(180deg, transparent 0%, oklch(95% 0.02 280 / 0.4) 40%, oklch(96% 0.02 90 / 0.8) 100%);
-    }
-
-    @keyframes drift-slow {
-      0%, 100% { transform: translateX(0); }
-      50% { transform: translateX(30px); }
-    }
-    @keyframes drift-med {
-      0%, 100% { transform: translateX(0) translateY(0); }
-      33% { transform: translateX(20px) translateY(-5px); }
-      66% { transform: translateX(-10px) translateY(3px); }
-    }
-
-    .stars { position: absolute; inset: 0; pointer-events: none; }
-    .star {
-      position: absolute;
-      background: oklch(98% 0.02 90);
-      clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
-      animation: twinkle 3s ease-in-out infinite;
-    }
-    .star-diamond {
-      position: absolute;
-      background: oklch(98% 0.03 85);
-      clip-path: polygon(50% 0%, 62% 38%, 100% 50%, 62% 62%, 50% 100%, 38% 62%, 0% 50%, 38% 38%);
-      animation: twinkle-bright 4s ease-in-out infinite;
-    }
-    .star:nth-child(1) { top: 15%; left: 20%; width: 8px; height: 8px; }
-    .star:nth-child(2) { top: 25%; right: 25%; width: 6px; height: 6px; animation-delay: 1s; }
-    .star:nth-child(3) { top: 10%; right: 35%; width: 5px; height: 5px; animation-delay: 0.5s; }
-    .star:nth-child(4) { top: 30%; left: 35%; width: 4px; height: 4px; animation-delay: 2s; }
-    .star:nth-child(5) { top: 18%; left: 55%; width: 7px; height: 7px; animation-delay: 1.5s; }
-    .star:nth-child(6) { top: 8%; right: 15%; width: 5px; height: 5px; animation-delay: 0.8s; }
-    .star:nth-child(7) { top: 6%; left: 40%; width: 4px; height: 4px; animation-delay: 2.3s; }
-    .star:nth-child(8) { top: 22%; left: 70%; width: 5px; height: 5px; animation-delay: 0.3s; }
-    .star:nth-child(9) { top: 12%; left: 82%; width: 3px; height: 3px; animation-delay: 1.8s; }
-    .star:nth-child(10) { top: 35%; right: 40%; width: 4px; height: 4px; animation-delay: 2.6s; }
-    .star-diamond:nth-child(11) { top: 12%; left: 30%; width: 14px; height: 14px; animation-delay: 0.7s; }
-    .star-diamond:nth-child(12) { top: 20%; right: 18%; width: 11px; height: 11px; animation-delay: 1.4s; }
-    .star-diamond:nth-child(13) { top: 7%; left: 60%; width: 10px; height: 10px; animation-delay: 2.1s; }
-    .star-diamond:nth-child(14) { top: 32%; left: 48%; width: 8px; height: 8px; animation-delay: 0.2s; }
-    .star-diamond:nth-child(15) { top: 16%; right: 38%; width: 9px; height: 9px; animation-delay: 1.9s; }
-
-    @keyframes twinkle {
-      0%, 100% { opacity: 0.3; transform: scale(1); }
-      50% { opacity: 1; transform: scale(1.3); }
-    }
-    @keyframes twinkle-bright {
-      0%, 100% { opacity: 0.15; transform: scale(0.8) rotate(0deg); }
-      50% { opacity: 0.9; transform: scale(1.2) rotate(15deg); }
-    }
-
-    .moon-group {
-      position: absolute;
-      top: 10%;
-      right: 10%;
-      pointer-events: none;
-    }
-    .moon {
-      position: relative;
-      width: 42px;
-      height: 42px;
-      border-radius: 50%;
-      background: oklch(95% 0.03 85);
-      box-shadow:
-        0 0 20px oklch(92% 0.04 85 / 0.5),
-        0 0 60px oklch(92% 0.04 85 / 0.2),
-        0 0 100px oklch(92% 0.04 85 / 0.1);
-    }
-    .moon::after {
-      content: '';
-      position: absolute;
-      width: 34px;
-      height: 34px;
-      border-radius: 50%;
-      background: linear-gradient(135deg, var(--sky-start), var(--sky-end));
-      top: -4px;
-      left: 7px;
-    }
-
     .hero h1 {
+      font-family: 'JetBrains Mono', monospace;
       font-weight: 800;
       font-size: clamp(2.5rem, 5vw, 3.5rem);
       letter-spacing: -0.03em;
       line-height: 1.05;
       margin-bottom: 0.3rem;
+      color: var(--ink);
     }
     .hero-tagline {
-      font-size: clamp(1.05rem, 2.2vw, 1.3rem);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: clamp(1rem, 2.2vw, 1.2rem);
       font-weight: 700;
-      color: var(--navy-light);
+      color: var(--rose);
       margin-bottom: 1.25rem;
     }
     .hero-sub {
       font-size: 1rem;
-      color: var(--navy-light);
-      max-width: 42ch;
+      color: var(--ink-dim);
+      max-width: 46ch;
       margin-bottom: 1.5rem;
     }
     .hero-actions {
@@ -299,79 +180,93 @@
       align-items: center;
       flex-wrap: wrap;
     }
-    .hero-preview {
-      position: relative;
-      z-index: 2;
-      align-self: center;
-      min-width: 0;
-    }
-
-    /* ── DIVIDER ── */
-    .divider {
-      height: 1px;
-      background: linear-gradient(90deg, transparent, oklch(80% 0.06 280 / 0.4), transparent);
-      margin-bottom: clamp(3rem, 6vw, 5rem);
-    }
-    .divider.visible { transform: scaleX(1); }
     .btn-primary {
       display: inline-flex;
       align-items: center;
       gap: 0.5rem;
-      padding: 0.75rem 1.75rem;
-      background: var(--deep-navy);
-      color: var(--cream);
-      font-family: 'Nunito', sans-serif;
+      padding: 0.7rem 1.6rem;
+      background: var(--accent);
+      color: #120c0c;
       font-weight: 700;
       font-size: 1rem;
       border: none;
-      border-radius: 10px;
+      border-radius: 4px;
       cursor: pointer;
       text-decoration: none;
-      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      transition: transform 0.2s ease, opacity 0.2s ease;
     }
-    .btn-primary:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 8px 24px oklch(25% 0.04 270 / 0.3);
-    }
+    .btn-primary:hover { opacity: 0.88; }
+    .btn-primary:active { transform: translateY(0) scale(0.97); transition-duration: 0.08s; }
     .btn-ghost {
-      padding: 0.75rem 1.75rem;
+      padding: 0.7rem 1.6rem;
       background: none;
-      color: var(--deep-navy);
-      font-family: 'Nunito', sans-serif;
+      color: var(--ink);
       font-weight: 700;
       font-size: 1rem;
-      border: 2px solid oklch(30% 0.04 270 / 0.25);
-      border-radius: 10px;
+      border: 1px solid var(--border-2);
+      border-radius: 4px;
       cursor: pointer;
       text-decoration: none;
-      transition: transform 0.2s ease, border-color 0.2s;
+      transition: border-color 0.2s, transform 0.2s ease;
     }
-    .btn-ghost:hover { transform: translateY(-2px); border-color: oklch(30% 0.04 270 / 0.5); }
+    .btn-ghost:hover { border-color: var(--accent); color: var(--rose); }
+    .btn-ghost:active { transform: translateY(0) scale(0.97); transition-duration: 0.08s; }
 
+    .install-line {
+      margin-top: 1.25rem;
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      max-width: 100%;
+    }
     .install-line code {
       display: inline-block;
-      padding: 0.35rem 0.9rem;
-      background: #1e1e2e;
-      color: #cdd6f4;
-      border: 1px solid #313244;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.92rem;
-      border-radius: 8px;
-      letter-spacing: 0.02em;
+      padding: 0.4rem 0.95rem;
+      background: var(--surface);
+      color: var(--ink);
+      border: 1px solid var(--border-2);
+      font-size: 0.86rem;
+      border-radius: 4px;
+      letter-spacing: 0.01em;
       user-select: none;
+      cursor: pointer;
+      transition: border-color 0.2s ease, transform 0.15s ease;
+      overflow-x: auto;
+      white-space: nowrap;
     }
-    .install-line .sh-cmd { color: #89b4fa; }
-    .install-line .sh-flag { color: #a6adc8; }
-    .install-line .sh-url { color: #a6e3a1; }
-    .install-line .sh-pipe { color: #f38ba8; font-weight: 700; }
+    .install-line code:hover { border-color: var(--muted); }
+    .install-line code:active { transform: scale(0.97); }
+    .install-line .sh-cmd { color: var(--peach); }
+    .install-line .sh-flag { color: var(--ink-dim); }
+    .install-line .sh-url { color: var(--rose); }
+    .install-line .sh-pipe { color: var(--accent); font-weight: 700; }
+    .copy-toast {
+      position: absolute;
+      top: 50%;
+      left: calc(100% + 0.35rem);
+      transform: translateY(-50%) translateX(-4px);
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--accent);
+      opacity: 0;
+      transition: opacity 0.25s ease, transform 0.25s ease;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+    .copy-toast.show { opacity: 1; transform: translateY(-50%) translateX(0); }
 
-    /* ── MAIN CONTENT ── */
+    /* ── MAIN ── */
     .content {
       max-width: 1060px;
       margin: 0 auto;
-      padding: clamp(4rem, 8vw, 6rem) clamp(1.5rem, 5vw, 3rem) 0rem;
+      padding: clamp(4rem, 8vw, 6rem) clamp(1.5rem, 5vw, 3rem) 0;
       content-visibility: auto;
       contain-intrinsic-size: auto 800px;
+    }
+    .divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--border-2), transparent);
+      margin-bottom: clamp(3rem, 6vw, 5rem);
     }
 
     .pitch {
@@ -381,440 +276,132 @@
       margin-bottom: clamp(3rem, 6vw, 5rem);
     }
     .pitch-col h2 {
+      font-family: 'JetBrains Mono', monospace;
       font-weight: 800;
-      font-size: clamp(1.35rem, 2.5vw, 1.7rem);
+      font-size: clamp(1.2rem, 2.5vw, 1.5rem);
       letter-spacing: -0.02em;
       line-height: 1.2;
-      margin-bottom: 1.25rem;
+      margin-bottom: 1.5rem;
     }
     .pitch-col h2 span {
       display: block;
-      font-size: 0.78rem;
+      font-size: 0.72rem;
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.14em;
       color: var(--muted);
       margin-bottom: 0.4rem;
     }
-
-    .pitch-item:last-child { margin-bottom: 0; }
-
+    .pitch-item {
+      display: grid;
+      grid-template-columns: 8px 1fr;
+      gap: 1rem;
+      align-items: baseline;
+      margin-bottom: 1.4rem;
+      opacity: 0;
+      transform: translateY(14px);
+      transition: opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1), transform 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .pitch-item.visible { opacity: 1; transform: translateY(0); }
     .pip {
       width: 6px;
       height: 6px;
-      border-radius: 50%;
-      margin-top: 0.55rem;
+      margin-top: 0.6rem;
       justify-self: center;
+      transform: rotate(45deg);
     }
-    .pip-lavender { background: var(--periwinkle); }
-    .pip-salmon { background: var(--salmon); }
-    .pip-pink { background: var(--soft-pink); }
-    .pip-gold { background: oklch(78% 0.12 85); }
-
+    .pip-red { background: var(--accent); }
+    .pip-rose { background: var(--rose); }
+    .pip-amber { background: var(--amber); }
+    .pip-peach { background: var(--peach); }
     .pitch-item strong {
       font-weight: 800;
       font-size: 1rem;
     }
     .pitch-item strong a {
-      color: inherit;
+      color: var(--ink);
       text-decoration: underline;
-      text-decoration-color: var(--lavender);
-      text-underline-offset: 2px;
+      text-decoration-color: var(--accent);
+      text-underline-offset: 3px;
       text-decoration-thickness: 2px;
-      transition: text-decoration-color 0.2s;
+      transition: color 0.2s;
     }
-    .pitch-item strong a:hover {
-      text-decoration-color: var(--salmon);
-    }
+    .pitch-item strong a:hover { color: var(--rose); }
     .pitch-item p {
       font-size: 0.92rem;
-      color: var(--text-secondary);
+      color: var(--ink-dim);
       line-height: 1.55;
       margin-top: 0.2rem;
     }
     .pitch-item code {
-      font-size: 0.88rem;
-      background: oklch(90% 0.03 270 / 0.5);
-      padding: 0.1rem 0.35rem;
-      border-radius: 4px;
-    }
-    .pitch-badge {
-      display: inline-block;
-      font-size: 0.78rem;
-      font-weight: 700;
-      color: oklch(50% 0.1 280);
-      background: oklch(92% 0.06 280 / 0.5);
-      padding: 0.2rem 0.6rem;
-      border-radius: 20px;
-      margin-left: 0.4rem;
-      vertical-align: middle;
-    }
-
-    /* faithful TUI recreation */
-    .tui {
-      border-radius: 10px;
-      overflow: hidden;
-      box-shadow: 0 24px 80px oklch(20% 0.04 270 / 0.3), 0 0 0 1px oklch(30% 0.02 270 / 0.3);
       font-family: 'JetBrains Mono', monospace;
-      font-size: 0.72rem;
-      line-height: 1.5;
-      background: #282a36;
-      color: oklch(78% 0.02 270);
-      display: inline-block;
-      transform-origin: top left;
-    }
-    .tui-titlebar {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      padding: 8px 16px;
-      background: oklch(16% 0.015 270);
-    }
-    .tui-dot { width: 11px; height: 11px; border-radius: 50%; }
-    .tui-dot-r { background: oklch(62% 0.2 25); }
-    .tui-dot-y { background: oklch(78% 0.15 85); }
-    .tui-dot-g { background: oklch(68% 0.15 150); }
-    .tui-titlebar-text {
-      margin-left: 0.5rem;
-      font-size: 0.72rem;
-      color: oklch(55% 0.02 270);
-    }
-
-    .tui-body {
-      display: flex;
-      flex-direction: column;
-      background: #282a36;
-      position: relative;
-      min-height: 330px;
-      min-width: 774px;
-    }
-    @media (hover: hover) {
-      .tui-body:hover .player-controls {
-        opacity: 1;
-        transform: translateY(0);
-        pointer-events: auto;
-      }
-    }
-    .tui-body .player-controls:focus-within,
-    .tui-body .player-controls.force-visible {
-      opacity: 1;
-      transform: translateY(0);
-      pointer-events: auto;
-    }
-    .tui-loader {
-      position: absolute;
-      inset: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: #282a36;
-      z-index: 5;
-      transition: opacity 0.3s ease;
-    }
-    .tui-loader.hidden {
-      opacity: 0;
-      pointer-events: none;
-    }
-    .tui-spinner {
-      width: 24px;
-      height: 24px;
-      border: 2px solid oklch(50% 0.02 270);
-      border-top-color: oklch(80% 0.06 280);
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-    }
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-
-    /* asciinema player overrides */
-    .tui-body .ap-wrapper {
-      background: #282a36 !important;
-      border-radius: 0 !important;
-      box-shadow: none !important;
-      padding: 0 !important;
-      margin: 0 !important;
-      justify-content: start !important;
-    }
-    .tui-body .ap-player {
-      background: #282a36 !important;
-      padding: 0 !important;
-      border-radius: 0 !important;
-      margin: 0 !important;
-    }
-    .tui-body pre.ap-terminal {
-      padding: 0 !important;
-      margin: 0 !important;
-      border-width: 0 !important;
-      box-sizing: border-box !important;
-    }
-    .tui-body .ap-control-bar {
-      display: none !important;
-    }
-    .tui-body .ap-overlay-start {
-      display: none !important;
-    }
-
-    /* ── PLAYER CONTROLS ── */
-    .player-controls {
-      position: absolute;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 0.5rem 0.75rem;
-      background: #000;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.75rem;
-      opacity: 0;
-      transform: translateY(6px);
-      pointer-events: none;
-      transition: opacity 0.2s ease, transform 0.2s ease;
-      z-index: 6;
-    }
-    .player-btn {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 28px;
-      height: 28px;
-      padding: 0;
-      background: transparent;
-      border: 1px solid oklch(30% 0.02 270);
-      border-radius: 6px;
-      color: oklch(70% 0.02 270);
-      cursor: pointer;
-      transition: all 0.15s ease;
-      flex-shrink: 0;
-    }
-    .player-btn:hover {
-      background: oklch(25% 0.02 270);
-      color: oklch(90% 0.02 270);
-      border-color: oklch(40% 0.03 270);
-    }
-    .player-btn:active {
-      transform: scale(0.95);
-    }
-    .player-btn svg {
-      width: 14px;
-      height: 14px;
-      fill: currentColor;
-    }
-    .player-progress {
-      flex: 1;
-      height: 6px;
-      background: oklch(25% 0.02 270);
-      border-radius: 3px;
-      cursor: pointer;
-      position: relative;
-    }
-    .player-progress::before {
-      content: '';
-      position: absolute;
-      left: 0;
-      right: 0;
-      top: -10px;
-      bottom: -10px;
-    }
-    .player-progress-bar {
-      height: 100%;
-      background: oklch(60% 0.08 280);
-      border-radius: 3px;
-      width: 0%;
-      transition: width 0.1s linear;
-    }
-    .player-time {
-      color: oklch(98% 0 0);
-      font-size: 0.82rem;
-      font-weight: 700;
-      min-width: 85px;
-      text-align: right;
-      flex-shrink: 0;
-    }
-    .player-speed {
-      position: relative;
-      margin-left: 0.25rem;
-    }
-    .speed-toggle {
-      padding: 0.2rem 0.55rem;
-      background: transparent;
-      border: 1px solid oklch(40% 0.02 270);
-      border-radius: 4px;
-      color: oklch(98% 0 0);
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.75rem;
-      font-weight: 700;
-      cursor: pointer;
-      transition: all 0.15s ease;
-      min-width: 36px;
-    }
-    .speed-toggle:hover {
-      background: oklch(25% 0.02 270);
-      color: oklch(90% 0.02 270);
-      border-color: oklch(40% 0.03 270);
-    }
-    .speed-menu {
-      position: absolute;
-      bottom: calc(100% + 6px);
-      right: 0;
-      background: oklch(18% 0.02 270);
-      border: 1px solid oklch(30% 0.02 270);
-      border-radius: 6px;
-      padding: 0.25rem 0;
-      min-width: 72px;
-      box-shadow: 0 8px 24px oklch(0% 0 0 / 0.4);
-      opacity: 0;
-      transform: translateY(4px);
-      pointer-events: none;
-      transition: opacity 0.15s ease, transform 0.15s ease;
-      z-index: 10;
-    }
-    .speed-menu.open {
-      opacity: 1;
-      transform: translateY(0);
-      pointer-events: auto;
-    }
-    .speed-option {
-      display: block;
-      width: 100%;
-      padding: 0.35rem 0.9rem 0.35rem 1.6rem;
-      background: transparent;
-      border: none;
-      color: oklch(95% 0.01 270);
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.78rem;
-      font-weight: 700;
-      text-align: left;
-      cursor: pointer;
-      position: relative;
-      transition: background 0.12s ease, color 0.12s ease;
-    }
-    .speed-option:hover {
-      background: oklch(25% 0.02 270);
-      color: oklch(95% 0.02 270);
-    }
-    .speed-option.active {
-      color: oklch(75% 0.1 280);
-    }
-    .speed-option.active::before {
-      content: '✓';
-      position: absolute;
-      left: 0.55rem;
-      color: oklch(75% 0.1 280);
-    }
-    .player-hint {
-      margin-top: 0.6rem;
-      text-align: center;
       font-size: 0.85rem;
-      color: var(--text-secondary);
-    }
-    .player-hint button {
-      background: none;
-      border: none;
-      padding: 0;
-      font: inherit;
-      font-weight: 700;
-      color: var(--navy-light);
-      text-decoration: underline;
-      text-underline-offset: 3px;
-      cursor: pointer;
-    }
-    .player-hint button:hover {
-      color: var(--deep-navy);
+      background: var(--surface-2);
+      padding: 0.1rem 0.35rem;
+      border-radius: 2px;
+      color: var(--peach);
     }
 
-    /* ── DOOM DEMO ── */
-    .doom-demo {
-      max-width: 820px;
-      margin: 3rem auto 0;
+    .makima-adds {
+      border: 1px solid var(--border-2);
+      background: var(--surface);
+      border-radius: 4px;
+      padding: clamp(1.5rem, 3vw, 2.5rem);
+      margin-bottom: clamp(3rem, 6vw, 5rem);
     }
-    .doom-line {
-      text-align: center;
-      font-size: 1.15rem;
+    .makima-adds h2 {
+      font-family: 'JetBrains Mono', monospace;
       font-weight: 800;
-      color: var(--deep-navy);
-      margin-bottom: 1rem;
+      font-size: clamp(1.2rem, 2.5vw, 1.5rem);
+      margin-bottom: 0.4rem;
     }
-    .doom-demo .tui { display: block; }
-    .doom-demo .tui-body { min-width: 0; min-height: 0; }
-    .doom-video {
+    .makima-adds h2 span {
       display: block;
-      width: 100%;
-      height: auto;
-      aspect-ratio: 1920 / 970;
-      background: #000;
-      cursor: pointer;
-    }
-
-
-    /* ── PROVIDERS ── */
-    .providers-section {
-      text-align: center;
-      margin-bottom: 0;
-      position: relative;
-      z-index: 2;
-      max-width: 1060px;
-      margin: 0 auto;
-    }
-    .providers-section h2 {
-      font-weight: 800;
-      font-size: clamp(1.65rem, 3.2vw, 2.2rem);
-      letter-spacing: -0.02em;
-      margin-bottom: 0.5rem;
-    }
-    .providers-section > p {
-      font-size: 1rem;
-      color: var(--text-secondary);
-      max-width: 50ch;
-      margin: 0 auto 2rem;
-    }
-    .provider-grid {
-      display: flex;
-      justify-content: center;
-      gap: 1.25rem;
-      flex-wrap: wrap;
-      margin-bottom: 1.25rem;
-    }
-    .provider-chip {
-      display: inline-block;
-      padding: 0.8rem 1.6rem;
-      background: linear-gradient(135deg, oklch(96% 0.02 280 / 0.6), oklch(94% 0.03 280 / 0.3));
-      border: 1px solid oklch(88% 0.04 280 / 0.4);
-      border-radius: 12px;
+      font-size: 0.72rem;
       font-weight: 700;
-      font-size: 1.05rem;
-      color: var(--deep-navy);
-      text-decoration: none;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: var(--accent);
+      margin-bottom: 0.4rem;
     }
-    .provider-chip:hover {
-      transform: translateY(-3px) scale(1.04);
-      box-shadow: 0 8px 24px oklch(70% 0.06 280 / 0.15);
-      background: linear-gradient(135deg, oklch(94% 0.04 280 / 0.7), oklch(90% 0.06 280 / 0.4));
-      border-color: oklch(78% 0.08 280 / 0.5);
-    }
-    .provider-plus {
+    .makima-adds > p {
       font-size: 0.92rem;
-      color: var(--text-secondary);
+      color: var(--ink-dim);
+      max-width: 60ch;
+      margin-bottom: 1.5rem;
     }
-    .provider-plus a {
-      color: oklch(48% 0.1 280);
-      text-decoration: underline;
-      text-underline-offset: 3px;
+    .adds-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.25rem 2.5rem;
+    }
+    .adds-item strong {
+      display: block;
+      font-size: 0.92rem;
+      font-weight: 800;
+      color: var(--ink);
+      margin-bottom: 0.15rem;
+    }
+    .adds-item strong code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      color: var(--peach);
+      background: var(--surface-2);
+      padding: 0.05rem 0.3rem;
+      border-radius: 2px;
+    }
+    .adds-item p {
+      font-size: 0.85rem;
+      color: var(--ink-dim);
+      line-height: 1.5;
     }
 
-
-    /* ── TOOL SHOWCASES ── */
-    .showcase {
-      margin-bottom: clamp(4rem, 8vw, 6rem);
-    }
-    .showcase-header {
-      margin-bottom: 2rem;
-    }
+    /* ── SHOWCASES ── */
+    .showcase { margin-bottom: clamp(4rem, 8vw, 6rem); }
+    .showcase-header { margin-bottom: 2rem; }
     .showcase-header span {
       display: block;
-      font-size: 0.78rem;
+      font-size: 0.72rem;
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.14em;
@@ -822,73 +409,67 @@
       margin-bottom: 0.4rem;
     }
     .showcase-header h2 {
+      font-family: 'JetBrains Mono', monospace;
       font-weight: 800;
-      font-size: clamp(1.35rem, 2.5vw, 1.7rem);
+      font-size: clamp(1.2rem, 2.5vw, 1.5rem);
       letter-spacing: -0.02em;
       line-height: 1.2;
       margin-bottom: 0.5rem;
     }
     .showcase-header p {
       font-size: 0.92rem;
-      color: var(--text-secondary);
-      max-width: 55ch;
+      color: var(--ink-dim);
+      max-width: 60ch;
       line-height: 1.55;
     }
     .showcase-header code {
-      font-size: 0.88rem;
-      background: oklch(90% 0.03 270 / 0.5);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      color: var(--peach);
+      background: var(--surface-2);
       padding: 0.1rem 0.35rem;
-      border-radius: 4px;
+      border-radius: 2px;
     }
+    .showcase-header a { color: var(--rose); }
 
-    /* index tool split view */
     .index-split {
       display: grid;
-      grid-template-columns: 1fr auto 1fr;
-      gap: 0;
-      border-radius: 10px;
+      grid-template-columns: 1fr 1px 1fr;
+      border: 1px solid var(--border);
+      border-radius: 4px;
       overflow: hidden;
-      box-shadow: 0 8px 32px oklch(20% 0.04 270 / 0.15), 0 0 0 1px oklch(30% 0.02 270 / 0.2);
       font-family: 'JetBrains Mono', monospace;
-      font-size: 0.82rem;
+      font-size: 0.8rem;
       line-height: 1.6;
-      background: #1e1e2e;
+      background: var(--surface);
     }
-    .index-pane {
-      overflow: hidden;
-      position: relative;
-    }
+    .index-pane { overflow: hidden; position: relative; }
     .index-pane-label {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
       padding: 0.3rem 1rem;
-      font-size: 0.92rem;
+      font-size: 0.85rem;
       font-weight: 700;
-      color: oklch(55% 0.02 270);
-      background: oklch(18% 0.02 270);
+      color: var(--muted);
+      background: var(--surface-2);
+      border-bottom: 1px solid var(--border);
     }
     .index-pane pre {
       margin: 0;
       padding: 0.8rem 1rem;
       overflow-x: auto;
-      color: #cdd6f4;
+      color: var(--ink);
     }
-    .index-divider {
-      width: 1px;
-      background: oklch(32% 0.04 270);
-    }
-    .index-pane .ln  { color: oklch(40% 0.015 270); user-select: none; }
-    .index-pane .kw  { color: #cba6f7; }
-    .index-pane .ty  { color: #f9e2af; }
-    .index-pane .fn  { color: #89b4fa; }
-    .index-pane .st  { color: #a6e3a1; }
-    .index-pane .cm  { color: oklch(50% 0.02 270); font-style: italic; }
-    .index-pane .at  { color: #f38ba8; }
-    .index-pane .op  { color: #89dceb; }
-    .index-pane .sec { color: #f9e2af; font-weight: 700; }
-    .index-pane .dim { color: oklch(50% 0.015 270); }
-    .index-pane .rng { color: oklch(55% 0.06 280); }
+    .index-divider { width: 1px; background: var(--border); }
+    .index-pane .ln  { color: var(--muted); user-select: none; }
+    .index-pane .kw  { color: var(--accent); }
+    .index-pane .ty  { color: var(--rose); }
+    .index-pane .fn  { color: var(--rose); }
+    .index-pane .st  { color: var(--peach); }
+    .index-pane .cm  { color: var(--muted); font-style: italic; }
+    .index-pane .at  { color: var(--amber); }
+    .index-pane .op  { color: var(--ink-dim); }
+    .index-pane .sec { color: var(--accent); font-weight: 700; }
+    .index-pane .dim { color: var(--muted); }
+    .index-pane .rng { color: var(--amber); }
 
     .showcase-stat {
       display: flex;
@@ -898,190 +479,175 @@
       gap: 0.4rem 0.6rem;
       margin-top: 1.5rem;
       font-family: 'JetBrains Mono', monospace;
-      font-size: 0.88rem;
-      color: var(--text-secondary);
+      font-size: 0.86rem;
+      color: var(--ink-dim);
     }
-    .stat-num {
-      font-weight: 800;
-      color: var(--deep-navy);
-    }
-    .stat-arrow {
-      color: oklch(45% 0.03 270);
-      font-family: 'JetBrains Mono', monospace;
-    }
+    .stat-num { font-weight: 800; color: var(--ink); }
+    .stat-arrow { color: var(--muted); }
     .stat-result {
-      padding: 0.3rem 0.75rem;
-      border-radius: 20px;
-      font-size: 0.82rem;
+      padding: 0.25rem 0.7rem;
+      border-radius: 2px;
+      font-size: 0.8rem;
       font-weight: 800;
-      background: oklch(92% 0.06 150 / 0.5);
-      color: oklch(38% 0.12 150);
+      background: #241c14;
+      color: var(--amber);
     }
 
-    /* code_execution showcase */
     .exec-demo {
-      border-radius: 10px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
       overflow: hidden;
-      box-shadow: 0 8px 32px oklch(20% 0.04 270 / 0.15), 0 0 0 1px oklch(30% 0.02 270 / 0.2);
       font-family: 'JetBrains Mono', monospace;
-      font-size: 0.82rem;
+      font-size: 0.8rem;
       line-height: 1.6;
-      background: #1e1e2e;
+      background: var(--surface);
     }
-    .exec-body {
-      display: grid;
-      grid-template-columns: 1fr auto 1fr;
-    }
-    .exec-pane {
-      overflow: hidden;
-    }
+    .exec-body { display: grid; grid-template-columns: 1fr 1px 1fr; }
+    .exec-pane { overflow: hidden; }
     .exec-pane-label {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
       padding: 0.3rem 1rem;
-      font-size: 0.92rem;
+      font-size: 0.85rem;
       font-weight: 700;
-      color: oklch(55% 0.02 270);
-      background: oklch(18% 0.02 270);
+      color: var(--muted);
+      background: var(--surface-2);
+      border-bottom: 1px solid var(--border);
     }
     .exec-pane pre {
       margin: 0;
       padding: 0.8rem 1rem;
       overflow-x: auto;
-      color: #cdd6f4;
+      color: var(--ink);
     }
-    .exec-divider {
-      width: 1px;
-      background: oklch(32% 0.04 270);
-    }
+    .exec-divider { width: 1px; background: var(--border); }
     .exec-duo {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 1.5rem;
     }
-    .exec-duo .exec-demo {
-      display: flex;
-      flex-direction: column;
-    }
-    .exec-duo .exec-pane {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-    }
+    .exec-duo .exec-demo { display: flex; flex-direction: column; }
+    .exec-duo .exec-pane { flex: 1; display: flex; flex-direction: column; }
     .exec-duo .exec-pane pre { flex: 1; }
-    .exec-pane .kw  { color: #cba6f7; }
-    .exec-pane .fn  { color: #89b4fa; }
-    .exec-pane .st  { color: #a6e3a1; }
-    .exec-pane .cm  { color: oklch(50% 0.02 270); font-style: italic; }
-    .exec-pane .op  { color: #89dceb; }
-    .exec-pane .nb  { color: #fab387; }
-    .exec-pane .dim { color: oklch(50% 0.015 270); }
-    .exec-pane .out { color: oklch(70% 0.08 150); }
-    .exec-pane .err { color: #f38ba8; }
+    .exec-pane .kw  { color: var(--accent); }
+    .exec-pane .fn  { color: var(--rose); }
+    .exec-pane .st  { color: var(--peach); }
+    .exec-pane .cm  { color: var(--muted); font-style: italic; }
+    .exec-pane .op  { color: var(--ink-dim); }
+    .exec-pane .nb  { color: var(--amber); }
+    .exec-pane .dim { color: var(--muted); }
+    .exec-pane .out { color: var(--amber); }
+    .exec-pane .err { color: var(--accent); }
 
-
-
-    @media (max-width: 768px) {
-      .index-split { grid-template-columns: 1fr; }
-      .index-divider { width: auto; height: 1px; }
-      .exec-body { grid-template-columns: 1fr; }
-      .exec-divider { width: auto; height: 1px; }
-      .exec-duo { grid-template-columns: 1fr; }
+    /* DOOM demo */
+    .doom-demo { max-width: 720px; margin: 3rem auto 0; }
+    .doom-line {
+      text-align: center;
+      font-size: 1.1rem;
+      font-weight: 800;
+      color: var(--ink);
+      margin-bottom: 1rem;
+    }
+    .doom-demo .tui { border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+    .doom-demo .tui-titlebar {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 16px;
+      background: var(--surface-2);
+      border-bottom: 1px solid var(--border);
+    }
+    .tui-dot { width: 10px; height: 10px; border-radius: 50%; }
+    .tui-dot-r { background: var(--accent); }
+    .tui-dot-y { background: var(--amber); }
+    .tui-dot-g { background: #4a7a5c; }
+    .doom-video {
+      display: block;
+      width: 100%;
+      height: auto;
+      aspect-ratio: 1920 / 970;
+      background: #000;
+      cursor: pointer;
     }
 
-    /* ── BOTTOM SKY ── */
-    .bottom-sky {
-      position: relative;
-      overflow: hidden;
-      margin-top: -1px;
-      content-visibility: auto;
-      contain-intrinsic-size: auto 500px;
+    /* ── PROVIDERS ── */
+    .providers-section {
+      text-align: center;
+      max-width: 1060px;
+      margin: 0 auto;
+      padding-bottom: 2rem;
     }
-    .bottom-sky-bg {
-      min-height: clamp(18rem, 28vw, 28rem);
-      background: linear-gradient(180deg, var(--cream) 0%, var(--sky-start) 15%, var(--sky-end) 35%, var(--lavender) 60%, var(--soft-pink) 100%);
-      position: relative;
-      padding: clamp(3rem, 6vw, 5rem) clamp(1.5rem, 5vw, 3rem) clamp(10rem, 14vw, 16rem);
+    .providers-section h2 {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 800;
+      font-size: clamp(1.4rem, 3.2vw, 1.9rem);
+      letter-spacing: -0.02em;
+      margin-bottom: 0.5rem;
     }
-    .bottom-stars {
-      position: absolute;
-      inset: 0;
-      pointer-events: none;
+    .providers-section > p {
+      font-size: 0.95rem;
+      color: var(--ink-dim);
+      max-width: 52ch;
+      margin: 0 auto 2rem;
     }
-    .bottom-star {
-      position: absolute;
-      background: oklch(98% 0.02 90);
-      clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
-      animation: twinkle 3s ease-in-out infinite;
+    .providers-section code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      color: var(--peach);
+      background: var(--surface-2);
+      padding: 0.1rem 0.35rem;
+      border-radius: 2px;
     }
-    .bottom-star:nth-child(1) { bottom: 45%; left: 12%; width: 5px; height: 5px; animation-delay: 0.5s; }
-    .bottom-star:nth-child(2) { bottom: 55%; left: 30%; width: 4px; height: 4px; animation-delay: 1.2s; }
-    .bottom-star:nth-child(3) { bottom: 60%; right: 22%; width: 5px; height: 5px; animation-delay: 0.8s; }
-    .bottom-star:nth-child(4) { bottom: 50%; right: 38%; width: 3px; height: 3px; animation-delay: 2s; }
-    .bottom-star:nth-child(5) { bottom: 65%; left: 52%; width: 4px; height: 4px; animation-delay: 1.5s; }
-    .bottom-star:nth-child(6) { bottom: 48%; right: 10%; width: 4px; height: 4px; animation-delay: 0.3s; }
-    .bottom-star-diamond {
-      position: absolute;
-      background: oklch(98% 0.03 85);
-      clip-path: polygon(50% 0%, 62% 38%, 100% 50%, 62% 62%, 50% 100%, 38% 62%, 0% 50%, 38% 38%);
-      animation: twinkle-bright 4s ease-in-out infinite;
+    .provider-grid {
+      display: flex;
+      justify-content: center;
+      gap: 0.85rem;
+      flex-wrap: wrap;
+      margin-bottom: 1.5rem;
     }
-    .bottom-star-diamond:nth-child(7) { bottom: 52%; left: 22%; width: 10px; height: 10px; animation-delay: 1.8s; }
-    .bottom-star-diamond:nth-child(8) { bottom: 58%; right: 28%; width: 8px; height: 8px; animation-delay: 0.6s; }
+    .provider-chip {
+      display: inline-block;
+      padding: 0.6rem 1.3rem;
+      background: var(--surface);
+      border: 1px solid var(--border-2);
+      border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 700;
+      font-size: 0.95rem;
+      color: var(--ink);
+      text-decoration: none;
+      opacity: 0;
+      transform: translateY(12px);
+      transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s ease, opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1), color 0.2s ease;
+    }
+    .provider-chip.visible { opacity: 1; transform: translateY(0); }
+    .provider-chip:hover {
+      border-color: var(--accent);
+      color: var(--rose);
+    }
+    .provider-chip:active { transform: translateY(0) scale(0.97) !important; }
+    .provider-plus {
+      font-size: 0.88rem;
+      color: var(--ink-dim);
+    }
+    .provider-plus a {
+      color: var(--rose);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
 
-    .bottom-cloud-layer {
-      position: absolute;
-      bottom: 0;
-      left: -5%;
-      right: -5%;
-      pointer-events: none;
+    footer {
+      text-align: center;
+      padding: 2.5rem 1rem 3.5rem;
+      font-size: 0.78rem;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+      margin-top: clamp(3rem, 6vw, 5rem);
     }
-    .bottom-cloud-row {
-      position: absolute;
-      left: 0;
-      right: 0;
+    footer a {
+      color: var(--ink-dim);
+      text-decoration: underline;
+      text-underline-offset: 2px;
     }
-    .bottom-cloud-row .cloud-svg {
-    }
-    .bottom-cloud-back {
-      bottom: 60px;
-      height: 90px;
-    }
-    .bottom-cloud-back .cloud-svg { fill: oklch(90% 0.05 300 / 0.5); }
-    .bottom-cloud-mid {
-      bottom: 25px;
-      height: 80px;
-    }
-    .bottom-cloud-mid .cloud-svg { fill: oklch(88% 0.04 290 / 0.6); }
-    .bottom-cloud-front {
-      bottom: -8px;
-      height: 70px;
-    }
-    .bottom-cloud-front .cloud-svg { fill: oklch(92% 0.03 280 / 0.8); }
-
-    .bottom-moon {
-      position: absolute;
-      top: 18%;
-      right: 10%;
-      width: 28px;
-      height: 28px;
-      border-radius: 50%;
-      background: oklch(95% 0.03 85);
-      box-shadow:
-        0 0 16px oklch(92% 0.04 85 / 0.4),
-        0 0 50px oklch(92% 0.04 85 / 0.15);
-    }
-    .bottom-moon::after {
-      content: '';
-      position: absolute;
-      width: 22px;
-      height: 22px;
-      border-radius: 50%;
-      background: linear-gradient(135deg, oklch(90% 0.05 280), oklch(85% 0.06 290));
-      top: -3px;
-      left: 5px;
-    }
+    footer a:hover { color: var(--rose); }
 
     /* ── ANIMATIONS ── */
     .reveal {
@@ -1093,15 +659,10 @@
     .reveal-d1 { transition-delay: 0.1s; }
     .reveal-d2 { transition-delay: 0.2s; }
     .reveal-d3 { transition-delay: 0.3s; }
-    .reveal-d4 { transition-delay: 0.4s; }
-    .reveal-d5 { transition-delay: 0.5s; }
-    .reveal-d6 { transition-delay: 0.6s; }
-    .reveal-d7 { transition-delay: 0.7s; }
 
-    /* hero entrance choreography — .hero-anim added by JS */
     .hero-anim .hero-intro > * {
       opacity: 0;
-      transform: translateY(18px);
+      transform: translateY(16px);
       transition: opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1), transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
     }
     .hero-anim .hero-intro.entered > * { opacity: 1; transform: translateY(0); }
@@ -1110,102 +671,7 @@
     .hero-anim .hero-intro > :nth-child(3) { transition-delay: 0.19s; }
     .hero-anim .hero-intro > :nth-child(4) { transition-delay: 0.26s; }
     .hero-anim .hero-intro > :nth-child(5) { transition-delay: 0.33s; }
-    .hero-anim .hero-intro > :nth-child(6) { transition-delay: 0.40s; }
 
-    /* hero preview (TUI) entrance */
-    .hero-anim .hero-preview {
-      opacity: 0;
-      transform: translateX(40px);
-      transition: opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.15s, transform 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.15s;
-    }
-    .hero-anim .hero-preview.entered {
-      opacity: 1;
-      transform: translateX(0);
-    }
-
-    /* pitch item stagger — each item animates individually */
-    .pitch-item {
-      display: grid;
-      grid-template-columns: 24px 1fr;
-      gap: 0.75rem;
-      align-items: baseline;
-      margin-bottom: 1.1rem;
-      opacity: 0;
-      transform: translateY(16px);
-      transition: opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1), transform 0.5s cubic-bezier(0.16, 1, 0.3, 1);
-    }
-    .pitch-item.visible { opacity: 1; transform: translateY(0); }
-
-    /* provider chip stagger */
-    .provider-chip {
-      opacity: 0;
-      transform: translateY(14px);
-      transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease, opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1), background 0.25s ease, border-color 0.25s ease;
-    }
-    .provider-chip.visible {
-      opacity: 1;
-      transform: translateY(0);
-    }
-
-    /* install line copy feedback */
-    .install-line {
-      margin-top: 1.25rem;
-      position: relative;
-      display: inline-flex;
-      align-items: center;
-    }
-    .install-line code {
-      cursor: pointer;
-      transition: background 0.2s ease, transform 0.15s ease;
-    }
-    .install-line code:hover {
-      background: #313244;
-    }
-    .install-line code:active {
-      transform: scale(0.97);
-    }
-    .copy-toast {
-      position: absolute;
-      top: 50%;
-      left: calc(100% + 0.35rem);
-      transform: translateY(-50%) translateX(-4px);
-      font-size: 0.78rem;
-      font-weight: 700;
-      color: oklch(50% 0.12 145);
-      opacity: 0;
-      transition: opacity 0.25s ease, transform 0.25s ease;
-      pointer-events: none;
-      white-space: nowrap;
-    }
-    .copy-toast.show {
-      opacity: 1;
-      transform: translateY(-50%) translateX(0);
-    }
-
-    /* nav logo hover */
-    .nav-logo {
-      transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-    }
-    .nav-logo:hover {
-      transform: scale(1.05);
-    }
-
-    /* button press feedback */
-    .btn-primary:active {
-      transform: translateY(0) scale(0.97);
-      transition-duration: 0.08s;
-    }
-    .btn-ghost:active {
-      transform: translateY(0) scale(0.97);
-      transition-duration: 0.08s;
-    }
-
-    /* provider chip active */
-    .provider-chip:active {
-      transform: translateY(0) scale(0.97) !important;
-    }
-
-    /* ── REDUCED MOTION ── */
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {
         animation-duration: 0.01ms !important;
@@ -1214,135 +680,64 @@
         scroll-behavior: auto !important;
       }
       .hero-anim .hero-intro > * { opacity: 1; transform: none; }
-      .hero-anim .hero-preview { opacity: 1; transform: none; }
       .reveal { opacity: 1; transform: none; }
       .pitch-item { opacity: 1; transform: none; }
       .provider-chip { opacity: 1; transform: none; }
       .star-badge { opacity: 1; transform: none; }
     }
 
-    /* ── RESPONSIVE ── */
     @media (max-width: 768px) {
       .nav-right a:not(.nav-cta):not([href="/docs/"]) { display: none; }
       .hero { padding-inline: 1rem; }
       .hero-grid { grid-template-columns: 1fr; text-align: center; }
       .hero-intro { display: flex; flex-direction: column; align-items: center; }
       .hero-actions { justify-content: center; }
-      .hero-preview { text-align: left; width: 100%; }
       .pitch { grid-template-columns: 1fr; }
-
-      .provider-grid { gap: 0.75rem; }
-      .provider-chip { padding: 0.65rem 1.25rem; font-size: 0.88rem; }
-
-      /* always show player controls below the player on mobile */
-      .tui-body { min-width: 0; }
-      .tui-body .player-controls {
-        position: static;
-        opacity: 1;
-        transform: none;
-        pointer-events: auto;
-        background: oklch(16% 0.015 270);
-        border-top: 1px solid oklch(22% 0.02 270);
-      }
+      .adds-grid { grid-template-columns: 1fr; }
+      .index-split { grid-template-columns: 1fr; }
+      .index-divider { width: auto; height: 1px; }
+      .exec-body { grid-template-columns: 1fr; }
+      .exec-divider { width: auto; height: 1px; }
+      .exec-duo { grid-template-columns: 1fr; }
+      .provider-grid { gap: 0.6rem; }
+      .provider-chip { padding: 0.5rem 1rem; font-size: 0.85rem; }
     }
     @media (max-width: 480px) {
       .hero-actions { flex-direction: column; align-items: center; }
+    }
+    @media (hover: hover) {
+      ::selection { background: #331d1d; color: var(--ink); }
     }
   </style>
 </head>
 <body>
 
 <nav id="nav">
-  <a href="#" class="nav-logo">maki</a>
+  <a href="#" class="nav-logo">makima</a>
   <div class="nav-right">
     <a href="/docs/">Docs</a>
-    <a href="https://github.com/tontinton/maki" target="_blank" rel="noopener" class="nav-cta"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>GitHub<span class="star-badge" data-stars><svg width="10" height="10" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><span data-star-count></span></span></a>
+    <a href="https://github.com/lun-4/makima" target="_blank" rel="noopener" class="nav-cta"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>GitHub<span class="star-badge" data-stars><svg width="11" height="11" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><span data-star-count></span></span></a>
   </div>
 </nav>
 
 <section class="hero">
-  <div class="hero-clouds">
-    <div class="cloud-bank cloud-bank-1">
-      <svg class="cloud-svg" style="width:380px;bottom:0;left:0" viewBox="0 0 380 120" fill="oklch(96% 0.02 280 / 0.6)"><path d="M10 120 Q10 95 35 90 Q20 60 55 50 Q60 20 100 18 Q130 0 165 15 Q195 5 220 20 Q250 8 275 25 Q310 10 340 30 Q365 20 370 50 Q390 65 370 85 Q380 110 360 120Z"/></svg>
-    </div>
-    <div class="cloud-bank cloud-bank-2">
-      <svg class="cloud-svg" style="width:300px;bottom:0;right:0" viewBox="0 0 300 110" fill="oklch(96% 0.02 280 / 0.55)"><path d="M5 110 Q0 85 25 75 Q15 50 50 40 Q55 15 90 12 Q120 -5 155 10 Q180 0 210 15 Q240 5 260 25 Q285 15 290 45 Q310 60 290 80 Q300 105 280 110Z"/></svg>
-    </div>
-    <div class="cloud-bank cloud-bank-5">
-      <svg class="cloud-svg" style="width:160px;bottom:0;left:0" viewBox="0 0 160 65" fill="oklch(96% 0.02 280 / 0.4)"><path d="M5 65 Q0 48 16 42 Q8 26 30 20 Q38 4 58 6 Q75 -4 95 8 Q112 0 128 15 Q148 8 152 30 Q166 40 150 52 Q158 63 142 65Z"/></svg>
-    </div>
-    <div class="cloud-bank cloud-bank-7">
-      <svg class="cloud-svg" style="width:400px;bottom:0;left:0" viewBox="0 0 400 130" fill="oklch(97% 0.02 280 / 0.65)"><path d="M8 130 Q5 100 30 92 Q15 60 55 48 Q62 18 105 15 Q140 -5 175 12 Q205 0 235 18 Q265 5 295 22 Q325 8 355 30 Q380 18 385 55 Q405 72 385 92 Q395 125 375 130Z"/></svg>
-    </div>
-    <div class="cloud-bank cloud-bank-8">
-      <svg class="cloud-svg" style="width:320px;bottom:0;left:0" viewBox="0 0 320 115" fill="oklch(97% 0.02 280 / 0.6)"><path d="M8 115 Q3 88 28 80 Q15 55 48 42 Q55 15 92 12 Q122 -4 155 10 Q182 0 208 16 Q235 5 258 22 Q282 12 300 35 Q318 22 312 55 Q330 68 312 85 Q320 110 302 115Z"/></svg>
-    </div>
-    <div class="cloud-floor"></div>
-  </div>
-  <div class="stars">
-    <div class="star"></div><div class="star"></div><div class="star"></div><div class="star"></div><div class="star"></div>
-    <div class="star"></div><div class="star"></div><div class="star"></div><div class="star"></div><div class="star"></div>
-    <div class="star-diamond"></div><div class="star-diamond"></div><div class="star-diamond"></div><div class="star-diamond"></div><div class="star-diamond"></div>
-  </div>
-  <div class="moon-group">
-    <div class="moon"></div>
-  </div>
-
   <div class="hero-grid">
-  <div class="hero-intro">
-    <h1>maki</h1>
-    <p class="hero-tagline">the efficient coder</p>
-    <p class="hero-sub">I got frustrated with existing coding agents and hitting hourly/weekly token limits.<br>So I built Maki, a lightweight Rust TUI with some novel context token reduction techniques.<br>In benchmarks, it reduces cost by 2x and finishes them 2x faster too.</p>
-    <div class="hero-actions">
-      <a href="https://github.com/tontinton/maki" target="_blank" rel="noopener" class="btn-primary">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
-        GitHub<span class="star-badge" data-stars><svg width="11" height="11" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><span data-star-count></span></span>
-      </a>
-      <a href="#features" class="btn-ghost">Features</a>
-    </div>
-    <div class="install-line">
-      <code onclick="navigator.clipboard.writeText('curl -fsSL https://maki.sh/install.sh | sh');showCopyToast(this)"><span class="sh-cmd">curl</span> <span class="sh-flag">-fsSL</span> <span class="sh-url">https://maki.sh/install.sh</span> <span class="sh-pipe">|</span> <span class="sh-cmd">sh</span></code>
-      <span class="copy-toast">copied!</span>
-    </div>
-  </div>
-
-  <div class="hero-preview">
-    <div class="tui-scale-wrap">
-    <div class="tui">
-      <div class="tui-titlebar">
-        <div class="tui-dot tui-dot-r"></div>
-        <div class="tui-dot tui-dot-y"></div>
-        <div class="tui-dot tui-dot-g"></div>
+    <div class="hero-intro">
+      <h1>makima</h1>
+      <p class="hero-tagline">the tuned fork</p>
+      <p class="hero-sub">A fork of <a href="https://github.com/tontinton/maki" target="_blank" rel="noopener" style="color:var(--rose);">maki</a> for people with different opinions: less context, more control. Same minimal-Rust-TUI core, plus thinking that saves, plan mode, async subagents you can talk to, and automode.</p>
+      <div class="hero-actions">
+        <a href="https://github.com/lun-4/makima" target="_blank" rel="noopener" class="btn-primary">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+          GitHub<span class="star-badge" data-stars><svg width="11" height="11" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><span data-star-count></span></span>
+        </a>
+        <a href="#features" class="btn-ghost">Features</a>
       </div>
-
-      <div class="tui-body">
-        <div class="tui-loader" id="demo-loader"><div class="tui-spinner"></div></div>
-        <div id="demo-player"></div>
-        <div class="player-controls">
-          <button class="player-btn" id="play-btn" aria-label="Play/Pause">
-            <svg viewBox="0 0 24 24" id="play-icon"><path d="M8 5v14l11-7z"/></svg>
-            <svg viewBox="0 0 24 24" id="pause-icon" style="display:none"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-          </button>
-          <div class="player-progress" id="progress-bar">
-            <div class="player-progress-bar" id="progress-fill"></div>
-          </div>
-          <span class="player-time" id="time-display">0:00 / 0:00</span>
-          <div class="player-speed">
-            <button class="speed-toggle" id="speed-toggle" aria-haspopup="true" aria-expanded="false">2.0x</button>
-            <div class="speed-menu" id="speed-menu" role="menu">
-              <button class="speed-option" data-speed="0.5" role="menuitem">0.5x</button>
-              <button class="speed-option" data-speed="1" role="menuitem">1.0x</button>
-              <button class="speed-option" data-speed="1.5" role="menuitem">1.5x</button>
-              <button class="speed-option active" data-speed="2" role="menuitem">2.0x</button>
-              <button class="speed-option" data-speed="3" role="menuitem">3.0x</button>
-            </div>
-          </div>
-        </div>
+      <div class="install-line">
+        <code onclick="navigator.clipboard.writeText('curl -fsSL https://makima.ln4.net/install.sh | sh');showCopyToast(this)"><span class="sh-cmd">curl</span> <span class="sh-flag">-fsSL</span> <span class="sh-url">https://makima.ln4.net/install.sh</span> <span class="sh-pipe">|</span> <span class="sh-cmd">sh</span></code>
+        <span class="copy-toast">copied!</span>
       </div>
     </div>
-    </div>
-    <p class="player-hint"><button type="button" id="skip-hint-btn">Skip to 1:07</button> to see the snake game Opus 4.6 created</p>
-  </div>
   </div>
 </section>
 
@@ -1353,38 +748,38 @@
       <h2><span>Context efficiency</span>Where tokens go</h2>
 
       <div class="pitch-item">
-        <div class="pip pip-lavender"></div>
+        <div class="pip pip-red"></div>
         <div>
           <strong><a href="#index">index</a></strong>
-          <p>Parses 15 languages into skeletons: imports, type defs, function signatures with their line ranges. Adds 59 tok/turn but saves 224 tok/turn on reads, netting 165 tok/turn saved. My usage indicated reads are ~65% of all tokens, so this optimization is big.</p>
+          <p>Parses 15 languages into skeletons: imports, type defs, function signatures with their line ranges. Adds 59 tok/turn but saves 224 tok/turn on reads, netting 165 tok/turn saved. Reads are roughly 65% of all tokens, so this one pays for itself.</p>
         </div>
       </div>
       <div class="pitch-item">
-        <div class="pip pip-salmon"></div>
+        <div class="pip pip-rose"></div>
         <div>
           <strong><a href="#exec">code_execution</a></strong>
           <p>A sandboxed Python interpreter with memory and time limits. All tools are exposed as <code>async</code> functions, so the model can <code>asyncio.gather()</code> a bunch of reads, grep the results, and only return what matters. Intermediate data never reaches your context.</p>
         </div>
       </div>
       <div class="pitch-item">
-        <div class="pip pip-pink"></div>
+        <div class="pip pip-amber"></div>
         <div>
           <strong>task</strong>
           <p>The model picks weak, medium, or strong for each subagent. Haiku-tier for grep-heavy research, opus-tier for architecture. Subagents can be read-only or have full tool access.</p>
         </div>
       </div>
       <div class="pitch-item">
-        <div class="pip pip-gold"></div>
+        <div class="pip pip-peach"></div>
         <div>
           <strong>Lean system prompt</strong>
-          <p>The system prompt, tool descriptions, and examples are short. When context gets too long, maki compacts history automatically: strips images, thinking blocks, and summarizes older turns.</p>
+          <p>The system prompt, tool descriptions, and examples are short. When context gets too long, makima compacts history automatically: strips images, thinking blocks, and summarizes older turns.</p>
         </div>
       </div>
       <div class="pitch-item">
-        <div class="pip pip-salmon"></div>
+        <div class="pip pip-rose"></div>
         <div>
           <strong><a href="/docs/mcp/#tool-search" target="_blank" rel="noopener">MCP tool_search</a></strong>
-          <p>Datadog's MCP server exposes over 100 tools with all toolsets on, and each definition sits in your context on every request, used or not. Maki hides them behind a single <code>tool_search</code> tool, so the model looks up what it needs and the rest never loads.</p>
+          <p>Datadog's MCP server exposes over 100 tools with all toolsets on, and each definition sits in your context on every request, used or not. makima hides them behind a single <code>tool_search</code> tool, so the model looks up what it needs and the rest never loads.</p>
         </div>
       </div>
     </div>
@@ -1393,39 +788,72 @@
       <h2><span>User experience</span>What you get</h2>
 
       <div class="pitch-item">
-        <div class="pip pip-salmon"></div>
+        <div class="pip pip-rose"></div>
         <div>
           <strong>Rust TUI, 60 FPS</strong>
           <p>Native binary. No javascript runtime, no react. Even the splash screen animation uses SIMD. Syntax highlighting runs on a background thread pool so it never blocks your input. Fits well on small laptop screens.</p>
         </div>
       </div>
       <div class="pitch-item">
-        <div class="pip pip-lavender"></div>
+        <div class="pip pip-red"></div>
         <div>
           <strong>Full visibility</strong>
           <p>Philosophy: don't hide anything. Token count, cost, and model are always in the status bar. Each subagent gets its own chat window you can flip through with <code>/tasks</code> (Ctrl-X). Ctrl-F for fuzzy search. <code>/btw</code> runs a side query without touching the current session. <code>!</code> runs shell commands, <code>!!</code> runs them silently.</p>
         </div>
       </div>
       <div class="pitch-item">
-        <div class="pip pip-gold"></div>
+        <div class="pip pip-amber"></div>
         <div>
           <strong>Sensible permissions</strong>
-          <p>Bash commands are parsed with tree-sitter so maki knows what's actually being run. <code>git diff && rm -rf /</code> correctly flags both <code>git</code> and <code>rm</code>. Most agents only see <code>git</code>. Handles subshells, command substitution, pipes. Per-tool allow/deny rules, or <code>--yolo</code> to skip it all. SSRF protection on webfetch.</p>
+          <p>Bash commands are parsed with tree-sitter so makima knows what's actually being run. <code>git diff &amp;&amp; rm -rf /</code> correctly flags both <code>git</code> and <code>rm</code>. Most agents only see <code>git</code>. Handles subshells, command substitution, pipes. Per-tool allow/deny rules, or <code>--yolo</code> to skip it all. SSRF protection on webfetch.</p>
         </div>
       </div>
       <div class="pitch-item">
-        <div class="pip pip-pink"></div>
+        <div class="pip pip-peach"></div>
         <div>
           <strong>Sessions, memory, MCP, ACP</strong>
-          <p>Sessions run in parallel: switch away and the agent keeps working, <code>/sessions</code> to jump back when it flashes done. Long-term memory that persists across sessions. Tell maki to remember something, sometimes it picks things up on its own. Double-Escape to rewind. Plan mode restricts the agent to read-only. MCP servers over stdio or HTTP. Skills. 26 themes. Paste images. <code>--print</code> for headless (output is Claude Code-compatible). <code>maki acp</code> runs an <a href="/docs/acp/">ACP</a> server for editors like <a href="https://zed.dev" target="_blank" rel="noopener">Zed</a>.</p>
+          <p>Sessions run in parallel: switch away and the agent keeps working, <code>/sessions</code> to jump back when it flashes done. Long-term memory that persists across sessions. Tell makima to remember something, sometimes it picks things up on its own. MCP servers over stdio or HTTP. Skills. 26 themes. Paste images. <code>--print</code> for headless (output is Claude Code-compatible). <code>makima acp</code> runs an <a href="/docs/acp/">ACP</a> server for editors like <a href="https://zed.dev" target="_blank" rel="noopener">Zed</a>.</p>
         </div>
       </div>
       <div class="pitch-item">
-        <div class="pip pip-salmon"></div>
+        <div class="pip pip-rose"></div>
         <div>
           <strong><a href="#lua">Lua plugins</a></strong>
-          <p>Extend maki in Lua with a Neovim-style plugin API. Every built-in tool is a Lua plugin, so anything maki does out of the box, your plugins can do too: add tools, slash commands, keymaps, and UI.</p>
+          <p>Extend makima in Lua with a Neovim-style plugin API. Every built-in tool is a Lua plugin, so anything makima does out of the box, your plugins can do too: add tools, slash commands, keymaps, and UI.</p>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="divider reveal"></div>
+
+  <div class="makima-adds reveal">
+    <h2><span>What makima adds</span>Different opinions, shipped</h2>
+    <p>Everything upstream maki does, plus the bits we wanted that weren't upstreamable.</p>
+    <div class="adds-grid">
+      <div class="adds-item">
+        <strong><code>/thinking</code> that saves</strong>
+        <p>Thinking is stored to disk and gets a UI with the Pi's 7-level effort system, so you can see and revisit what the model was chewing on.</p>
+      </div>
+      <div class="adds-item">
+        <strong>Plan mode + <code>plan_submit</code></strong>
+        <p>Plan mode inspired by polytoken, and a <code>plan_submit</code> tool so the model decides when it's time to stop planning and go for it.</p>
+      </div>
+      <div class="adds-item">
+        <strong>Async subagents you can talk to</strong>
+        <p>Subagents run in the background and you can message them mid-task. Full visibility of every subagent with <code>/tasks</code> (Ctrl-X); each gets its own chat window.</p>
+      </div>
+      <div class="adds-item">
+        <strong><code>/automode</code></strong>
+        <p>Claude Code-style automode when you want the agent to keep going without checking in.</p>
+      </div>
+      <div class="adds-item">
+        <strong>Misc UX fixes</strong>
+        <p><code>--append-system-prompt</code> works in TUI mode, <code>/login</code> has OpenAI Codex auth, Esc-Esc no longer wipes the todo UI, and the terminal bell rings when the agent wants input.</p>
+      </div>
+      <div class="adds-item">
+        <strong>Model control</strong>
+        <p>Mode overrides on top of plan mode, inspired by polytoken, give you per-mode model control without touching config files.</p>
       </div>
     </div>
   </div>
@@ -1478,7 +906,7 @@
       </div>
       <div class="index-divider"></div>
       <div class="index-pane">
-        <div class="index-pane-label">maki index main.rs</div>
+        <div class="index-pane-label">makima index main.rs</div>
         <pre><span class="sec">imports:</span> <span class="rng">[1-3]</span>
   clap::<span class="ty">Parser</span>, color_eyre::<span class="ty">Result</span>, std::fs
 
@@ -1556,7 +984,7 @@ imports = <span class="fn">set</span>()
     <div class="showcase-header">
       <span>See it in action</span>
       <h2>Lua plugins: hackable all the way down</h2>
-      <p>Every built-in tool, <code>read</code>, <code>bash</code>, <code>edit</code>, even <code>batch</code>, is itself a Lua plugin. Read them in <a href="https://github.com/tontinton/maki/tree/main/plugins" target="_blank" rel="noopener"><code>./plugins</code></a>. The <a href="/docs/lua-api/">API</a> mirrors Neovim (<code>maki.fs</code>, <code>maki.uv</code>, <code>maki.keymap</code>, <code>maki.treesitter</code>), so it feels familiar. Drop a file in <code>~/.config/maki/plugins/</code> to add tools, slash commands, keymaps, or UI.</p>
+      <p>Every built-in tool, <code>read</code>, <code>bash</code>, <code>edit</code>, even <code>batch</code>, is itself a Lua plugin. Read them in <a href="https://github.com/lun-4/makima/tree/mistress/plugins" target="_blank" rel="noopener"><code>./plugins</code></a>. The <a href="/docs/lua-api/">API</a> mirrors Neovim (<code>maki.fs</code>, <code>maki.uv</code>, <code>maki.keymap</code>, <code>maki.treesitter</code>), so it feels familiar. Drop a file in <code>~/.config/makima/plugins/</code> to add tools, slash commands, keymaps, or UI.</p>
     </div>
 
     <div class="exec-duo">
@@ -1611,85 +1039,43 @@ imports = <span class="fn">set</span>()
           <div class="tui-dot tui-dot-y"></div>
           <div class="tui-dot tui-dot-g"></div>
         </div>
-        <div class="tui-body">
-          <video class="doom-video" width="1920" height="970" muted loop playsinline preload="none" aria-label="maki running DOOM through a Lua plugin">
-            <source src="doom-av1.mp4" type="video/mp4; codecs=av01.0.04M.08">
-            <source src="doom.mp4" type="video/mp4">
-          </video>
-          <div class="player-controls">
-            <button class="player-btn doom-play-btn" aria-label="Play/Pause">
-              <svg viewBox="0 0 24 24" class="doom-play-icon"><path d="M8 5v14l11-7z"/></svg>
-              <svg viewBox="0 0 24 24" class="doom-pause-icon" style="display:none"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-            </button>
-            <div class="player-progress doom-progress">
-              <div class="player-progress-bar doom-progress-fill"></div>
-            </div>
-            <span class="player-time doom-time">0:00 / 0:00</span>
-          </div>
-        </div>
+        <video class="doom-video" width="1920" height="970" muted loop playsinline preload="none" aria-label="makima running DOOM through a Lua plugin">
+          <source src="doom-av1.mp4" type="video/mp4; codecs=av01.0.04M.08">
+          <source src="doom.mp4" type="video/mp4">
+        </video>
       </div>
     </div>
   </div>
 
   <div class="divider reveal"></div>
 
-</div>
-
-<div class="bottom-sky">
-  <div class="bottom-sky-bg">
-    <div class="bottom-stars">
-      <div class="bottom-star"></div><div class="bottom-star"></div><div class="bottom-star"></div>
-      <div class="bottom-star"></div><div class="bottom-star"></div><div class="bottom-star"></div>
-      <div class="bottom-star-diamond"></div><div class="bottom-star-diamond"></div>
+  <div class="providers-section">
+    <h2 class="reveal">Providers</h2>
+    <p class="reveal reveal-d1">Set an API key env var, or use <code>makima auth login openai</code> for OAuth.</p>
+    <div class="provider-grid">
+      <a href="/docs/providers/#anthropic" class="provider-chip">Anthropic</a>
+      <a href="/docs/providers/#openai" class="provider-chip">OpenAI</a>
+      <a href="/docs/providers/#xai" class="provider-chip">xAI</a>
+      <a href="/docs/providers/#google" class="provider-chip">Google</a>
+      <a href="/docs/providers/#copilot" class="provider-chip">Copilot</a>
+      <a href="/docs/providers/#ollama" class="provider-chip">Ollama</a>
+      <a href="/docs/providers/#llamacpp" class="provider-chip">llama.cpp</a>
+      <a href="/docs/providers/#mistral" class="provider-chip">Mistral</a>
+      <a href="/docs/providers/#z-ai" class="provider-chip">Z.AI</a>
+      <a href="/docs/providers/#deepseek" class="provider-chip">DeepSeek</a>
+      <a href="/docs/providers/#openrouter" class="provider-chip">OpenRouter</a>
+      <a href="/docs/providers/#synthetic" class="provider-chip">Synthetic</a>
+      <a href="/docs/providers/#tensorx" class="provider-chip">TensorX</a>
+      <a href="/docs/providers/#opencode-zen" class="provider-chip">OpenCode Zen</a>
+      <a href="/docs/providers/#opencode-go" class="provider-chip">OpenCode Go</a>
+      <a href="/docs/providers/#aperture" class="provider-chip">Aperture</a>
     </div>
-    <div class="bottom-moon"></div>
-
-    <div class="providers-section">
-      <h2 class="reveal">Providers</h2>
-      <p class="reveal reveal-d1">Set an API key env var, or use <code>maki auth login openai</code> for OAuth.</p>
-      <div class="provider-grid">
-        <a href="/docs/providers/#anthropic" class="provider-chip">Anthropic</a>
-        <a href="/docs/providers/#openai" class="provider-chip">OpenAI</a>
-        <a href="/docs/providers/#xai" class="provider-chip">xAI</a>
-        <a href="/docs/providers/#google" class="provider-chip">Google</a>
-        <a href="/docs/providers/#copilot" class="provider-chip">Copilot</a>
-        <a href="/docs/providers/#ollama" class="provider-chip">Ollama</a>
-        <a href="/docs/providers/#llamacpp" class="provider-chip">llama.cpp</a>
-        <a href="/docs/providers/#mistral" class="provider-chip">Mistral</a>
-        <a href="/docs/providers/#z-ai" class="provider-chip">Z.AI</a>
-        <a href="/docs/providers/#deepseek" class="provider-chip">DeepSeek</a>
-        <a href="/docs/providers/#openrouter" class="provider-chip">OpenRouter</a>
-        <a href="/docs/providers/#synthetic" class="provider-chip">Synthetic</a>
-        <a href="/docs/providers/#tensorx" class="provider-chip">TensorX</a>
-        <a href="/docs/providers/#opencode-zen" class="provider-chip">OpenCode Zen</a>
-        <a href="/docs/providers/#opencode-go" class="provider-chip">OpenCode Go</a>
-        <a href="/docs/providers/#aperture" class="provider-chip">Aperture</a>
-      </div>
-      <p class="provider-plus reveal reveal-d3">Anything that speaks the OpenAI or Anthropic API works too. Write a short <a href="https://github.com/tontinton/maki/tree/main/scripts/providers" target="_blank" rel="noopener">provider script</a>. OpenAI oauth example included.</p>
-    </div>
-
-    <div class="bottom-cloud-layer">
-      <div class="bottom-cloud-row bottom-cloud-back">
-        <svg class="cloud-svg" style="width:360px;bottom:0;left:2%" viewBox="0 0 360 100"><path d="M8 100 Q5 78 28 70 Q15 48 48 38 Q55 12 92 10 Q125 -5 158 10 Q185 0 212 15 Q238 5 262 22 Q288 12 310 32 Q335 20 340 52 Q358 65 340 82 Q350 98 330 100Z"/></svg>
-        <svg class="cloud-svg" style="width:300px;bottom:0;left:30%" viewBox="0 0 300 90"><path d="M5 90 Q0 70 22 62 Q12 42 42 34 Q48 10 80 8 Q108 -4 135 8 Q158 0 180 14 Q205 4 225 20 Q248 10 262 30 Q282 18 285 48 Q302 58 285 72 Q295 88 278 90Z"/></svg>
-        <svg class="cloud-svg" style="width:340px;bottom:0;right:2%" viewBox="0 0 340 95"><path d="M8 95 Q2 75 25 66 Q14 45 45 36 Q52 10 88 8 Q118 -4 150 8 Q178 -2 205 14 Q232 4 255 22 Q280 10 300 30 Q322 18 325 50 Q342 62 325 78 Q335 93 315 95Z"/></svg>
-      </div>
-      <div class="bottom-cloud-row bottom-cloud-mid">
-        <svg class="cloud-svg" style="width:400px;bottom:0;left:-1%" viewBox="0 0 400 95"><path d="M5 95 Q0 72 28 64 Q14 42 50 32 Q58 8 98 6 Q132 -6 168 8 Q198 -2 228 14 Q258 2 288 20 Q318 8 345 28 Q372 16 378 50 Q398 62 378 78 Q390 93 368 95Z"/></svg>
-        <svg class="cloud-svg" style="width:380px;bottom:0;left:25%" viewBox="0 0 380 90"><path d="M5 90 Q0 68 25 60 Q12 40 45 30 Q52 6 90 5 Q122 -5 155 8 Q182 -2 210 12 Q238 2 265 18 Q292 6 318 25 Q345 14 352 46 Q370 58 352 72 Q362 88 342 90Z"/></svg>
-        <svg class="cloud-svg" style="width:360px;bottom:0;right:-1%" viewBox="0 0 360 92"><path d="M5 92 Q0 70 24 62 Q12 42 44 32 Q50 8 85 6 Q115 -4 148 8 Q175 -2 202 14 Q230 2 255 20 Q282 8 305 28 Q330 16 335 48 Q355 60 335 76 Q345 90 325 92Z"/></svg>
-      </div>
-      <div class="bottom-cloud-row bottom-cloud-front">
-        <svg class="cloud-svg" style="width:440px;bottom:0;left:-2%" viewBox="0 0 440 100"><path d="M5 100 Q0 76 30 68 Q15 45 55 35 Q62 8 105 5 Q142 -8 180 8 Q212 -4 245 14 Q278 2 312 20 Q345 6 378 28 Q408 14 415 50 Q435 65 415 82 Q428 98 405 100Z"/></svg>
-        <svg class="cloud-svg" style="width:420px;bottom:0;left:22%" viewBox="0 0 420 95"><path d="M5 95 Q0 72 28 64 Q14 42 52 32 Q58 6 98 4 Q135 -6 170 8 Q200 -2 232 14 Q262 2 295 18 Q325 6 355 26 Q385 14 392 48 Q412 60 392 76 Q405 93 385 95Z"/></svg>
-        <svg class="cloud-svg" style="width:400px;bottom:0;right:-2%" viewBox="0 0 400 98"><path d="M5 98 Q0 75 26 66 Q14 44 48 34 Q55 8 92 5 Q128 -6 162 8 Q192 -2 222 14 Q252 2 282 20 Q312 8 342 28 Q370 16 375 50 Q395 62 375 78 Q388 96 365 98Z"/></svg>
-      </div>
-    </div>
-
-    <footer style="position:absolute;bottom:1rem;left:50%;transform:translateX(-50%);font-size:0.75rem;color:var(--text-secondary);">
-      Created by <a href="https://tontinton.com" target="_blank" rel="noopener" style="color:var(--deep-navy);text-decoration:underline;text-underline-offset:2px;">tontinton</a>.
-    </footer>
+    <p class="provider-plus reveal reveal-d3">Anything that speaks the OpenAI or Anthropic API works too. Write a short <a href="https://github.com/lun-4/makima/tree/mistress/scripts/providers" target="_blank" rel="noopener">provider script</a>. OpenAI oauth example included.</p>
   </div>
+
+  <footer>
+    <p>makima is a fork of <a href="https://github.com/tontinton/maki" target="_blank" rel="noopener">maki</a> by <a href="https://github.com/tontinton" target="_blank" rel="noopener">tontinton</a>, maintained at <a href="https://github.com/lun-4/makima" target="_blank" rel="noopener">lun-4/makima</a>.</p>
+  </footer>
 </div>
 
 <script>
@@ -1708,18 +1094,14 @@ imports = <span class="fn">set</span>()
     });
   }, { passive: true });
 
-  // hero entrance — add hidden state via JS, then animate in
-  // this prevents flicker on Firefox refresh (content visible by default in CSS)
   const hero = document.querySelector('.hero');
   hero.classList.add('hero-anim');
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       document.querySelector('.hero-intro').classList.add('entered');
-      document.querySelector('.hero-preview').classList.add('entered');
     });
   });
 
-  // scroll reveal for .reveal elements
   const revealObs = new IntersectionObserver((entries) => {
     entries.forEach(entry => {
       if (entry.isIntersecting) {
@@ -1730,7 +1112,6 @@ imports = <span class="fn">set</span>()
   }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
   document.querySelectorAll('.reveal').forEach(el => revealObs.observe(el));
 
-  // pitch items stagger on scroll
   const pitchObs = new IntersectionObserver((entries) => {
     entries.forEach(entry => {
       if (entry.isIntersecting) {
@@ -1744,7 +1125,6 @@ imports = <span class="fn">set</span>()
   }, { threshold: 0.15, rootMargin: '0px 0px -60px 0px' });
   document.querySelectorAll('.pitch-col').forEach(col => pitchObs.observe(col));
 
-  // provider chips stagger
   const chipObs = new IntersectionObserver((entries) => {
     entries.forEach(entry => {
       if (entry.isIntersecting) {
@@ -1757,15 +1137,13 @@ imports = <span class="fn">set</span>()
   }, { threshold: 0.2 });
   document.querySelectorAll('.provider-grid').forEach(g => chipObs.observe(g));
 
-  // copy toast
   function showCopyToast(el) {
     const toast = el.parentElement.querySelector('.copy-toast');
     toast.classList.add('show');
     setTimeout(() => toast.classList.remove('show'), 1200);
   }
 
-  // fetch github stars
-  fetch('https://api.github.com/repos/tontinton/maki', { headers: { Accept: 'application/vnd.github.v3+json' } })
+  fetch('https://api.github.com/repos/lun-4/makima', { headers: { Accept: 'application/vnd.github.v3+json' } })
     .then(r => r.json())
     .then(data => {
       if (!data.stargazers_count) return;
@@ -1782,228 +1160,14 @@ imports = <span class="fn">set</span>()
       });
     })
     .catch(() => {});
-</script>
-<script src="asciinema-player.min.js"></script>
-<script>
-  let player = AsciinemaPlayer.create('demo.cast', document.getElementById('demo-player'), {
-    autoPlay: true,
-    preload: true,
-    loop: true,
-    speed: 2.0,
-    idleTimeLimit: 2,
-    fit: false,
-    terminalFontSize: 'medium',
-    controls: false,
-    terminalFontFamily: "'JetBrains Mono', monospace",
-    theme: 'dracula',
-  });
-  let scaleTuiRaf = 0;
-  function scaleTui() {
-    if (scaleTuiRaf) return;
-    scaleTuiRaf = requestAnimationFrame(() => {
-      scaleTuiRaf = 0;
-      const tui = document.querySelector('.hero-preview .tui');
-      if (!tui) return;
-      const container = tui.parentElement;
-      const prevTransform = tui.style.transform;
-      tui.style.transform = 'none';
-      const naturalWidth = tui.offsetWidth;
-      const naturalHeight = tui.offsetHeight;
-      tui.style.transform = prevTransform;
-      const available = container.clientWidth;
-      if (naturalWidth > available) {
-        const s = available / naturalWidth;
-        tui.style.transform = `scale(${s})`;
-        container.style.height = (naturalHeight * s) + 'px';
-      } else {
-        tui.style.transform = '';
-        container.style.height = '';
-      }
-    });
-  }
-  window.addEventListener('resize', scaleTui, { passive: true });
-  new ResizeObserver(scaleTui).observe(document.querySelector('.hero-preview'));
-
-  player.addEventListener('play', () => {
-    const loader = document.getElementById('demo-loader');
-    if (loader) {
-      loader.classList.add('hidden');
-      setTimeout(() => loader.remove(), 300);
-    }
-    scaleTui();
-  });
-
-  // Player controls
-  const playBtn = document.getElementById('play-btn');
-  const playIcon = document.getElementById('play-icon');
-  const pauseIcon = document.getElementById('pause-icon');
-  const progressBar = document.getElementById('progress-bar');
-  const progressFill = document.getElementById('progress-fill');
-  const timeDisplay = document.getElementById('time-display');
-  let isPlaying = true;
-  let progressRaf = null;
-  let currentSpeed = 2.0;
-  let playerContainer = document.getElementById('demo-player');
-
-  function createPlayer(speed, autoPlay = true, startTime = 0) {
-    const container = playerContainer;
-    container.innerHTML = '';
-    const newPlayer = AsciinemaPlayer.create('demo.cast', container, {
-      autoPlay: autoPlay,
-      preload: true,
-      loop: true,
-      speed: speed,
-      idleTimeLimit: 2,
-      fit: false,
-      terminalFontSize: 'medium',
-      controls: false,
-      terminalFontFamily: "'JetBrains Mono', monospace",
-      theme: 'dracula',
-    });
-    if (startTime > 0) {
-      newPlayer.seek(startTime);
-    }
-    return newPlayer;
-  }
-
-  function formatTime(seconds) {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  }
-
-  function updateProgress() {
-    if (!player) return;
-    const current = player.getCurrentTime();
-    const duration = player.getDuration();
-    if (duration > 0) {
-      const pct = (current / duration) * 100;
-      progressFill.style.width = pct + '%';
-      timeDisplay.textContent = `${formatTime(current)} / ${formatTime(duration)}`;
-    }
-    if (isPlaying) {
-      progressRaf = requestAnimationFrame(updateProgress);
-    }
-  }
-
-  playBtn.addEventListener('click', () => {
-    if (isPlaying) {
-      player.pause();
-    } else {
-      player.play();
-    }
-  });
-
-  player.addEventListener('play', () => {
-    isPlaying = true;
-    playIcon.style.display = 'none';
-    pauseIcon.style.display = 'block';
-    progressRaf = requestAnimationFrame(updateProgress);
-  });
-
-  player.addEventListener('pause', () => {
-    isPlaying = false;
-    playIcon.style.display = 'block';
-    pauseIcon.style.display = 'none';
-    if (progressRaf) cancelAnimationFrame(progressRaf);
-  });
-
-  progressBar.addEventListener('click', (e) => {
-    const rect = progressBar.getBoundingClientRect();
-    const pct = (e.clientX - rect.left) / rect.width;
-    const duration = player.getDuration();
-    player.seek(duration * pct);
-  });
-
-  // Speed controls (YouTube-style popup)
-  const speedToggle = document.getElementById('speed-toggle');
-  const speedMenu = document.getElementById('speed-menu');
-  const speedOptions = document.querySelectorAll('.speed-option');
-
-  function closeSpeedMenu() {
-    speedMenu.classList.remove('open');
-    speedToggle.setAttribute('aria-expanded', 'false');
-  }
-
-  speedToggle.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const open = speedMenu.classList.toggle('open');
-    speedToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-  });
-
-  document.addEventListener('click', (e) => {
-    if (!speedMenu.contains(e.target) && e.target !== speedToggle) {
-      closeSpeedMenu();
-    }
-  });
-
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeSpeedMenu();
-  });
-
-  speedOptions.forEach(opt => {
-    opt.addEventListener('click', () => {
-      const speed = parseFloat(opt.dataset.speed);
-      const currentTime = player.getCurrentTime();
-      player.dispose();
-      currentSpeed = speed;
-      player = createPlayer(speed, true, currentTime);
-      speedOptions.forEach(o => o.classList.remove('active'));
-      opt.classList.add('active');
-      speedToggle.textContent = opt.textContent;
-      closeSpeedMenu();
-      player.addEventListener('play', () => {
-        isPlaying = true;
-        playIcon.style.display = 'none';
-        pauseIcon.style.display = 'block';
-        progressRaf = requestAnimationFrame(updateProgress);
-      });
-      player.addEventListener('pause', () => {
-        isPlaying = false;
-        playIcon.style.display = 'block';
-        pauseIcon.style.display = 'none';
-        if (progressRaf) cancelAnimationFrame(progressRaf);
-      });
-    });
-  });
-
-  document.getElementById('skip-hint-btn').addEventListener('click', () => {
-    player.seek(67);
-    player.play();
-  });
-
-  // Start progress updates
-  progressRaf = requestAnimationFrame(updateProgress);
 
   // DOOM demo player
   (() => {
     const demo = document.querySelector('.doom-demo');
     if (!demo) return;
     const video = demo.querySelector('.doom-video');
-    const dPlayIcon = demo.querySelector('.doom-play-icon');
-    const dPauseIcon = demo.querySelector('.doom-pause-icon');
-    const dProgress = demo.querySelector('.doom-progress');
-    const dFill = demo.querySelector('.doom-progress-fill');
-    const dTime = demo.querySelector('.doom-time');
     let userPaused = false;
-
-    function render() {
-      const d = video.duration || 0;
-      dFill.style.width = d ? (video.currentTime / d * 100) + '%' : '0%';
-      dTime.textContent = `${formatTime(video.currentTime)} / ${formatTime(d)}`;
-    }
-    video.addEventListener('timeupdate', render);
-    video.addEventListener('loadedmetadata', render);
-    video.addEventListener('play', () => {
-      dPlayIcon.style.display = 'none';
-      dPauseIcon.style.display = 'block';
-    });
-    video.addEventListener('pause', () => {
-      dPlayIcon.style.display = 'block';
-      dPauseIcon.style.display = 'none';
-    });
-
-    function toggle() {
+    video.addEventListener('click', () => {
       if (video.paused) {
         userPaused = false;
         video.play();
@@ -2011,17 +1175,7 @@ imports = <span class="fn">set</span>()
         userPaused = true;
         video.pause();
       }
-    }
-    demo.querySelector('.doom-play-btn').addEventListener('click', toggle);
-    video.addEventListener('click', toggle);
-
-    dProgress.addEventListener('click', (e) => {
-      const rect = dProgress.getBoundingClientRect();
-      const pct = (e.clientX - rect.left) / rect.width;
-      video.currentTime = pct * (video.duration || 0);
-      render();
     });
-
     new IntersectionObserver(([entry]) => {
       if (entry.isIntersecting) {
         if (!userPaused) video.play().catch(() => {});
@@ -2029,7 +1183,6 @@ imports = <span class="fn">set</span>()
         video.pause();
       }
     }, { threshold: 0.35 }).observe(video);
-
     window.addEventListener('load', () => {
       if (video.readyState === 0 && video.paused) {
         video.preload = 'auto';
