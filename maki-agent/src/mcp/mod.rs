@@ -720,6 +720,23 @@ pub async fn start_with_extra(
     cwd: &Path,
     extra: Vec<(String, RawTransport)>,
 ) -> (Option<McpHandle>, McpConfigErrors) {
+    start_with_extra_inner(cwd, extra, None).await
+}
+
+pub async fn start_with_extra_and_commands(
+    cwd: &Path,
+    extra: Vec<(String, RawTransport)>,
+    registry: CommandRegistry,
+    sink: Arc<dyn McpPromptSink>,
+) -> (Option<McpHandle>, McpConfigErrors) {
+    start_with_extra_inner(cwd, extra, Some((registry, sink))).await
+}
+
+async fn start_with_extra_inner(
+    cwd: &Path,
+    extra: Vec<(String, RawTransport)>,
+    commands: Option<(CommandRegistry, Arc<dyn McpPromptSink>)>,
+) -> (Option<McpHandle>, McpConfigErrors) {
     let owned_cwd = cwd.to_owned();
     let (mut config, config_errors) = smol::unblock(move || load_config(&owned_cwd)).await;
     for (name, transport) in extra {
@@ -732,7 +749,7 @@ pub async fn start_with_extra(
             }
         }
     }
-    (start_with_config(config), config_errors)
+    (start_with_config_inner(config, commands), config_errors)
 }
 
 pub fn start_with_config(config: McpConfig) -> Option<McpHandle> {

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use color_eyre::Result;
 use color_eyre::eyre::Context;
 
-use maki_agent::tools::ToolRegistry;
+use maki_agent::{command, tools::ToolRegistry};
 use maki_config::{load_env_files, load_permissions};
 use maki_lua::PluginHost;
 use maki_storage::StateDir;
@@ -26,8 +26,17 @@ pub fn run(
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
 
-    let mut plugin_host = PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), !no_jit)
-        .context("initialize lua plugin host")?;
+    let command_registry = maki_commands::CommandRegistry::new();
+    let command_dispatcher = maki_acp::commands::CommandDispatcher::new(
+        command_registry.clone(),
+        &command::discover_commands(&cwd),
+    );
+    let mut plugin_host = PluginHost::with_command_registry(
+        Arc::clone(ToolRegistry::global_arc()),
+        command_registry,
+        !no_jit,
+    )
+    .context("initialize lua plugin host")?;
 
     let raw_config = plugin_host
         .load_init_files_or_skip(no_plugins, &cwd)
@@ -78,5 +87,6 @@ pub fn run(
         append_system_prompt,
         model_policy: Arc::new(config.provider.model_policy.clone()),
         plugin_rules: plugin_host.plugin_rules(),
+        command_dispatcher,
     })
 }

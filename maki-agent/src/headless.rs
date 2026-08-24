@@ -24,9 +24,8 @@ use crate::tools::{
     DescriptionContext, FileReadTracker, LocalTools, ToolAudience, ToolFilter, ToolRegistry,
 };
 use crate::{
-    Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, Envelope,
-    EventSender, ImageSource, McpHandle, McpSession, PermissionsConfig, SessionMailbox, ToolOutput,
-    ToolOutputLines,
+    Agent, AgentConfig, AgentEvent, AgentInput, AgentParams, AgentRunParams, Envelope, EventSender,
+    McpHandle, McpSession, PermissionsConfig, SessionMailbox, ToolOutput, ToolOutputLines,
 };
 
 type StoredSession = Session<Message, TokenUsage, ToolOutput>;
@@ -76,8 +75,7 @@ pub struct HeadlessParams {
     pub config: AgentConfig,
     pub permissions_config: PermissionsConfig,
     pub timeouts: Timeouts,
-    pub prompt: String,
-    pub images: Vec<ImageSource>,
+    pub input: AgentInput,
     pub prompt_slots: ResolvedSlots,
     pub excluded_tools: Vec<&'static str>,
     pub mcp_handle: Option<McpHandle>,
@@ -88,6 +86,7 @@ pub struct HeadlessParams {
     pub append_system_prompt: Option<String>,
     pub model_policy: Arc<ModelPolicy>,
     pub plugin_rules: Arc<PluginRuleStore>,
+    pub modes: Arc<crate::ModeRegistry>,
 }
 
 pub struct HeadlessHandle {
@@ -159,7 +158,7 @@ fn advertised_tool_names(tools: &Value, mcp: Option<&McpSession>) -> Vec<String>
 
 pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
     let working_dir = params.initial_wd.to_string_lossy().into_owned();
-    let mode = AgentMode::Build;
+    let mode = params.input.mode.clone();
     let AgentSetup {
         vars,
         instructions,
@@ -171,11 +170,10 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
         params.workflow,
     );
 
-    let modes = crate::ModeRegistry::builtin();
     let mut system = params.system_prompt_override.clone().unwrap_or_else(|| {
         agent::build_system_prompt(
             &vars,
-            &modes,
+            &params.modes,
             &mode,
             &instructions.text,
             &params.prompt_slots,
@@ -196,8 +194,6 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
     let session_ref = SessionRef::from(session_id);
     let session_ref_clone = session_ref.clone();
     let mailbox = SessionMailbox::register(session_id);
-    let fast = params.fast;
-    let workflow = params.workflow;
     let task = smol::spawn({
         let mcp_shutdown = params.mcp_handle.clone();
         let working_dir_path = params.initial_wd.clone();
@@ -233,7 +229,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                     timeouts: params.timeouts,
                     file_tracker: FileReadTracker::fresh(),
                     prompt_slots: Arc::new(params.prompt_slots),
-                    modes: Arc::new(crate::ModeRegistry::builtin()),
+                    modes: Arc::clone(&params.modes),
                     subagent_cancels: Arc::new(CancelMap::new()),
                     registry: Arc::clone(ToolRegistry::global_arc()),
                     audience: ToolAudience::MAIN,
@@ -250,18 +246,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
             .with_loaded_instructions(instructions.loaded)
             .with_mcp(mcp);
 
-            let result = agent
-                .run(AgentInput {
-                    message: params.prompt,
-                    mode,
-                    images: params.images,
-                    preamble: Vec::new(),
-                    thinking: Default::default(),
-                    fast,
-                    workflow,
-                    prompt: None,
-                })
-                .await;
+            let result = agent.run(params.input).await;
             drop(agent);
 
             if let Err(e) = result {

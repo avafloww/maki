@@ -17,14 +17,20 @@ use std::time::Instant;
 use color_eyre::Result;
 use color_eyre::eyre::{Context, eyre};
 use flume::{Receiver, Sender};
+use maki_agent::command::{self, CustomCommand, PromptSink};
 use maki_agent::headless::{self, InteractiveHandle, InteractiveParams};
 use maki_agent::mcp;
 use maki_agent::permissions::{PermissionAnswer, PluginRuleStore};
 use maki_agent::prompt::ResolvedSlots;
 use maki_agent::tools::{QUESTION_TOOL_NAME, QuestionMode};
 use maki_agent::{
-    AgentConfig, AgentEvent, AgentInput, AgentMode, DoneReason, Envelope, PermissionsConfig,
-    ToolOutput,
+    AgentConfig, AgentEvent, AgentInput, AgentMode, DoneReason, Envelope, McpPromptRef,
+    McpPromptRequest, McpPromptSink, PermissionsConfig, ToolOutput,
+};
+use maki_commands::{
+    ArgumentArity, BUILTIN_COMMANDS, CommandBehavior, CommandClassification, CommandDocs,
+    CommandError, CommandFuture, CommandInvocation, CommandRegistry, CommandSpec, InputDispatch,
+    InvocationLifecycle, InvocationTargetId, ProducerId, ProducerPrecedence, Registration,
 };
 use maki_config::ModelPolicy;
 use maki_providers::model::Model;
@@ -451,6 +457,8 @@ pub struct SdkParams {
     pub workflow: bool,
     pub model_policy: Arc<ModelPolicy>,
     pub plugin_rules: Arc<PluginRuleStore>,
+    pub commands: Vec<CustomCommand>,
+    pub command_registry: CommandRegistry,
 }
 
 struct Shared {
@@ -458,6 +466,158 @@ struct Shared {
     permission_mode: PermissionMode,
     turn_start: Instant,
     pending: HashSet<String>,
+}
+
+struct CommandDriverParams {
+    route_rx: Receiver<CommandRoute>,
+    input_tx: Sender<AgentInput>,
+    model_tx: Sender<Model>,
+    shared: Arc<Mutex<Shared>>,
+    cwd: std::path::PathBuf,
+    startup_model: Model,
+    model_policy: Arc<ModelPolicy>,
+    fast: bool,
+    workflow: bool,
+}
+
+enum CommandRoute {
+    Agent {
+        message: String,
+        prompt: Option<Box<McpPromptRef>>,
+        lifecycle: InvocationLifecycle,
+    },
+    Model {
+        argument: String,
+        lifecycle: InvocationLifecycle,
+    },
+}
+
+#[derive(Clone)]
+struct PromptRouteSink {
+    tx: Sender<CommandRoute>,
+}
+
+impl PromptSink for PromptRouteSink {
+    fn submit(
+        &self,
+        prompt: String,
+        invocation: CommandInvocation,
+    ) -> CommandFuture<Result<(), CommandError>> {
+        let result = self.tx.send(CommandRoute::Agent {
+            message: prompt,
+            prompt: None,
+            lifecycle: invocation.lifecycle,
+        });
+        Box::pin(async move { result.map_err(|_| CommandError::StaleTarget) })
+    }
+}
+
+impl McpPromptSink for PromptRouteSink {
+    fn submit(
+        &self,
+        invocation: CommandInvocation,
+        prompt: McpPromptRequest,
+    ) -> CommandFuture<Result<(), CommandError>> {
+        let result = self.tx.send(CommandRoute::Agent {
+            message: prompt.display_text,
+            prompt: Some(Box::new(McpPromptRef {
+                qualified_name: prompt.qualified_name,
+                arguments: prompt.arguments,
+            })),
+            lifecycle: invocation.lifecycle,
+        });
+        Box::pin(async move { result.map_err(|_| CommandError::StaleTarget) })
+    }
+}
+
+struct BuiltinBehavior {
+    name: &'static str,
+    tx: Sender<CommandRoute>,
+}
+
+impl CommandBehavior for BuiltinBehavior {
+    fn execute(&self, invocation: CommandInvocation) -> CommandFuture<Result<(), CommandError>> {
+        if self.name == "/model" && !invocation.arguments.trim().is_empty() {
+            let result = self.tx.send(CommandRoute::Model {
+                argument: invocation.arguments.to_string(),
+                lifecycle: invocation.lifecycle,
+            });
+            return Box::pin(async move { result.map_err(|_| CommandError::StaleTarget) });
+        }
+        let error = CommandError::UnsupportedFrontend(Arc::from(self.name));
+        Box::pin(async move { Err(error) })
+    }
+}
+
+struct SdkCommands {
+    registry: CommandRegistry,
+    target: InvocationTargetId,
+    builtin_producer: ProducerId,
+    route_rx: Receiver<CommandRoute>,
+}
+
+impl SdkCommands {
+    fn new(
+        registry: CommandRegistry,
+        custom: &[CustomCommand],
+    ) -> Result<(Self, Arc<dyn McpPromptSink>)> {
+        let (route_tx, route_rx) = flume::unbounded();
+        let builtin = registry.create_producer(ProducerPrecedence::Builtin);
+        builtin.replace(
+            BUILTIN_COMMANDS
+                .iter()
+                .map(|command| Registration {
+                    spec: CommandSpec {
+                        name: Arc::from(command.name),
+                        aliases: command.aliases.iter().copied().map(Arc::from).collect(),
+                        arguments: if command.max_args == usize::MAX {
+                            ArgumentArity::unbounded(0)
+                        } else {
+                            ArgumentArity::bounded(0, command.max_args)
+                        },
+                        docs: CommandDocs {
+                            summary: Arc::from(command.description),
+                            argument_hint: (command.name == "/model").then(|| Arc::from("<model>")),
+                        },
+                    },
+                    behavior: Arc::new(BuiltinBehavior {
+                        name: command.name,
+                        tx: route_tx.clone(),
+                    }),
+                    completion: None,
+                })
+                .collect(),
+        )?;
+        let application = registry.create_producer(ProducerPrecedence::Application);
+        command::register_commands(
+            &application,
+            custom,
+            Arc::new(PromptRouteSink {
+                tx: route_tx.clone(),
+            }),
+        )?;
+        let sink = Arc::new(PromptRouteSink { tx: route_tx }) as Arc<dyn McpPromptSink>;
+        Ok((
+            Self {
+                target: registry.create_target(),
+                registry,
+                builtin_producer: builtin.id(),
+                route_rx,
+            },
+            sink,
+        ))
+    }
+
+    fn projection(&self) -> Vec<Value> {
+        projected_commands(&self.registry, self.builtin_producer)
+    }
+
+    fn slash_commands(&self) -> Vec<String> {
+        self.projection()
+            .into_iter()
+            .filter_map(|command| command["name"].as_str().map(str::to_owned))
+            .collect()
+    }
 }
 
 pub fn run(params: SdkParams) -> Result<()> {
@@ -472,6 +632,8 @@ pub fn run(params: SdkParams) -> Result<()> {
         workflow,
         model_policy,
         plugin_rules,
+        commands,
+        command_registry,
     } = params;
     cli.warn_ignored_flags();
     if let Some(max) = cli.max_turns {
@@ -483,7 +645,15 @@ pub fn run(params: SdkParams) -> Result<()> {
     let working_dir = cwd.to_string_lossy().into_owned();
     let (session_id, initial_history) = resolve_session(&cli, &working_dir)?;
 
-    let (mcp_handle, mcp_config_errors) = smol::block_on(mcp::start_connected(&cwd));
+    let (sdk_commands, mcp_prompt_sink) = SdkCommands::new(command_registry, &commands)?;
+    let (mcp_handle, mcp_config_errors) = smol::block_on(async {
+        let (handle, errors) =
+            mcp::start_with_commands(&cwd, sdk_commands.registry.clone(), mcp_prompt_sink).await;
+        if let Some(handle) = &handle {
+            handle.ready().await;
+        }
+        (handle, errors)
+    });
     if !mcp_config_errors.is_empty() {
         eprintln!("MCP config error: {mcp_config_errors}");
     }
@@ -539,10 +709,16 @@ pub fn run(params: SdkParams) -> Result<()> {
             "permissionMode": permission_mode.as_str(),
             "apiKeySource": "none",
             "mcp_servers": [],
-            "slash_commands": [],
+            "slash_commands": sdk_commands.slash_commands(),
             "output_style": "default",
         }),
     )?;
+    let projection_watcher = watch_command_projection(
+        writer.clone(),
+        sdk_commands.registry.clone(),
+        sdk_commands.builtin_producer,
+        sdk_commands.registry.snapshot().generation(),
+    );
 
     let shared = Arc::new(Mutex::new(Shared {
         model: startup_model.clone(),
@@ -563,93 +739,142 @@ pub fn run(params: SdkParams) -> Result<()> {
         request_counter: 0,
     }
     .spawn(handle.event_rx.clone());
+    let command_driver = spawn_command_driver(CommandDriverParams {
+        route_rx: sdk_commands.route_rx.clone(),
+        input_tx: handle.input_tx.clone(),
+        model_tx: handle.model_tx.clone(),
+        shared: Arc::clone(&shared),
+        cwd: cwd.clone(),
+        startup_model: startup_model.clone(),
+        model_policy: Arc::clone(&model_policy),
+        fast,
+        workflow,
+    });
 
-    for line in io::stdin().lock().lines() {
-        let line = line.context("read stdin")?;
-        if line.is_empty() {
-            continue;
-        }
-
-        let msg: InboundMessage = match serde_json::from_str(&line) {
-            Ok(msg) => msg,
-            Err(e) => {
-                eprintln!("warning: ignoring malformed input line: {e}");
+    let input_result = (|| -> Result<()> {
+        for line in io::stdin().lock().lines() {
+            let line = line.context("read stdin")?;
+            if line.is_empty() {
                 continue;
             }
-        };
 
-        match msg.msg_type.as_str() {
-            "user" => {
-                let Some(user) = parse_or_warn::<InboundUser>(msg.payload, "user message") else {
+            let msg: InboundMessage = match serde_json::from_str(&line) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    eprintln!("warning: ignoring malformed input line: {e}");
                     continue;
-                };
-                let content = user.message.content;
-                let prompt = content_text(&content).unwrap_or_else(|| content.to_string());
-                let images = content_images(&content);
-                let mode = {
-                    let mut shared = shared.lock().unwrap();
-                    shared.turn_start = Instant::now();
-                    shared.permission_mode
-                };
-                let input = AgentInput {
-                    message: prompt,
-                    mode: mode.agent_mode(&cwd),
-                    images,
-                    preamble: Vec::new(),
-                    thinking: Default::default(),
-                    fast,
-                    workflow,
-                    prompt: None,
-                };
-                if handle.input_tx.send(input).is_err() {
-                    break;
                 }
-            }
-            "control_request" => {
-                let Some(cr) =
-                    parse_or_warn::<InboundControlRequest>(msg.payload, "control_request")
-                else {
-                    continue;
-                };
-                handle_control_request(
-                    &cr,
-                    &writer,
-                    &handle,
-                    &shared,
-                    &startup_model,
-                    &model_policy,
-                )?;
-            }
-            "control_response" => {
-                let Some(cr) =
-                    parse_or_warn::<InboundControlResponse>(msg.payload, "control_response")
-                else {
-                    continue;
-                };
-                let data = cr.response;
-                if let Some(req_id) = data.get("request_id").and_then(Value::as_str)
-                    && shared.lock().unwrap().pending.remove(req_id)
-                {
-                    let _ = handle
-                        .answer_tx
-                        .send(decode_permission_response(&data).encode());
+            };
+
+            match msg.msg_type.as_str() {
+                "user" => {
+                    let Some(user) = parse_or_warn::<InboundUser>(msg.payload, "user message")
+                    else {
+                        continue;
+                    };
+                    let content = user.message.content;
+                    let prompt = content_text(&content).unwrap_or_else(|| content.to_string());
+                    let images = content_images(&content);
+                    let mode = {
+                        let mut shared = shared.lock().unwrap();
+                        shared.turn_start = Instant::now();
+                        shared.permission_mode
+                    };
+                    if known_command_with_images(&sdk_commands.registry, &prompt, &images) {
+                        emit_command_result(
+                            &writer,
+                            &shared,
+                            true,
+                            "slash commands cannot include images".to_string(),
+                        )?;
+                        continue;
+                    }
+                    match smol::block_on(sdk_commands.registry.dispatch_input(
+                        &prompt,
+                        0,
+                        sdk_commands.target,
+                    )) {
+                        Ok(InputDispatch::Dispatched(dispatch)) => {
+                            match smol::block_on(dispatch.classification()) {
+                                CommandClassification::AgentTurnAccepted => {}
+                                CommandClassification::Completed => {
+                                    emit_command_result(&writer, &shared, false, String::new())?
+                                }
+                                CommandClassification::Failed(error) => {
+                                    emit_command_result(&writer, &shared, true, error.to_string())?
+                                }
+                            }
+                        }
+                        Ok(InputDispatch::NotCommand | InputDispatch::UnknownCommandInput) => {
+                            let input = AgentInput {
+                                message: prompt,
+                                mode: mode.agent_mode(&cwd),
+                                images,
+                                preamble: Vec::new(),
+                                thinking: Default::default(),
+                                fast,
+                                workflow,
+                                prompt: None,
+                            };
+                            if handle.input_tx.send(input).is_err() {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            emit_command_result(&writer, &shared, true, error.to_string())?
+                        }
+                    }
                 }
-            }
-            "control_cancel_request" => {
-                let Some(ccr) = parse_or_warn::<InboundControlCancelRequest>(
-                    msg.payload,
-                    "control_cancel_request",
-                ) else {
-                    continue;
-                };
-                if shared.lock().unwrap().pending.remove(&ccr.request_id) {
-                    let _ = handle.answer_tx.send(PermissionAnswer::Deny.encode());
+                "control_request" => {
+                    let Some(cr) =
+                        parse_or_warn::<InboundControlRequest>(msg.payload, "control_request")
+                    else {
+                        continue;
+                    };
+                    handle_control_request(
+                        &cr,
+                        &writer,
+                        &handle,
+                        &shared,
+                        &startup_model,
+                        &model_policy,
+                        &sdk_commands,
+                    )?;
                 }
+                "control_response" => {
+                    let Some(cr) =
+                        parse_or_warn::<InboundControlResponse>(msg.payload, "control_response")
+                    else {
+                        continue;
+                    };
+                    let data = cr.response;
+                    if let Some(req_id) = data.get("request_id").and_then(Value::as_str)
+                        && shared.lock().unwrap().pending.remove(req_id)
+                    {
+                        let _ = handle
+                            .answer_tx
+                            .send(decode_permission_response(&data).encode());
+                    }
+                }
+                "control_cancel_request" => {
+                    let Some(ccr) = parse_or_warn::<InboundControlCancelRequest>(
+                        msg.payload,
+                        "control_cancel_request",
+                    ) else {
+                        continue;
+                    };
+                    if shared.lock().unwrap().pending.remove(&ccr.request_id) {
+                        let _ = handle.answer_tx.send(PermissionAnswer::Deny.encode());
+                    }
+                }
+                other => warn!("unknown inbound message type: {other}"),
             }
-            other => warn!("unknown inbound message type: {other}"),
         }
-    }
+        Ok(())
+    })();
 
+    drop(sdk_commands);
+    smol::block_on(stop_sdk_tasks(projection_watcher, command_driver));
     let InteractiveHandle { input_tx, task, .. } = handle;
     drop(input_tx);
     smol::block_on(async {
@@ -658,7 +883,149 @@ pub fn run(params: SdkParams) -> Result<()> {
     });
     drop(writer);
     let _ = writer_thread.join();
-    Ok(())
+    input_result
+}
+
+fn projected_commands(registry: &CommandRegistry, builtin_producer: ProducerId) -> Vec<Value> {
+    registry
+        .snapshot()
+        .commands()
+        .iter()
+        .filter(|command| {
+            command.producer_id() != builtin_producer || command.spec().name.as_ref() == "/model"
+        })
+        .map(|command| {
+            serde_json::json!({
+                "name": command.spec().name.trim_start_matches('/'),
+                "description": command.spec().docs.summary,
+                "argumentHint": command.spec().docs.argument_hint.as_deref().unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+fn watch_command_projection(
+    writer: SdkWriter,
+    registry: CommandRegistry,
+    builtin_producer: ProducerId,
+    mut generation: u64,
+) -> smol::Task<()> {
+    smol::spawn(async move {
+        loop {
+            smol::Timer::after(std::time::Duration::from_millis(50)).await;
+            let snapshot = registry.snapshot();
+            if snapshot.generation() != generation {
+                generation = snapshot.generation();
+                let commands = projected_commands(&registry, builtin_producer);
+                if writer
+                    .emit_system(
+                        "commands_update",
+                        serde_json::json!({
+                            "commands": commands,
+                            "slash_commands": projected_commands(&registry, builtin_producer)
+                                .into_iter()
+                                .filter_map(|command| command["name"].as_str().map(str::to_owned))
+                                .collect::<Vec<_>>(),
+                        }),
+                    )
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+    })
+}
+
+async fn stop_sdk_tasks(projection_watcher: smol::Task<()>, command_driver: smol::Task<()>) {
+    projection_watcher.cancel().await;
+    command_driver.cancel().await;
+}
+
+fn spawn_command_driver(params: CommandDriverParams) -> smol::Task<()> {
+    smol::spawn(async move {
+        let CommandDriverParams {
+            route_rx,
+            input_tx,
+            model_tx,
+            shared,
+            cwd,
+            startup_model,
+            model_policy,
+            fast,
+            workflow,
+        } = params;
+        while let Ok(route) = route_rx.recv_async().await {
+            match route {
+                CommandRoute::Agent {
+                    message,
+                    prompt,
+                    lifecycle,
+                } => {
+                    let mode = shared.lock().unwrap().permission_mode;
+                    let input = AgentInput {
+                        message,
+                        mode: mode.agent_mode(&cwd),
+                        images: Vec::new(),
+                        preamble: Vec::new(),
+                        thinking: Default::default(),
+                        fast,
+                        workflow,
+                        prompt,
+                    };
+                    let classification = if input_tx.send(input).is_ok() {
+                        CommandClassification::AgentTurnAccepted
+                    } else {
+                        CommandClassification::Failed(CommandError::StaleTarget)
+                    };
+                    lifecycle.transition(classification);
+                }
+                CommandRoute::Model {
+                    argument,
+                    lifecycle,
+                } => {
+                    let classification = match resolve_set_model(
+                        Some(&Value::String(argument)),
+                        &startup_model,
+                        &model_policy,
+                    ) {
+                        Some(model) if model_tx.send(model.clone()).is_ok() => {
+                            shared.lock().unwrap().model = model;
+                            CommandClassification::Completed
+                        }
+                        Some(_) => CommandClassification::Failed(CommandError::StaleTarget),
+                        None => CommandClassification::Failed(CommandError::Producer(Arc::from(
+                            "invalid or disallowed model",
+                        ))),
+                    };
+                    lifecycle.transition(classification);
+                }
+            }
+        }
+    })
+}
+
+fn emit_command_result(
+    writer: &SdkWriter,
+    shared: &Mutex<Shared>,
+    is_error: bool,
+    result: String,
+) -> Result<()> {
+    writer.emit(WireInner::Result(ResultPayload {
+        subtype: if is_error {
+            "error_during_execution"
+        } else {
+            "success"
+        },
+        is_error,
+        duration_ms: shared.lock().unwrap().turn_start.elapsed().as_millis(),
+        duration_api_ms: 0,
+        num_turns: 0,
+        result,
+        total_cost_usd: 0.0,
+        usage: TokenUsage::default(),
+        permission_denials: Vec::new(),
+    }))
 }
 
 type StoredSession = Session<Message, TokenUsage, ToolOutput>;
@@ -727,6 +1094,19 @@ fn content_text(content: &Value) -> Option<String> {
 // Claude Code stream-json block shape:
 // {"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}}
 // `source` deserializes straight into ImageSource; malformed blocks are skipped.
+fn known_command_with_images(
+    registry: &CommandRegistry,
+    prompt: &str,
+    images: &[ImageSource],
+) -> bool {
+    !images.is_empty()
+        && prompt
+            .split_whitespace()
+            .next()
+            .filter(|name| name.starts_with('/'))
+            .is_some_and(|name| registry.resolve(name).is_ok())
+}
+
 fn content_images(content: &Value) -> Vec<ImageSource> {
     let Value::Array(blocks) = content else {
         return Vec::new();
@@ -745,6 +1125,7 @@ fn handle_control_request(
     shared: &Mutex<Shared>,
     startup_model: &Model,
     model_policy: &ModelPolicy,
+    commands: &SdkCommands,
 ) -> Result<()> {
     let ok = Some(Value::Object(Default::default()));
     match cr.request.subtype.as_str() {
@@ -756,7 +1137,7 @@ fn handle_control_request(
             }
             writer.emit_control_response(
                 &cr.request_id,
-                Some(serde_json::json!({"commands": []})),
+                Some(serde_json::json!({"commands": commands.projection()})),
                 None,
             )
         }
@@ -1095,12 +1476,287 @@ mod tests {
     use super::*;
     use test_case::test_case;
 
+    struct ClassifiedBehavior(CommandClassification);
+
+    impl CommandBehavior for ClassifiedBehavior {
+        fn execute(
+            &self,
+            invocation: CommandInvocation,
+        ) -> CommandFuture<Result<(), CommandError>> {
+            let classification = self.0.clone();
+            Box::pin(async move {
+                invocation.lifecycle.transition(classification);
+                Ok(())
+            })
+        }
+    }
+
+    fn registration(name: &str, classification: CommandClassification) -> Registration {
+        Registration {
+            spec: CommandSpec {
+                name: Arc::from(name),
+                aliases: Arc::from([]),
+                arguments: ArgumentArity::ANY,
+                docs: CommandDocs {
+                    summary: Arc::from(format!("{name} description")),
+                    argument_hint: Some(Arc::from("<arg>")),
+                },
+            },
+            behavior: Arc::new(ClassifiedBehavior(classification)),
+            completion: None,
+        }
+    }
+
     fn claude_to_maki_tool_name(name: &str) -> &str {
         TOOL_NAME_MAP
             .iter()
             .find(|(_, c)| *c == name)
             .map(|(m, _)| *m)
             .unwrap_or(name)
+    }
+
+    #[test]
+    fn sdk_commands_projection_includes_shared_producers_and_supported_model_only() {
+        let registry = CommandRegistry::new();
+        let plugin = registry.create_producer(ProducerPrecedence::Plugin);
+        plugin
+            .replace(vec![registration("/lua", CommandClassification::Completed)])
+            .unwrap();
+        let mcp = registry.create_producer(ProducerPrecedence::Mcp);
+        mcp.replace(vec![registration(
+            "/mcp:prompt",
+            CommandClassification::Completed,
+        )])
+        .unwrap();
+        let (commands, _) = SdkCommands::new(registry, &[]).unwrap();
+
+        assert_eq!(commands.slash_commands(), ["lua", "mcp:prompt", "model"]);
+        let projection = commands.projection();
+        assert_eq!(projection[0]["description"], "/lua description");
+        assert_eq!(projection[0]["argumentHint"], "<arg>");
+    }
+
+    #[test]
+    fn sdk_known_command_with_images_is_rejected_before_dispatch() {
+        let registry = CommandRegistry::new();
+        let plugin = registry.create_producer(ProducerPrecedence::Plugin);
+        plugin
+            .replace(vec![registration(
+                "/inspect",
+                CommandClassification::Completed,
+            )])
+            .unwrap();
+        let images = vec![ImageSource::new(
+            maki_providers::ImageMediaType::Png,
+            Arc::from("AAAA"),
+        )];
+
+        assert!(known_command_with_images(
+            &registry,
+            "/inspect now",
+            &images
+        ));
+        assert!(!known_command_with_images(
+            &registry,
+            "/unknown literal",
+            &images
+        ));
+        assert!(!known_command_with_images(&registry, "/inspect now", &[]));
+    }
+
+    #[test]
+    fn sdk_command_projection_update_uses_system_control_shape() {
+        let registry = CommandRegistry::new();
+        let builtin = registry.create_producer(ProducerPrecedence::Builtin);
+        let (out_tx, out_rx) = flume::unbounded();
+        let writer = SdkWriter {
+            session_id: SessionRef::from(maki_storage::id::MakiId::generate()),
+            out_tx,
+        };
+        let generation = registry.snapshot().generation();
+        let task = watch_command_projection(writer, registry.clone(), builtin.id(), generation);
+        let plugin = registry.create_producer(ProducerPrecedence::Plugin);
+        plugin
+            .replace(vec![registration(
+                "/dynamic",
+                CommandClassification::Completed,
+            )])
+            .unwrap();
+
+        let line = out_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let update: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(update["type"], "system");
+        assert_eq!(update["subtype"], "commands_update");
+        assert_eq!(update["commands"][0]["name"], "dynamic");
+        assert_eq!(update["slash_commands"][0], "dynamic");
+        smol::block_on(task.cancel());
+    }
+
+    #[test]
+    fn sdk_eof_shutdown_joins_background_tasks_and_closes_channels() {
+        let registry = CommandRegistry::new();
+        let (commands, prompt_sink) = SdkCommands::new(registry, &[]).unwrap();
+        let (out_tx, out_rx) = flume::unbounded();
+        let writer = SdkWriter {
+            session_id: SessionRef::from(maki_storage::id::MakiId::generate()),
+            out_tx,
+        };
+        let projection_watcher = watch_command_projection(
+            writer,
+            commands.registry.clone(),
+            commands.builtin_producer,
+            commands.registry.snapshot().generation(),
+        );
+        let (input_tx, input_rx) = flume::unbounded();
+        let (model_tx, _model_rx) = flume::unbounded();
+        let startup_model = Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap();
+        let shared = Arc::new(Mutex::new(Shared {
+            model: startup_model.clone(),
+            permission_mode: PermissionMode::Default,
+            turn_start: Instant::now(),
+            pending: HashSet::new(),
+        }));
+        let command_driver = spawn_command_driver(CommandDriverParams {
+            route_rx: commands.route_rx.clone(),
+            input_tx,
+            model_tx,
+            shared,
+            cwd: Path::new("/tmp").to_owned(),
+            startup_model,
+            model_policy: Arc::new(ModelPolicy::default()),
+            fast: false,
+            workflow: false,
+        });
+        drop(commands);
+        drop(prompt_sink);
+
+        let (shutdown_tx, shutdown_rx) = flume::bounded(1);
+        let shutdown_thread = std::thread::spawn(move || {
+            smol::block_on(stop_sdk_tasks(projection_watcher, command_driver));
+            shutdown_tx.send(()).unwrap();
+        });
+        shutdown_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("SDK background tasks did not terminate");
+        shutdown_thread.join().unwrap();
+
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(flume::TryRecvError::Disconnected)
+        ));
+        assert!(matches!(
+            out_rx.try_recv(),
+            Err(flume::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn sdk_dispatch_classifies_known_and_preserves_unknown_slash_input() {
+        let registry = CommandRegistry::new();
+        let plugin = registry.create_producer(ProducerPrecedence::Plugin);
+        plugin
+            .replace(vec![registration(
+                "/done",
+                CommandClassification::Completed,
+            )])
+            .unwrap();
+        let target = registry.create_target();
+
+        let known = smol::block_on(registry.dispatch_input("/done now", 0, target)).unwrap();
+        let InputDispatch::Dispatched(dispatch) = known else {
+            panic!("known command was not dispatched");
+        };
+        assert_eq!(
+            smol::block_on(dispatch.classification()),
+            CommandClassification::Completed
+        );
+        assert!(matches!(
+            smol::block_on(registry.dispatch_input("/unknown literal", 0, target)).unwrap(),
+            InputDispatch::UnknownCommandInput
+        ));
+        assert!(matches!(
+            smol::block_on(registry.dispatch_input("ordinary literal", 0, target)).unwrap(),
+            InputDispatch::NotCommand
+        ));
+    }
+
+    #[test]
+    fn sdk_custom_command_drives_agent_turn_and_model_command_completes() {
+        let registry = CommandRegistry::new();
+        let custom = CustomCommand {
+            name: "review".into(),
+            description: "Review code".into(),
+            content: "Review $ARGUMENTS".into(),
+            scope: command::CommandScope::Project,
+            accepts_args: true,
+        };
+        let (commands, _) = SdkCommands::new(registry, &[custom]).unwrap();
+        let (input_tx, input_rx) = flume::unbounded();
+        let (model_tx, model_rx) = flume::unbounded();
+        let startup_model = Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap();
+        let shared = Arc::new(Mutex::new(Shared {
+            model: startup_model.clone(),
+            permission_mode: PermissionMode::Default,
+            turn_start: Instant::now(),
+            pending: HashSet::new(),
+        }));
+        let driver = spawn_command_driver(CommandDriverParams {
+            route_rx: commands.route_rx.clone(),
+            input_tx,
+            model_tx,
+            shared: Arc::clone(&shared),
+            cwd: Path::new("/tmp").to_owned(),
+            startup_model,
+            model_policy: Arc::new(ModelPolicy::default()),
+            fast: false,
+            workflow: false,
+        });
+
+        let custom = smol::block_on(commands.registry.dispatch_input(
+            "/project:review src/lib.rs",
+            0,
+            commands.target,
+        ))
+        .unwrap();
+        let InputDispatch::Dispatched(custom) = custom else {
+            panic!("custom command was not dispatched");
+        };
+        assert_eq!(
+            smol::block_on(custom.classification()),
+            CommandClassification::AgentTurnAccepted
+        );
+        assert_eq!(input_rx.recv().unwrap().message, "Review src/lib.rs");
+
+        let model = smol::block_on(commands.registry.dispatch_input(
+            "/model anthropic/claude-opus-4-6",
+            0,
+            commands.target,
+        ))
+        .unwrap();
+        let InputDispatch::Dispatched(model) = model else {
+            panic!("model command was not dispatched");
+        };
+        assert_eq!(
+            smol::block_on(model.classification()),
+            CommandClassification::Completed
+        );
+        assert_eq!(model_rx.recv().unwrap().spec(), "anthropic/claude-opus-4-6");
+        drop(commands);
+        smol::block_on(driver);
+    }
+
+    #[test]
+    fn sdk_unsupported_builtin_returns_frontend_error() {
+        let (commands, _) = SdkCommands::new(CommandRegistry::new(), &[]).unwrap();
+        let error = smol::block_on(
+            commands
+                .registry
+                .dispatch_input("/help", 0, commands.target),
+        )
+        .unwrap_err();
+        assert_eq!(error, CommandError::UnsupportedFrontend(Arc::from("/help")));
     }
 
     #[test_case("bash", "Bash")]

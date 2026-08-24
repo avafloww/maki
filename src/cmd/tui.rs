@@ -264,6 +264,8 @@ pub fn run(mut cli: Cli) -> Result<()> {
             workflow: stack.config.always_workflow,
             model_policy: Arc::new(stack.config.provider.model_policy.clone()),
             plugin_rules: stack.plugin_host.plugin_rules(),
+            commands: stack.commands,
+            command_registry: stack.plugin_host.command_registry(),
         })
         .context("run sdk mode")?;
         return Ok(());
@@ -287,6 +289,9 @@ pub fn run(mut cli: Cli) -> Result<()> {
             cli.system_prompt,
             cli.append_system_prompt,
             stack.plugin_host.plugin_rules(),
+            &stack.commands,
+            stack.plugin_host.command_registry(),
+            stack.plugin_host.mode_registry(),
         )
         .context("run print mode")?;
         return Ok(());

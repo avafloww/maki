@@ -6,14 +6,15 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol_schema::{
-    AgentNotification, AgentRequest, AgentResponse, ConfigOptionUpdate, ContentBlock,
-    CreateElicitationResponse, CurrentModeUpdate, EmbeddedResourceResource, Error as AcpError,
-    ImageContent, InitializeRequest, JsonRpcMessage, LoadSessionRequest, McpServer,
-    NewSessionRequest, Notification, PromptRequest, PromptResponse, Request, RequestId,
-    RequestPermissionRequest, RequestPermissionResponse, Response, SessionId, SessionModeId,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, StopReason,
-    TextContent, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+    AgentNotification, AgentRequest, AgentResponse, AvailableCommand, AvailableCommandInput,
+    AvailableCommandsUpdate, ConfigOptionUpdate, ContentBlock, CreateElicitationResponse,
+    CurrentModeUpdate, EmbeddedResourceResource, Error as AcpError, ImageContent,
+    InitializeRequest, JsonRpcMessage, LoadSessionRequest, McpServer, NewSessionRequest,
+    Notification, PromptRequest, PromptResponse, Request, RequestId, RequestPermissionRequest,
+    RequestPermissionResponse, Response, SessionId, SessionModeId, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+    SetSessionModeRequest, SetSessionModeResponse, StopReason, TextContent, ToolCallId,
+    ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput,
 };
 use flume::{Receiver, Sender, WeakSender};
 use maki_agent::headless::{self, InteractiveHandle, InteractiveParams};
@@ -23,6 +24,7 @@ use maki_agent::permissions::PermissionAnswer;
 use maki_agent::tools::QuestionMode;
 use maki_agent::types::AgentEvent;
 use maki_agent::{AgentInput, AgentMode, Envelope, ImageMediaType, ImageSource};
+use maki_commands::{CommandClassification, InputDispatch, ProducerId, RegistrySnapshot};
 use maki_config::{MAX_SERVER_NAME_LEN, ModelPolicy};
 use maki_providers::model::Model;
 use maki_providers::provider::{available_model_specs, fetch_all_models};
@@ -34,7 +36,11 @@ use serde_json::Value;
 use smol::io::AsyncBufReadExt;
 use tracing::{debug, warn};
 
-use crate::{AcpParams, methods, permissions, translate};
+use crate::{
+    AcpParams,
+    commands::{self, CommandRoute, RoutedCommand},
+    methods, permissions, translate,
+};
 
 const FIRST_OUTGOING_REQUEST_ID: i64 = 1000;
 const RESTORED_FAST: bool = false;
@@ -60,6 +66,9 @@ struct SessionState {
     current_mode: AgentMode,
     current_model: String,
     pending: PendingState,
+    command_registry: maki_commands::CommandRegistry,
+    command_mailbox: commands::CommandMailbox,
+    command_projection_task: smol::Task<()>,
 }
 
 struct Server {
@@ -221,7 +230,7 @@ async fn handle_request(
         }
         "session/new" => new_session(srv, raw, params).await,
         "session/load" => load_session(srv, raw, params).await,
-        "session/prompt" => match handle_prompt(srv, raw, &id) {
+        "session/prompt" => match handle_prompt(srv, raw, &id).await {
             Ok(()) => return,
             Err(e) => Err(e),
         },
@@ -240,7 +249,7 @@ async fn new_session(
     let req: NewSessionRequest = parse_params(raw)?;
     close_session(srv).await;
     let cwd = req.cwd.clone();
-    let mcp = start_mcp(&req.cwd, &req.mcp_servers).await;
+    let mcp = start_mcp(&req.cwd, &req.mcp_servers, params).await;
     let handle = spawn_session(
         params,
         req.cwd,
@@ -252,7 +261,7 @@ async fn new_session(
     let spec = params.model.spec();
     let resp = methods::new_session_response(handle.session_id.as_str(), &srv.modes)
         .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
-    install_session(srv, handle, mcp, spec, None, cwd);
+    install_session(srv, handle, mcp, spec, None, cwd, params);
     Ok(AgentResponse::NewSessionResponse(resp))
 }
 
@@ -269,7 +278,7 @@ async fn load_session(
         .map_err(|_| AcpError::resource_not_found(Some(req.session_id.0.to_string())))?;
     let mut restored = load_history(session_ref.id())?;
     close_session(srv).await;
-    let mcp = start_mcp(&req.cwd, &req.mcp_servers).await;
+    let mcp = start_mcp(&req.cwd, &req.mcp_servers, params).await;
     let sid = SessionId::from(session_ref.to_string());
     let home = maki_storage::paths::home();
     let replay_cwd = restored.cwd.as_deref().unwrap_or(&req.cwd);
@@ -295,7 +304,7 @@ async fn load_session(
         &recorded_model,
         RESTORED_FAST,
     );
-    install_session(srv, handle, mcp, spec, restored_cost, session_cwd);
+    install_session(srv, handle, mcp, spec, restored_cost, session_cwd, params);
     Ok(AgentResponse::LoadSessionResponse(resp))
 }
 
@@ -386,8 +395,14 @@ fn pairs<T>(items: &[T], split: impl Fn(&T) -> (&String, &String)) -> HashMap<St
 
 /// MCP is per session: the client picks the cwd and may inject its own servers.
 /// Returns as soon as the config is read, the first prompt waits for the tools.
-async fn start_mcp(cwd: &Path, servers: &[McpServer]) -> Option<McpHandle> {
-    let (handle, errors) = mcp::start_with_extra(cwd, injected_servers(servers)).await;
+async fn start_mcp(cwd: &Path, servers: &[McpServer], params: &AcpParams) -> Option<McpHandle> {
+    let (handle, errors) = mcp::start_with_extra_and_commands(
+        cwd,
+        injected_servers(servers),
+        params.command_dispatcher.registry(),
+        params.command_dispatcher.mcp_sink(),
+    )
+    .await;
     if !errors.is_empty() {
         warn!(%errors, "MCP config errors");
     }
@@ -409,6 +424,7 @@ async fn close_session(srv: &mut Server) {
             Response::new(id, Ok(AgentResponse::PromptResponse(resp))),
         );
     }
+    state.command_projection_task.cancel().await;
     state.handle.task.cancel().await;
     if let Some(mcp) = state.mcp {
         mcp.shutdown().await;
@@ -422,6 +438,7 @@ fn install_session(
     current_model: String,
     initial_cost: Option<f64>,
     cwd: PathBuf,
+    params: &AcpParams,
 ) {
     let pending = PendingState::default();
     start_event_pump(
@@ -435,13 +452,93 @@ fn install_session(
         maki_storage::paths::home(),
         initial_cost,
     );
+    let command_registry = params.command_dispatcher.registry();
+    let command_mailbox = params.command_dispatcher.create_mailbox();
+    let session_id = SessionId::from(handle.session_id.to_string());
+    let snapshot = params.command_dispatcher.projection();
+    emit_available_commands(
+        &srv.out_tx,
+        &session_id,
+        &snapshot,
+        params.command_dispatcher.builtin_producer(),
+    );
+    let command_projection_task = watch_available_commands(
+        srv.out_tx.clone(),
+        session_id,
+        command_registry.clone(),
+        params.command_dispatcher.builtin_producer(),
+        snapshot.generation(),
+    );
     srv.session = Some(SessionState {
         handle,
         mcp,
         current_mode: AgentMode::Build,
         current_model,
         pending,
+        command_registry,
+        command_mailbox,
+        command_projection_task,
     });
+}
+
+fn available_commands(
+    snapshot: &RegistrySnapshot,
+    builtin_producer: ProducerId,
+) -> Vec<AvailableCommand> {
+    snapshot
+        .commands()
+        .iter()
+        .filter(|command| {
+            command.producer_id() != builtin_producer || command.spec().name.as_ref() == "/model"
+        })
+        .map(|command| {
+            let mut available = AvailableCommand::new(
+                command.spec().name.trim_start_matches('/'),
+                command.spec().docs.summary.to_string(),
+            );
+            if let Some(hint) = &command.spec().docs.argument_hint {
+                available = available.input(AvailableCommandInput::Unstructured(
+                    UnstructuredCommandInput::new(hint.to_string()),
+                ));
+            }
+            available
+        })
+        .collect()
+}
+
+fn emit_available_commands(
+    out_tx: &Sender<Value>,
+    session_id: &SessionId,
+    snapshot: &RegistrySnapshot,
+    builtin_producer: ProducerId,
+) {
+    session_update(
+        out_tx,
+        session_id,
+        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(available_commands(
+            snapshot,
+            builtin_producer,
+        ))),
+    );
+}
+
+fn watch_available_commands(
+    out_tx: Sender<Value>,
+    session_id: SessionId,
+    registry: maki_commands::CommandRegistry,
+    builtin_producer: ProducerId,
+    mut generation: u64,
+) -> smol::Task<()> {
+    smol::spawn(async move {
+        loop {
+            smol::Timer::after(std::time::Duration::from_millis(50)).await;
+            let snapshot = registry.snapshot();
+            if snapshot.generation() != generation {
+                generation = snapshot.generation();
+                emit_available_commands(&out_tx, &session_id, &snapshot, builtin_producer);
+            }
+        }
+    })
 }
 
 #[derive(Debug)]
@@ -486,22 +583,159 @@ fn load_history_from(
     })
 }
 
-fn handle_prompt(srv: &mut Server, raw: &Value, id: &RequestId) -> Result<(), AcpError> {
+async fn handle_prompt(srv: &mut Server, raw: &Value, id: &RequestId) -> Result<(), AcpError> {
     let req: PromptRequest = parse_params(raw)?;
-    let session = srv.session.as_ref().ok_or_else(no_session)?;
-
     let (message, images) = extract_prompt_content(&req.prompt);
-    let input = AgentInput {
+    let session = srv.session.as_ref().ok_or_else(no_session)?;
+    let command_name = message
+        .split_whitespace()
+        .next()
+        .filter(|name| name.starts_with('/'));
+    let known_command = command_name
+        .and_then(|name| srv_command_registry(srv).resolve(name).ok())
+        .is_some();
+
+    if known_command && !images.is_empty() {
+        return Err(
+            AcpError::invalid_params().data(json_str(&"slash commands cannot include images"))
+        );
+    }
+
+    if known_command {
+        let dispatch = srv_command_registry(srv)
+            .dispatch_input(&message, 0, session.command_mailbox.target())
+            .await
+            .map_err(command_error)?;
+        let InputDispatch::Dispatched(dispatch) = dispatch else {
+            unreachable!("resolved slash command must dispatch");
+        };
+        return handle_command(srv, id, dispatch.classification()).await;
+    }
+
+    send_agent_input(
+        session,
+        id,
+        agent_input(message, images, session.current_mode.clone(), None),
+    )
+}
+
+async fn handle_command(
+    srv: &mut Server,
+    id: &RequestId,
+    classification: maki_commands::CommandFuture<CommandClassification>,
+) -> Result<(), AcpError> {
+    let session = srv.session.as_ref().ok_or_else(no_session)?;
+    match futures_lite::future::race(
+        async { Either::Classification(classification.await) },
+        async { Either::Route(session.command_mailbox.receiver().recv_async().await) },
+    )
+    .await
+    {
+        Either::Classification(CommandClassification::Completed) => {
+            respond_prompt(&srv.out_tx, id.clone(), StopReason::EndTurn);
+            Ok(())
+        }
+        Either::Classification(CommandClassification::Failed(error)) => Err(command_error(error)),
+        Either::Classification(CommandClassification::AgentTurnAccepted) => {
+            session.pending.lock().unwrap().prompt = Some(id.clone());
+            Ok(())
+        }
+        Either::Route(Ok(command)) => execute_command(srv, id, command),
+        Either::Route(Err(_)) => Err(AcpError::new(-32603, "command dispatcher ended")),
+    }
+}
+
+enum Either {
+    Classification(CommandClassification),
+    Route(Result<RoutedCommand, flume::RecvError>),
+}
+
+fn execute_command(
+    srv: &mut Server,
+    id: &RequestId,
+    command: RoutedCommand,
+) -> Result<(), AcpError> {
+    let session = srv.session.as_mut().ok_or_else(no_session)?;
+    match &command.route {
+        CommandRoute::Prompt(prompt) => {
+            send_agent_input(
+                session,
+                id,
+                agent_input(
+                    prompt.clone(),
+                    Vec::new(),
+                    session.current_mode.clone(),
+                    None,
+                ),
+            )?;
+            commands::complete(&command, CommandClassification::AgentTurnAccepted);
+        }
+        CommandRoute::Mcp(prompt) => {
+            let prompt_ref = maki_agent::McpPromptRef {
+                qualified_name: prompt.qualified_name.clone(),
+                arguments: prompt.arguments.clone(),
+            };
+            send_agent_input(
+                session,
+                id,
+                agent_input(
+                    prompt.display_text.clone(),
+                    Vec::new(),
+                    session.current_mode.clone(),
+                    Some(prompt_ref),
+                ),
+            )?;
+            commands::complete(&command, CommandClassification::AgentTurnAccepted);
+        }
+        CommandRoute::Model(spec) => {
+            if !srv.model_policy.allows(spec) {
+                return Err(
+                    AcpError::invalid_params().data(json_str(&"model is not allowed by policy"))
+                );
+            }
+            let model = Model::from_spec(spec)
+                .map_err(|error| AcpError::invalid_params().data(json_str(&error)))?;
+            session
+                .handle
+                .model_tx
+                .send(model)
+                .map_err(|_| AcpError::new(-32603, "session ended"))?;
+            session.current_model = spec.clone();
+            commands::complete(&command, CommandClassification::Completed);
+            respond_prompt(&srv.out_tx, id.clone(), StopReason::EndTurn);
+        }
+        CommandRoute::Unsupported(name) => {
+            let error = maki_commands::CommandError::UnsupportedFrontend(Arc::clone(name));
+            commands::complete(&command, CommandClassification::Failed(error.clone()));
+            return Err(command_error(error));
+        }
+    }
+    Ok(())
+}
+
+fn agent_input(
+    message: String,
+    images: Vec<ImageSource>,
+    mode: AgentMode,
+    prompt: Option<maki_agent::McpPromptRef>,
+) -> AgentInput {
+    AgentInput {
         message,
-        mode: session.current_mode.clone(),
+        mode,
         images,
         preamble: Vec::new(),
         thinking: Default::default(),
         fast: false,
         workflow: false,
-        prompt: None,
-    };
+        prompt: prompt.map(Box::new),
+    }
+}
 
+fn send_agent_input(
+    session: &SessionState,
+    id: &RequestId,
+    input: AgentInput,
+) -> Result<(), AcpError> {
     session
         .handle
         .input_tx
@@ -509,6 +743,28 @@ fn handle_prompt(srv: &mut Server, raw: &Value, id: &RequestId) -> Result<(), Ac
         .map_err(|_| AcpError::new(-32603, "session ended"))?;
     session.pending.lock().unwrap().prompt = Some(id.clone());
     Ok(())
+}
+
+fn srv_command_registry(srv: &Server) -> maki_commands::CommandRegistry {
+    srv.session
+        .as_ref()
+        .expect("command dispatch requires a session")
+        .command_registry
+        .clone()
+}
+
+fn command_error(error: maki_commands::CommandError) -> AcpError {
+    AcpError::new(-32602, error.to_string())
+}
+
+fn respond_prompt(out_tx: &Sender<Value>, id: RequestId, reason: StopReason) {
+    send(
+        out_tx,
+        Response::new(
+            id,
+            Ok(AgentResponse::PromptResponse(PromptResponse::new(reason))),
+        ),
+    );
 }
 
 fn handle_set_mode(srv: &mut Server, raw: &Value) -> Result<AgentResponse, AcpError> {
@@ -842,13 +1098,19 @@ mod tests {
         assert_eq!(permission_answer(&raw), expected);
     }
 
-    fn server_awaiting_answer() -> (Server, Receiver<String>, Receiver<Value>) {
+    fn server_awaiting_answer() -> (
+        Server,
+        Receiver<String>,
+        Receiver<Value>,
+        Receiver<AgentInput>,
+    ) {
         let (answer_tx, answer_rx) = flume::unbounded();
         let (out_tx, out_rx) = flume::unbounded();
+        let (input_tx, input_rx) = flume::unbounded();
         let handle = InteractiveHandle {
             event_rx: flume::unbounded().1,
             tool_names: Vec::new(),
-            input_tx: flume::unbounded().0,
+            input_tx,
             answer_tx,
             cancel_tx: flume::unbounded().0,
             model_tx: flume::unbounded().0,
@@ -860,6 +1122,10 @@ mod tests {
             )),
             task: smol::spawn(async {}),
         };
+        let dispatcher =
+            crate::commands::CommandDispatcher::new(maki_commands::CommandRegistry::new(), &[]);
+        let command_registry = dispatcher.registry();
+        let command_mailbox = dispatcher.create_mailbox();
         let server = Server {
             out_tx,
             modes: Arc::new(maki_agent::ModeRegistry::builtin()),
@@ -874,15 +1140,18 @@ mod tests {
                     permission: Some(ANSWERED_ID),
                     ..Default::default()
                 })),
+                command_registry,
+                command_mailbox,
+                command_projection_task: smol::spawn(async {}),
             }),
             elicitation: false,
         };
-        (server, answer_rx, out_rx)
+        (server, answer_rx, out_rx, input_rx)
     }
 
     #[test]
     fn only_the_outstanding_request_id_is_answered() {
-        let (srv, answer_rx, _) = server_awaiting_answer();
+        let (srv, answer_rx, ..) = server_awaiting_answer();
 
         handle_incoming_response(&srv, &allow_once(UNKNOWN_ID));
         assert!(answer_rx.is_empty(), "an unknown id is dropped");
@@ -902,7 +1171,7 @@ mod tests {
 
     #[test]
     fn cancel_drops_the_outstanding_permission_request() {
-        let (srv, answer_rx, _) = server_awaiting_answer();
+        let (srv, answer_rx, ..) = server_awaiting_answer();
         handle_notification(&srv, "session/cancel");
 
         handle_incoming_response(&srv, &allow_once(ANSWERED_ID));
@@ -911,7 +1180,7 @@ mod tests {
 
     #[test]
     fn elicitation_answer_is_routed_by_id_and_decoded() {
-        let (srv, answer_rx, _) = server_awaiting_answer();
+        let (srv, answer_rx, ..) = server_awaiting_answer();
         {
             let mut pending = srv.session.as_ref().unwrap().pending.lock().unwrap();
             pending.permission = None;
@@ -942,7 +1211,7 @@ mod tests {
 
     #[test]
     fn unparsable_elicitation_result_dismisses_instead_of_hanging() {
-        let (srv, answer_rx, _) = server_awaiting_answer();
+        let (srv, answer_rx, ..) = server_awaiting_answer();
         srv.session
             .as_ref()
             .unwrap()
@@ -1017,8 +1286,54 @@ mod tests {
     }
 
     #[test]
+    fn available_command_projection_tracks_registry_generation() {
+        let dispatcher =
+            crate::commands::CommandDispatcher::new(maki_commands::CommandRegistry::new(), &[]);
+        let initial = dispatcher.projection();
+        let commands = available_commands(&initial, dispatcher.builtin_producer());
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| command.name.as_str())
+                .collect::<Vec<_>>(),
+            ["model"]
+        );
+
+        let producer = dispatcher
+            .registry()
+            .create_producer(maki_commands::ProducerPrecedence::Plugin);
+        producer
+            .replace(vec![maki_commands::Registration {
+                spec: maki_commands::CommandSpec {
+                    name: Arc::from("/review"),
+                    aliases: Arc::from([]),
+                    arguments: maki_commands::ArgumentArity::unbounded(0),
+                    docs: maki_commands::CommandDocs {
+                        summary: Arc::from("Review code"),
+                        argument_hint: Some(Arc::from("<path>")),
+                    },
+                },
+                behavior: Arc::new(CompletedCommand),
+                completion: None,
+            }])
+            .unwrap();
+        let updated = dispatcher.projection();
+        assert!(updated.generation() > initial.generation());
+        let commands = available_commands(&updated, dispatcher.builtin_producer());
+        let review = commands
+            .iter()
+            .find(|command| command.name == "review")
+            .unwrap();
+        assert_eq!(review.description, "Review code");
+        assert!(matches!(
+            review.input,
+            Some(AvailableCommandInput::Unstructured(ref input)) if input.hint == "<path>"
+        ));
+    }
+
+    #[test]
     fn discovered_models_are_pushed_to_the_client() {
-        let (mut srv, .., out_rx) = server_awaiting_answer();
+        let (mut srv, _, out_rx, _) = server_awaiting_answer();
         srv.model_specs = vec![OFFLINE_SPEC.to_owned()];
         refresh_models(&mut srv, vec![DISCOVERED_SPEC.to_owned()]);
         let update = out_rx.try_recv().expect("the fuller list is announced");
@@ -1033,6 +1348,152 @@ mod tests {
         assert!(selectable.contains(&DISCOVERED_SPEC));
         refresh_models(&mut srv, vec![DISCOVERED_SPEC.to_owned()]);
         assert!(out_rx.is_empty());
+    }
+
+    fn prompt_request(text: &str, image: bool) -> Value {
+        let mut prompt = vec![serde_json::json!({ "type": "text", "text": text })];
+        if image {
+            prompt.push(serde_json::json!({
+                "type": "image",
+                "data": "aGVsbG8=",
+                "mimeType": "image/png",
+            }));
+        }
+        serde_json::json!({
+            "params": {
+                "sessionId": MakiId::generate().to_string(),
+                "prompt": prompt,
+            }
+        })
+    }
+
+    fn install_dispatcher(srv: &mut Server, dispatcher: &crate::commands::CommandDispatcher) {
+        let session = srv.session.as_mut().unwrap();
+        session.command_registry = dispatcher.registry();
+        session.command_mailbox = dispatcher.create_mailbox();
+    }
+
+    #[test]
+    fn unknown_slash_prompt_is_sent_to_agent_literal() {
+        let (mut srv, _, _, input_rx) = server_awaiting_answer();
+        smol::block_on(handle_prompt(
+            &mut srv,
+            &prompt_request("/does-not-exist value", false),
+            &RequestId::Number(1),
+        ))
+        .unwrap();
+        assert_eq!(
+            input_rx.try_recv().unwrap().message,
+            "/does-not-exist value"
+        );
+    }
+
+    #[test]
+    fn custom_slash_prompt_dispatches_rendered_agent_input() {
+        let (mut srv, _, _, input_rx) = server_awaiting_answer();
+        let dispatcher = crate::commands::CommandDispatcher::new(
+            maki_commands::CommandRegistry::new(),
+            &[maki_agent::command::CustomCommand {
+                name: "review".into(),
+                description: "review code".into(),
+                content: "Review $ARGUMENTS".into(),
+                scope: maki_agent::command::CommandScope::Project,
+                accepts_args: true,
+            }],
+        );
+        install_dispatcher(&mut srv, &dispatcher);
+
+        smol::block_on(handle_prompt(
+            &mut srv,
+            &prompt_request("/project:review src", false),
+            &RequestId::Number(2),
+        ))
+        .unwrap();
+        assert_eq!(input_rx.try_recv().unwrap().message, "Review src");
+    }
+
+    #[test]
+    fn known_slash_prompt_with_image_is_rejected_before_agent_input() {
+        let (mut srv, _, _, input_rx) = server_awaiting_answer();
+        let dispatcher =
+            crate::commands::CommandDispatcher::new(maki_commands::CommandRegistry::new(), &[]);
+        install_dispatcher(&mut srv, &dispatcher);
+
+        let error = smol::block_on(handle_prompt(
+            &mut srv,
+            &prompt_request("/help", true),
+            &RequestId::Number(3),
+        ))
+        .unwrap_err();
+        assert_eq!(error.code, AcpError::invalid_params().code);
+        assert!(input_rx.is_empty());
+    }
+
+    struct CompletedCommand;
+
+    impl maki_commands::CommandBehavior for CompletedCommand {
+        fn execute(
+            &self,
+            invocation: maki_commands::CommandInvocation,
+        ) -> maki_commands::CommandFuture<Result<(), maki_commands::CommandError>> {
+            invocation
+                .lifecycle
+                .transition(CommandClassification::Completed);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[test]
+    fn completed_lua_slash_prompt_returns_without_agent_input() {
+        let (mut srv, _, out_rx, input_rx) = server_awaiting_answer();
+        let dispatcher =
+            crate::commands::CommandDispatcher::new(maki_commands::CommandRegistry::new(), &[]);
+        let producer = dispatcher
+            .registry()
+            .create_producer(maki_commands::ProducerPrecedence::Plugin);
+        producer
+            .replace(vec![maki_commands::Registration {
+                spec: maki_commands::CommandSpec {
+                    name: Arc::from("/lua-complete"),
+                    aliases: Arc::from([]),
+                    arguments: maki_commands::ArgumentArity::NONE,
+                    docs: maki_commands::CommandDocs {
+                        summary: Arc::from("complete without a turn"),
+                        argument_hint: None,
+                    },
+                },
+                behavior: Arc::new(CompletedCommand),
+                completion: None,
+            }])
+            .unwrap();
+        install_dispatcher(&mut srv, &dispatcher);
+
+        smol::block_on(handle_prompt(
+            &mut srv,
+            &prompt_request("/lua-complete", false),
+            &RequestId::Number(4),
+        ))
+        .unwrap();
+        assert!(input_rx.is_empty());
+        let response = out_rx.try_recv().unwrap();
+        assert_eq!(response["result"]["stopReason"], "end_turn");
+    }
+
+    #[test]
+    fn unsupported_builtin_slash_prompt_returns_prompt_error() {
+        let (mut srv, _, _, input_rx) = server_awaiting_answer();
+        let dispatcher =
+            crate::commands::CommandDispatcher::new(maki_commands::CommandRegistry::new(), &[]);
+        install_dispatcher(&mut srv, &dispatcher);
+
+        let error = smol::block_on(handle_prompt(
+            &mut srv,
+            &prompt_request("/help", false),
+            &RequestId::Number(4),
+        ))
+        .unwrap_err();
+        assert!(error.message.contains("not supported"));
+        assert!(input_rx.is_empty());
     }
 
     #[test]

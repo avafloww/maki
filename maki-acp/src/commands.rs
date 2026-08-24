@@ -1,0 +1,261 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+
+use maki_agent::{
+    McpPromptRequest, McpPromptSink,
+    command::{self, PromptSink},
+};
+use maki_commands::{
+    ArgumentArity, BUILTIN_COMMANDS, CommandBehavior, CommandClassification, CommandDocs,
+    CommandError, CommandFuture, CommandInvocation, CommandRegistry, CommandSpec,
+    InvocationLifecycle, InvocationTargetId, Producer, ProducerId, ProducerPrecedence,
+    Registration,
+};
+
+#[derive(Clone)]
+pub enum CommandRoute {
+    Prompt(String),
+    Mcp(McpPromptRequest),
+    Model(String),
+    Unsupported(Arc<str>),
+}
+
+pub struct RoutedCommand {
+    pub target: InvocationTargetId,
+    pub route: CommandRoute,
+    pub lifecycle: InvocationLifecycle,
+}
+
+#[derive(Clone)]
+pub struct CommandDispatcher {
+    registry: CommandRegistry,
+    mailboxes: Arc<Mutex<HashMap<InvocationTargetId, flume::Sender<RoutedCommand>>>>,
+    builtin_producer: ProducerId,
+}
+
+pub struct CommandMailbox {
+    target: InvocationTargetId,
+    rx: flume::Receiver<RoutedCommand>,
+    mailboxes: Arc<Mutex<HashMap<InvocationTargetId, flume::Sender<RoutedCommand>>>>,
+}
+
+impl CommandMailbox {
+    pub fn target(&self) -> InvocationTargetId {
+        self.target
+    }
+
+    pub fn receiver(&self) -> &flume::Receiver<RoutedCommand> {
+        &self.rx
+    }
+}
+
+impl Drop for CommandMailbox {
+    fn drop(&mut self) {
+        self.mailboxes.lock().unwrap().remove(&self.target);
+    }
+}
+
+impl CommandDispatcher {
+    pub fn new(registry: CommandRegistry, custom_commands: &[command::CustomCommand]) -> Self {
+        let builtin = registry.create_producer(ProducerPrecedence::Builtin);
+        let dispatcher = Self {
+            registry,
+            mailboxes: Arc::default(),
+            builtin_producer: builtin.id(),
+        };
+        dispatcher.register_builtins(&builtin);
+        let producer = dispatcher
+            .registry
+            .create_producer(ProducerPrecedence::Application);
+        command::register_commands(&producer, custom_commands, Arc::new(dispatcher.clone()))
+            .expect("custom command metadata is valid");
+        dispatcher
+    }
+
+    pub fn registry(&self) -> CommandRegistry {
+        self.registry.clone()
+    }
+
+    pub fn create_mailbox(&self) -> CommandMailbox {
+        let target = self.registry.create_target();
+        let (tx, rx) = flume::unbounded();
+        self.mailboxes.lock().unwrap().insert(target, tx);
+        CommandMailbox {
+            target,
+            rx,
+            mailboxes: Arc::clone(&self.mailboxes),
+        }
+    }
+
+    pub fn projection(&self) -> maki_commands::RegistrySnapshot {
+        self.registry.snapshot()
+    }
+
+    pub fn builtin_producer(&self) -> ProducerId {
+        self.builtin_producer
+    }
+
+    pub fn mcp_sink(&self) -> Arc<dyn McpPromptSink> {
+        Arc::new(self.clone())
+    }
+
+    fn register_builtins(&self, producer: &Producer) {
+        producer
+            .replace(
+                BUILTIN_COMMANDS
+                    .iter()
+                    .map(|command| {
+                        let name: Arc<str> = Arc::from(command.name);
+                        let route = if command.name == "/model" {
+                            BuiltinRoute::Model
+                        } else {
+                            BuiltinRoute::Unsupported(Arc::clone(&name))
+                        };
+                        Registration {
+                            spec: CommandSpec {
+                                name,
+                                aliases: command.aliases.iter().copied().map(Arc::from).collect(),
+                                arguments: if command.max_args == usize::MAX {
+                                    ArgumentArity::unbounded(0)
+                                } else {
+                                    ArgumentArity::bounded(0, command.max_args)
+                                },
+                                docs: CommandDocs {
+                                    summary: Arc::from(command.description),
+                                    argument_hint: None,
+                                },
+                            },
+                            behavior: Arc::new(BuiltinBehavior {
+                                route,
+                                mailboxes: Arc::clone(&self.mailboxes),
+                            }),
+                            completion: None,
+                        }
+                    })
+                    .collect(),
+            )
+            .expect("static builtin registrations are valid");
+    }
+}
+
+#[derive(Clone)]
+enum BuiltinRoute {
+    Model,
+    Unsupported(Arc<str>),
+}
+
+struct BuiltinBehavior {
+    route: BuiltinRoute,
+    mailboxes: Arc<Mutex<HashMap<InvocationTargetId, flume::Sender<RoutedCommand>>>>,
+}
+
+impl CommandBehavior for BuiltinBehavior {
+    fn execute(&self, invocation: CommandInvocation) -> CommandFuture<Result<(), CommandError>> {
+        let route = match &self.route {
+            BuiltinRoute::Model if invocation.arguments.trim().is_empty() => {
+                CommandRoute::Unsupported(Arc::from("/model without an argument"))
+            }
+            BuiltinRoute::Model => CommandRoute::Model(invocation.arguments.to_string()),
+            BuiltinRoute::Unsupported(name) => CommandRoute::Unsupported(Arc::clone(name)),
+        };
+        route_command(&self.mailboxes, invocation, route)
+    }
+}
+
+impl PromptSink for CommandDispatcher {
+    fn submit(
+        &self,
+        prompt: String,
+        invocation: CommandInvocation,
+    ) -> CommandFuture<Result<(), CommandError>> {
+        route_command(&self.mailboxes, invocation, CommandRoute::Prompt(prompt))
+    }
+}
+
+impl McpPromptSink for CommandDispatcher {
+    fn submit(
+        &self,
+        invocation: CommandInvocation,
+        prompt: McpPromptRequest,
+    ) -> CommandFuture<Result<(), CommandError>> {
+        route_command(&self.mailboxes, invocation, CommandRoute::Mcp(prompt))
+    }
+}
+
+fn route_command(
+    mailboxes: &Arc<Mutex<HashMap<InvocationTargetId, flume::Sender<RoutedCommand>>>>,
+    invocation: CommandInvocation,
+    route: CommandRoute,
+) -> CommandFuture<Result<(), CommandError>> {
+    let tx = mailboxes
+        .lock()
+        .unwrap()
+        .get(&invocation.target_id)
+        .cloned();
+    Box::pin(async move {
+        tx.ok_or(CommandError::StaleTarget)?
+            .send(RoutedCommand {
+                target: invocation.target_id,
+                route,
+                lifecycle: invocation.lifecycle,
+            })
+            .map_err(|_| CommandError::StaleTarget)
+    })
+}
+
+pub fn complete(command: &RoutedCommand, classification: CommandClassification) {
+    command.lifecycle.transition(classification);
+}
+
+#[cfg(test)]
+mod tests {
+    use maki_commands::InputDispatch;
+
+    use super::*;
+
+    #[test]
+    fn concurrent_targets_receive_only_their_commands_and_stale_target_fails() {
+        let dispatcher = CommandDispatcher::new(CommandRegistry::new(), &[]);
+        let first = dispatcher.create_mailbox();
+        let second = dispatcher.create_mailbox();
+        let registry = dispatcher.registry();
+
+        let InputDispatch::Dispatched(first_dispatch) =
+            smol::block_on(registry.dispatch_input("/model first", 0, first.target())).unwrap()
+        else {
+            panic!("known command did not dispatch");
+        };
+        let InputDispatch::Dispatched(second_dispatch) =
+            smol::block_on(registry.dispatch_input("/model second", 0, second.target())).unwrap()
+        else {
+            panic!("known command did not dispatch");
+        };
+        let first_command = first.receiver().recv().unwrap();
+        let second_command = second.receiver().recv().unwrap();
+        assert!(matches!(first_command.route, CommandRoute::Model(ref value) if value == "first"));
+        assert!(
+            matches!(second_command.route, CommandRoute::Model(ref value) if value == "second")
+        );
+        assert!(first.receiver().is_empty());
+        assert!(second.receiver().is_empty());
+        complete(&first_command, CommandClassification::Completed);
+        complete(&second_command, CommandClassification::Completed);
+        assert_eq!(
+            smol::block_on(first_dispatch.classification()),
+            CommandClassification::Completed
+        );
+        assert_eq!(
+            smol::block_on(second_dispatch.classification()),
+            CommandClassification::Completed
+        );
+
+        let stale_target = first.target();
+        drop(first);
+        let error =
+            smol::block_on(registry.dispatch_input("/model stale", 0, stale_target)).unwrap_err();
+        assert_eq!(error, CommandError::StaleTarget);
+        assert!(second.receiver().is_empty());
+    }
+}
