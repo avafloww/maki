@@ -267,10 +267,30 @@ impl FloatManager {
         Cadence::when(self.is_open(), Cadence::SPINNER)
     }
 
-    pub fn needs_input(&self) -> bool {
+    /// True when a below-split input window (the ask form) is live. Mirrors
+    /// the `visible` gate so a hidden window does not count.
+    pub fn below_is_input(&self) -> bool {
         self.windows
             .iter()
-            .any(|win| win.visible && win.config.needs_input)
+            .any(|w| w.visible && w.config.split == Split::Below && w.config.needs_input)
+    }
+
+    /// Promotes the below-split input window to focused (used on deferral
+    /// promotion). No-op if none exists.
+    pub fn focus_input_window(&mut self) {
+        if let Some(w) = self
+            .windows
+            .iter()
+            .find(|w| w.visible && w.config.split == Split::Below && w.config.needs_input)
+        {
+            self.focused_id = Some(w.id);
+            self.focused_rect = None;
+        }
+    }
+
+    /// Whether any window is focused, i.e. the manager owns the keyboard.
+    pub fn is_focused(&self) -> bool {
+        self.focused_id.is_some()
     }
 
     pub fn handle_key(&mut self, key_event: KeyEvent) -> bool {
@@ -710,6 +730,47 @@ mod tests {
         buf
     }
 
+    #[test]
+    fn below_is_input_and_focus_input_window() {
+        let mut mgr = FloatManager::new();
+        let (etx, crx, _erx, _ctx) = make_channels();
+        mgr.open(
+            make_buf(&["plain"]),
+            FloatConfig {
+                split: Split::Below,
+                ..FloatConfig::default()
+            },
+            false,
+            etx,
+            crx,
+        );
+        assert!(
+            !mgr.below_is_input(),
+            "plain below split is not an input window"
+        );
+        assert!(!mgr.is_focused());
+
+        let (etx, crx, _erx, _ctx) = make_channels();
+        mgr.open(
+            make_buf(&["input"]),
+            FloatConfig {
+                split: Split::Below,
+                needs_input: true,
+                ..FloatConfig::default()
+            },
+            false,
+            etx,
+            crx,
+        );
+        assert!(mgr.below_is_input(), "below+needs_input window counts");
+        assert!(!mgr.is_focused(), "opened without focus");
+        mgr.focus_input_window();
+        assert!(
+            mgr.is_focused(),
+            "focus_input_window focuses the below input window"
+        );
+    }
+
     #[test_case("spinner", "spinner" ; "bare_name_takes_spinner_style")]
     #[test_case("spinner:match_selected", "match_selected" ; "prefixed_name_takes_suffix_style")]
     fn spinner_span_bakes_to_live_glyph(span_style: &str, expected_style: &str) {
@@ -737,16 +798,17 @@ mod tests {
 
     #[test_case(true ; "visible")]
     #[test_case(false ; "hidden")]
-    fn needs_input_requires_visibility(visible: bool) {
+    fn below_is_input_requires_visibility(visible: bool) {
         let mut mgr = FloatManager::new();
         let (event_tx, cmd_rx, _, _) = make_channels();
         let config = FloatConfig {
             visible,
             needs_input: true,
+            split: Split::Below,
             ..FloatConfig::default()
         };
         mgr.open(make_buf(&[]), config, false, event_tx, cmd_rx);
-        assert_eq!(mgr.needs_input(), visible);
+        assert_eq!(mgr.below_is_input(), visible);
     }
 
     #[test]
@@ -1016,12 +1078,20 @@ mod tests {
     }
 
     #[test]
-    fn needs_input_tracks_window_lifecycle_and_config() {
+    fn below_is_input_tracks_window_lifecycle_and_config() {
         let mut mgr = FloatManager::new();
-        assert!(!mgr.needs_input());
+        assert!(!mgr.below_is_input());
 
-        let (_event_rx, cmd_tx) = open_with_lines(&mut mgr, &["a"]);
-        assert!(!mgr.needs_input());
+        let (event_tx, cmd_rx, _, cmd_tx) = make_channels();
+        let config = FloatConfig {
+            split: Split::Below,
+            ..FloatConfig::default()
+        };
+        mgr.open(make_buf(&["a"]), config, false, event_tx, cmd_rx);
+        assert!(
+            !mgr.below_is_input(),
+            "below split without needs_input does not count"
+        );
 
         cmd_tx
             .send(WinCommand::SetConfig(FloatConfigPatch {
@@ -1030,11 +1100,11 @@ mod tests {
             }))
             .unwrap();
         let _ = mgr.tick();
-        assert!(mgr.needs_input());
+        assert!(mgr.below_is_input(), "SetConfig needs_input flips it on");
 
         cmd_tx.send(WinCommand::Close).unwrap();
         let _ = mgr.tick();
-        assert!(!mgr.needs_input());
+        assert!(!mgr.below_is_input(), "Close clears it");
     }
 
     #[test]

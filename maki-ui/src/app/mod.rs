@@ -16,7 +16,7 @@ pub(crate) mod shell;
 pub(crate) mod tests;
 pub(crate) mod view;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,12 +61,12 @@ use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use maki_agent::permissions::PermissionManager;
 use maki_agent::{
     AgentEvent, Envelope, ImageSource, McpConfigErrors, McpPromptInfo, McpSnapshotReader,
-    SharedMessages, SubagentInfo,
+    SharedBuf, SharedMessages, SubagentInfo,
 };
-use maki_config::{ModelPolicy, UiConfig};
+use maki_config::{ModelPolicy, ToolKey, UiConfig};
 use maki_lua::{
-    BuiltinAction, CompletionCtx, EventHandle, HintReader, HintSnapshot, ItemSpec, KeymapReader,
-    LuaCommandReader, WinView,
+    BuiltinAction, CompletionCtx, EventHandle, FloatConfig, HintReader, HintSnapshot, ItemSpec,
+    KeymapReader, LuaCommandReader, Split, WinCommand, WinEvent, WinView,
 };
 use maki_match::{MatchCandidate, Resolution, fuzzy_resolve, fuzzy_resolve_candidates};
 use maki_providers::{ContentBlock, Message, Model, Role, ThinkingConfig, add_cost, format_tokens};
@@ -134,6 +134,10 @@ const SNIPPET_CHARS: usize = 64;
 pub(crate) const MAX_COMMAND_DEPTH: u8 = 8;
 pub(crate) const COMMAND_DEPTH_MSG: &str = "slash command nested too deeply (alias cycle?)";
 const NOTIFICATION_PREVIEW_CHARS: usize = 120;
+
+/// A tool-call demand that needs the user's input is held this long after the
+/// last keystroke before it steals focus, so it does not interrupt mid-typing.
+const INPUT_DEFER: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Notification {
@@ -285,6 +289,31 @@ pub enum Msg {
     Agent(Box<Envelope>),
 }
 
+/// The two input-demanding surfaces that can be deferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputKind {
+    Permission,
+    Question,
+}
+
+/// A queued permission request's payload; lives in the queue so the prompt is
+/// not opened (and does not contaminate overlay state) until activation.
+#[derive(Debug, Clone)]
+pub(crate) struct PermissionPayload {
+    id: String,
+    tool: ToolKey,
+    scopes: Vec<String>,
+    subagent_id: Option<String>,
+}
+
+/// One entry in the input-arbitration queue. FIFO: only the head can activate.
+#[derive(Debug, Clone)]
+pub(crate) struct InputDemand {
+    kind: InputKind,
+    blocked_by_modal: bool,
+    perm: Option<PermissionPayload>,
+}
+
 pub struct App {
     pub(super) chats: Vec<Chat>,
     pub(super) active_chat: usize,
@@ -324,6 +353,14 @@ pub struct App {
     pub(super) selection_state: Option<SelectionState>,
     pub(super) clipboard: ClipboardState,
     pub(super) last_esc: Option<Instant>,
+    /// Last user keystroke/paste; `None` until the first. Drives input deferral.
+    pub(super) last_input: Option<Instant>,
+    /// The input surface currently shown/focused (`None` when nothing is live).
+    pub(super) active_input: Option<InputKind>,
+    /// Pending input demands in arrival order; the head promotes when idle.
+    pub(super) input_queue: VecDeque<InputDemand>,
+    /// Bell owed by a promotion/arrival; drained by the event loop after tick.
+    pub(super) pending_bell: bool,
 
     pub(crate) storage: StateDir,
     pub(crate) theme_provider: Arc<dyn ThemesProvider>,
@@ -430,6 +467,10 @@ impl App {
             selection_state: None,
             clipboard: ClipboardState::new(),
             last_esc: None,
+            last_input: None,
+            active_input: None,
+            input_queue: VecDeque::new(),
+            pending_bell: false,
             storage,
             theme_provider,
             usage_slot: Arc::new(ArcSwapOption::empty()),
@@ -526,10 +567,12 @@ impl App {
     }
 
     pub(crate) fn attention(&self) -> Option<Notification> {
-        if let Some(tool) = self.permission_prompt.tool() {
-            let tool = (!matches!(tool, maki_config::ToolKey::Wildcard))
-                .then(|| normalize_preview(&tool.to_string()))
-                .flatten();
+        if self.permission_active() {
+            let tool = self
+                .permission_prompt
+                .tool()
+                .filter(|t| !matches!(t, ToolKey::Wildcard))
+                .and_then(|t| normalize_preview(&t.to_string()));
             return Some(Notification::PermissionRequested { tool });
         }
         if matches!(self.pending_input, PendingInput::AuthRetry { .. }) {
@@ -538,8 +581,7 @@ impl App {
         if self.status != Status::Streaming && self.plan_form_active() {
             return Some(Notification::PlanReady);
         }
-        self.float_mgr
-            .needs_input()
+        self.question_active()
             .then_some(Notification::QuestionRequested)
     }
 
@@ -593,9 +635,13 @@ impl App {
     }
 
     pub fn update(&mut self, msg: Msg) -> Vec<Action> {
-        match msg {
-            Msg::Key(key) => self.handle_key(key),
+        let actions = match msg {
+            Msg::Key(key) => {
+                self.last_input = Some(Instant::now());
+                self.handle_key(key)
+            }
             Msg::Paste(text) => {
+                self.last_input = Some(Instant::now());
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
                 if text.is_empty() {
                     if self.is_main_chat() && self.image_paste_rx.is_empty() {
@@ -626,7 +672,11 @@ impl App {
                 vec![]
             }
             Msg::Agent(envelope) => self.handle_agent_event(*envelope),
-        }
+        };
+        // A modal-closing key or an answered permission yields the next demand
+        // immediately, rather than waiting for the next 100ms tick.
+        let _ = self.promote_deferred_if_ready();
+        actions
     }
 
     fn send_answer(&self, answer: String) {
@@ -660,7 +710,7 @@ impl App {
             return None;
         }
         let pos = Position::new(column, row);
-        if self.float_mgr.is_open() && self.float_mgr.contains(pos) {
+        if self.float_mgr.is_focused() && self.float_mgr.contains(pos) {
             self.float_mgr.scroll(delta);
             return None;
         }
@@ -779,7 +829,7 @@ impl App {
     }
 
     fn dispatch_overlay(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
-        if self.permission_prompt.is_open() {
+        if self.permission_active() {
             if let Some(answer) = self.permission_prompt.handle_key(key) {
                 let subagent_id = self.permission_prompt.subagent_id().map(str::to_owned);
                 let encoded = answer.encode();
@@ -828,7 +878,7 @@ impl App {
             });
         }
 
-        if self.float_mgr.handle_key(key) {
+        if !self.permission_active() && self.float_mgr.handle_key(key) {
             return Some(vec![]);
         }
 
@@ -1425,6 +1475,8 @@ impl App {
         self.retry_info = None;
         self.close_all_overlays();
         self.pending_input = PendingInput::None;
+        self.input_queue.clear();
+        self.active_input = None;
         self.finish_subagents(DisplayRole::Error, CANCELLED_TEXT);
         self.subagent_channels.clear();
         self.shell.cancel_all();
@@ -1638,10 +1690,19 @@ impl App {
         }
 
         if let ChatEventResult::PermissionRequest { id, tool, scopes } = result {
-            self.permission_prompt
-                .open(id, tool, scopes, subagent_id.clone());
-            if self.ui_config.bell.permission {
-                return vec![Action::Bell];
+            let demand = InputDemand {
+                kind: InputKind::Permission,
+                blocked_by_modal: self.has_blocking_modal(),
+                perm: Some(PermissionPayload {
+                    id,
+                    tool,
+                    scopes,
+                    subagent_id,
+                }),
+            };
+            let defer = self.begin_input_demand(demand);
+            if !defer && self.ui_config.bell.permission {
+                self.pending_bell = true;
             }
             return vec![];
         }
@@ -1701,6 +1762,37 @@ impl App {
             }
         }
         actions
+    }
+
+    /// Shared `UiAction::OpenWin` path. Returns `true` when the window went
+    /// active immediately, `false` when an input demand was queued. Non-input
+    /// windows (tool output, panels, centered popups) always return `true`
+    /// and keep their original focus.
+    pub(crate) fn handle_open_win(
+        &mut self,
+        buf: Arc<SharedBuf>,
+        config: FloatConfig,
+        focus: bool,
+        event_tx: flume::Sender<WinEvent>,
+        cmd_rx: flume::Receiver<WinCommand>,
+    ) -> bool {
+        let is_input_demand = config.needs_input && config.split == Split::Below;
+        let defer = is_input_demand
+            && self.begin_input_demand(InputDemand {
+                kind: InputKind::Question,
+                blocked_by_modal: self.has_blocking_modal(),
+                perm: None,
+            });
+        let open_focus = if is_input_demand { !defer } else { focus };
+        self.float_mgr
+            .open(buf, config, open_focus, event_tx, cmd_rx);
+        if is_input_demand && !defer {
+            self.transition_plan(PlanTrigger::InteractivePrompt);
+            if self.ui_config.bell.ask {
+                self.pending_bell = true;
+            }
+        }
+        !defer
     }
 
     fn resolve_or_create_chat(&mut self, subagent: &SubagentInfo) -> usize {
@@ -2138,6 +2230,130 @@ impl App {
         ]
     }
 
+    /// Last user keystroke/paste is recent enough that stealing focus would
+    /// interrupt mid-typing.
+    pub(crate) fn is_busy(&self) -> bool {
+        self.last_input.is_some_and(|t| t.elapsed() < INPUT_DEFER)
+    }
+
+    /// A modal overlay (e.g. the `/model` picker) is open. Neither the
+    /// permission prompt (non-modal) nor a deferred question float
+    /// (`focused_id == None`, so not `Overlay::is_open`) self-counts.
+    pub(crate) fn has_blocking_modal(&self) -> bool {
+        self.has_modal_overlay()
+    }
+
+    /// Clears a stale `active_input` once the active surface closed on its own
+    /// (permission answered, question float dismissed). Called before any
+    /// promotion check so the queue head can become promotable.
+    pub(crate) fn reconcile_active(&mut self) {
+        match self.active_input {
+            Some(InputKind::Permission) if !self.permission_prompt.is_open() => {
+                self.active_input = None;
+            }
+            Some(InputKind::Question) if !self.float_mgr.below_is_input() => {
+                self.active_input = None;
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn permission_active(&self) -> bool {
+        self.active_input == Some(InputKind::Permission) && self.permission_prompt.is_open()
+    }
+
+    pub(crate) fn question_active(&self) -> bool {
+        self.active_input == Some(InputKind::Question) && self.float_mgr.below_is_input()
+    }
+
+    pub(crate) fn any_input_active(&self) -> bool {
+        self.permission_active() || self.question_active()
+    }
+
+    /// Time until the deferral window (2s after the last keystroke) elapses.
+    pub(crate) fn defer_remaining(&self) -> Duration {
+        self.last_input
+            .map(|t| INPUT_DEFER.saturating_sub(t.elapsed()))
+            .unwrap_or(Duration::ZERO)
+    }
+
+    /// The single arbitration entry point. Returns `true` when the demand was
+    /// queued (caller must not open/ring/transition); `false` when it went
+    /// active immediately. For a Permission the prompt is opened here on the
+    /// active path; for a Question the caller owns opening the float.
+    pub(crate) fn begin_input_demand(&mut self, demand: InputDemand) -> bool {
+        if self.is_busy() || self.any_input_active() || !self.input_queue.is_empty() {
+            self.input_queue.push_back(demand);
+            return true;
+        }
+        self.active_input = Some(demand.kind);
+        if let Some(perm) = demand.perm {
+            self.permission_prompt
+                .open(perm.id, perm.tool, perm.scopes, perm.subagent_id);
+        }
+        false
+    }
+
+    /// Pops the queue head and activates it once the user is idle or the modal
+    /// that was blocking it has closed. Idempotent; sets `pending_bell` on a
+    /// promotion (the event loop drains it).
+    pub(crate) fn promote_deferred_if_ready(&mut self) -> Dirty {
+        self.reconcile_active();
+        if self.any_input_active() {
+            return Dirty::NO;
+        }
+        while let Some((kind, blocked_by_modal)) = self
+            .input_queue
+            .front()
+            .map(|d| (d.kind, d.blocked_by_modal))
+        {
+            // A queued Question whose float already closed is stale: drop it.
+            if kind == InputKind::Question && !self.float_mgr.below_is_input() {
+                self.input_queue.pop_front();
+                continue;
+            }
+            let ready = !self.is_busy() || (blocked_by_modal && !self.has_blocking_modal());
+            if !ready {
+                return Dirty::NO;
+            }
+            let d = self.input_queue.pop_front().expect("front checked above");
+            return self.activate_deferred_input(d);
+        }
+        Dirty::NO
+    }
+
+    fn activate_deferred_input(&mut self, d: InputDemand) -> Dirty {
+        self.active_input = Some(d.kind);
+        let bell = match d.kind {
+            InputKind::Permission => {
+                if let Some(perm) = d.perm {
+                    self.permission_prompt
+                        .open(perm.id, perm.tool, perm.scopes, perm.subagent_id);
+                }
+                self.ui_config.bell.permission
+            }
+            InputKind::Question => {
+                self.float_mgr.focus_input_window();
+                self.transition_plan(PlanTrigger::InteractivePrompt);
+                self.ui_config.bell.ask
+            }
+        };
+        if bell {
+            self.pending_bell = true;
+        }
+        Dirty::YES
+    }
+
+    /// Drains the bell owed by a promotion/arrival. The event loop rings it.
+    pub fn take_pending_bell(&mut self) -> bool {
+        std::mem::take(&mut self.pending_bell)
+    }
+
+    /// A below-split input window that is *not* the active surface (queued).
+    pub(crate) fn below_input_hidden(&self) -> bool {
+        self.float_mgr.below_is_input() && !self.question_active()
+    }
+
     pub fn any_overlay_open(&self) -> bool {
         self.overlays().iter().any(|o| o.is_open())
     }
@@ -2145,13 +2361,9 @@ impl App {
     /// True when the agent is parked on user input. Drives the `needs_input`
     /// session status.
     pub(crate) fn awaiting_input(&self) -> bool {
-        self.permission_prompt.is_open()
+        self.permission_active()
             || self.pending_input != PendingInput::None
-            || self.float_mgr.needs_input()
-    }
-
-    pub(crate) fn bell_on_ask(&self, needs_input: bool) -> bool {
-        needs_input && self.ui_config.bell.ask
+            || self.question_active()
     }
 
     /// True while `recoverable_queue` holds user text captured at an agent
@@ -2197,6 +2409,9 @@ impl App {
                 serde_json::json!({}),
             );
         }
+        // `float_mgr.tick` above may have closed the active question float; the
+        // promote call reconciles that, then pops the queue head when idle.
+        dirty |= self.promote_deferred_if_ready();
         dirty
     }
 
@@ -2236,6 +2451,11 @@ impl App {
                 .map_or(Cadence::IDLE, SelectionState::cadence),
             self.file_completion.cadence(),
             Cadence::any(self.chats.iter().map(Chat::cadence)),
+            // Wake precisely at the 2s idle mark to promote a queued demand.
+            Cadence::when(
+                !self.input_queue.is_empty() && !self.any_input_active(),
+                Cadence::after(self.defer_remaining()),
+            ),
         ])
     }
 
