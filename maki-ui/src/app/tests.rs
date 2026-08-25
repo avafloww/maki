@@ -1418,7 +1418,10 @@ fn task_entries_sort_alive_then_most_recent() {
 
     let entries = app.task_entries();
     assert_eq!(
-        entries.iter().map(|entry| entry.chat_index).collect::<Vec<_>>(),
+        entries
+            .iter()
+            .map(|entry| entry.chat_index)
+            .collect::<Vec<_>>(),
         vec![0, 2, 1, 3]
     );
 }
@@ -1705,7 +1708,8 @@ fn open_task_picker_inserts_new_child_without_changing_selection() {
         Some("build"),
     ));
 
-    assert_eq!(app.task_picker.item(2).unwrap().name, "build");
+    assert_eq!(app.task_picker.item(1).unwrap().name, "build");
+    assert_eq!(app.task_picker.item(2).unwrap().name, "research");
     assert_eq!(app.task_picker.selected_item().unwrap().chat_index, 1);
 }
 
