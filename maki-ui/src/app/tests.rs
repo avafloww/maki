@@ -3285,7 +3285,7 @@ fn run_cmdline_forwards_depth_to_lua_command() {
     );
 }
 
-/// The bare `--resume` startup path must reach the picker with the `all`
+/// The bare `-c` startup path must reach the picker with the `all`
 /// arg, so every directory's sessions show up, not just this one's.
 #[test]
 fn open_session_picker_sends_all_arg_to_lua() {

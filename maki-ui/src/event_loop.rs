@@ -85,7 +85,7 @@ pub struct EventLoopParams {
     pub permissions: Arc<PermissionManager>,
     pub timeouts: Timeouts,
     pub exit_on_done: bool,
-    /// One-shot startup request to open the session picker (bare `--resume`).
+    /// One-shot startup request to open the session picker (bare `-c`).
     pub session_picker: bool,
     pub lua_command_reader: LuaCommandReader,
     pub keymap_reader: KeymapReader,

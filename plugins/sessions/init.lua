@@ -2,7 +2,7 @@
 -- live or stored. Live ones get a colored icon, and row order is frozen
 -- while the picker is open so rows never jump around under the cursor
 -- while background agents keep working. Opened with the "all" arg (bare
--- `maki --resume`, or `/sessions all`) it lists every directory instead,
+-- `maki -c`, or `/sessions all`) it lists every directory instead,
 -- one dim cwd per row.
 
 local TextInput = require("maki.text_input")

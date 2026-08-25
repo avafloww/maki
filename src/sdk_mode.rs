@@ -664,26 +664,27 @@ pub fn run(params: SdkParams) -> Result<()> {
 type StoredSession = Session<Message, TokenUsage, ToolOutput>;
 
 fn resolve_session(cli: &Cli, cwd: &str) -> Result<(Option<SessionRef>, Vec<Message>)> {
-    // A bare resume flag (no ID) is rejected by the TUI guard before SDK
+    // A bare continue flag (no ID) is rejected by the TUI guard before SDK
     // mode starts, so only a valued ID reaches this branch.
-    let (resumed_id, history) = if let Some(id) = cli.resume.as_ref().and_then(|o| o.as_deref()) {
-        let storage = StateDir::resolve().context("resolve state dir")?;
-        let session_ref: SessionRef = id
-            .parse()
-            .map_err(|e| eyre!("invalid session id {id}: {e}"))?;
-        let session = StoredSession::load(session_ref.id(), &storage)
-            .map_err(|e| eyre!("load session {id}: {e}"))?;
-        let resumed = (!cli.fork_session).then_some(session_ref);
-        (resumed, session.take_messages())
-    } else if cli.continue_last {
-        let storage = StateDir::resolve().context("resolve state dir")?;
-        match StoredSession::latest(cwd, &storage) {
-            Ok(Some(session)) => (Some(SessionRef::from(session.id)), session.take_messages()),
-            _ => (None, Vec::new()),
-        }
-    } else {
-        (None, Vec::new())
-    };
+    let (resumed_id, history) =
+        if let Some(id) = cli.continue_session.as_ref().and_then(|o| o.as_deref()) {
+            let storage = StateDir::resolve().context("resolve state dir")?;
+            let session_ref: SessionRef = id
+                .parse()
+                .map_err(|e| eyre!("invalid session id {id}: {e}"))?;
+            let session = StoredSession::load(session_ref.id(), &storage)
+                .map_err(|e| eyre!("load session {id}: {e}"))?;
+            let resumed = (!cli.fork_session).then_some(session_ref);
+            (resumed, session.take_messages())
+        } else if cli.last_session {
+            let storage = StateDir::resolve().context("resolve state dir")?;
+            match StoredSession::latest(cwd, &storage) {
+                Ok(Some(session)) => (Some(SessionRef::from(session.id)), session.take_messages()),
+                _ => (None, Vec::new()),
+            }
+        } else {
+            (None, Vec::new())
+        };
 
     let cli_session_id = cli.session_id.as_deref().map(|s| {
         s.parse::<SessionRef>()

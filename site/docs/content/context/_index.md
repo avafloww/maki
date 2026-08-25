@@ -79,7 +79,7 @@ An archive is a complete session file, so `jq` or an editor reads it as it is. T
 cd ~/.local/state/makima/sessions
 mv <session-id>.jsonl <session-id>.jsonl.bak
 cp archive/<session-id>/<n>.jsonl <session-id>.jsonl
-makima -s <session-id>
+makima -c <session-id>
 ```
 
 `MAKIMA_DISABLE_AUTOCOMPACT=1` turns off the automatic compaction. A manual `/compact` still compacts.

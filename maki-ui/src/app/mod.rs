@@ -1919,7 +1919,7 @@ impl App {
     }
 
     /// Opens the `/sessions` picker over every stored directory (bare
-    /// `maki --resume` before the agent starts). Fire-and-forget, same path
+    /// `maki -c` before the agent starts). Fire-and-forget, same path
     /// as the Ctrl+P binding.
     pub(crate) fn open_session_picker(&self) {
         self.run_lua_command(SESSIONS_COMMAND, SESSIONS_ALL_ARG.into(), 0);

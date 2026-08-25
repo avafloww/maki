@@ -24,8 +24,8 @@ If you pass a prompt (or pipe stdin) without `--print`, the TUI still opens and 
 | `--yolo` | yes | yes | yes (or `--permission-mode bypassPermissions`) |
 | `--no-plugins` / `--no-commands` / `--no-rtk` / `--no-jit` | yes | yes | yes |
 | `--allowed-tools` / `--disallowed-tools` | yes | yes | yes |
-| `-c` / `--continue-last` | yes | no (always new session) | yes |
-| `-s` / `--resume [ID]` (aliases `--session`, `--continue`) | yes (ID, or picker with no ID) | no (ID ignored; bare flag errors) | yes (ID only) |
+| `-c` / `--continue [ID]` | yes (ID, or picker with no ID) | no (ID ignored; bare flag errors) | yes (ID only) |
+| `-l` / `--last` | yes | no (always new session) | yes |
 | `--exit-on-done` | yes | n/a (always exits) | n/a |
 | `--image` | no (use Ctrl+V paste) | yes | via wire protocol |
 | `--verbose`, `--output-format` | no | yes | stream only |
@@ -42,8 +42,8 @@ If you pass a prompt (or pipe stdin) without `--print`, the TUI still opens and 
 | `--image <PATH>` | Attach an image in `--print` mode (repeatable). Paths must be png, jpeg, gif, or webp |
 | `-m`, `--model <SPEC>` | Model as `provider/model-id`. Fallback: last used → `provider.default_model` in config → auto-detect from available providers |
 | `--verbose` | Full turn-by-turn messages in `--print` output |
-| `-c`, `--continue-last` | Resume the most recent session in this directory (TUI / SDK only). The bare `--continue` spelling is the picker alias of `--resume` |
-| `-s`, `--resume [ID]` (aliases `--session [ID]`, `--continue [ID]`) | Resume a specific session by ID (TUI / SDK). With no ID (TUI only), opens the session picker with every stored session. A following positional is taken as the ID, so run `--resume` alone to open the picker. In `--print` mode an ID is ignored (print mode always starts a new session) and a bare flag is an error |
+| `-c`, `--continue [ID]` | Continue a specific session by ID (TUI / SDK). With no ID (TUI only), opens the session picker with every stored session. A following positional is taken as the ID, so run `--continue` alone to open the picker. In `--print` mode an ID is ignored (print mode always starts a new session) and a bare flag is an error |
+| `-l`, `--last` | Continue the most recent session in this directory (TUI / SDK only) |
 | `--output-format <text\|json\|stream-json>` | Output shape for `--print` (default `text`) |
 | `--input-format <text\|stream-json>` | With `--print`, `stream-json` enters SDK mode |
 | `--no-commands` | Skip custom commands from `.maki/commands`, `.claude/commands`, etc. |
@@ -103,7 +103,7 @@ Lists every model Maki currently knows about (built-ins, discovered, catalog). O
 maki sessions --json
 ```
 
-Lists every stored session across all directories, most recently updated first. The command is `--json`-only and prints a JSON array; each entry carries the id, title, `updated_at` (epoch seconds), and `cwd`. The ID is what you pass to `maki --resume <ID>`. Resuming an ID from another directory keeps your current directory as the working directory.
+Lists every stored session across all directories, most recently updated first. The command is `--json`-only and prints a JSON array; each entry carries the id, title, `updated_at` (epoch seconds), and `cwd`. The ID is what you pass to `maki -c <ID>`. Resuming an ID from another directory keeps your current directory as the working directory.
 
 ### `maki mcp`
 
@@ -175,13 +175,13 @@ cd ~/code/my-app && maki
 maki -p --yolo -m anthropic/claude-sonnet-4-6 "summarize the architecture"
 
 # Resume yesterday's session
-maki -c
+maki -l
 
 # List stored sessions
 maki sessions --json
 
 # Pick a session to resume
-maki --resume
+maki -c
 
 # List models, then log in
 maki models

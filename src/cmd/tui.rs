@@ -192,7 +192,7 @@ fn build_stack(
 }
 
 fn resolve_session(
-    continue_last: bool,
+    last_session: bool,
     session_id: Option<&str>,
     model: &str,
     cwd: &str,
@@ -204,7 +204,7 @@ fn resolve_session(
             .map_err(|e| color_eyre::eyre::eyre!("invalid session id {raw:?}: {e}"))?;
         return AppSession::load(id, storage).map_err(|e| color_eyre::eyre::eyre!("{e}"));
     }
-    if continue_last {
+    if last_session {
         match AppSession::latest(cwd, storage) {
             Ok(Some(session)) => return Ok(session),
             Ok(None) => {
@@ -230,10 +230,10 @@ fn read_initial_prompt(cli_prompt: Option<String>) -> Result<Option<String>> {
     }
 }
 
-/// A bare `--resume` (no ID) asks for the session picker; a valued flag
-/// resumes by ID and an absent flag starts fresh.
+/// A bare `-c` (no ID) asks for the session picker; a valued flag
+/// continues by ID and an absent flag starts fresh.
 fn session_picker_requested(cli: &Cli) -> bool {
-    matches!(cli.resume, Some(None))
+    matches!(cli.continue_session, Some(None))
 }
 
 pub fn run(mut cli: Cli) -> Result<()> {
@@ -298,10 +298,10 @@ pub fn run(mut cli: Cli) -> Result<()> {
     }
 
     let cwd_str = cwd.to_string_lossy().into_owned();
-    let session_id = cli.resume.as_ref().and_then(|o| o.as_deref());
+    let session_id = cli.continue_session.as_ref().and_then(|o| o.as_deref());
     let mut session_picker = session_picker_requested(&cli);
     let mut tabs = vec![resolve_session(
-        cli.continue_last && !session_picker,
+        cli.last_session && !session_picker,
         session_id,
         &stack.model.spec(),
         &cwd_str,
@@ -374,7 +374,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
         match outcome {
             RunOutcome::Exit { session_id, code } => {
                 if let Some(session_id) = session_id {
-                    eprintln!("Resume session:\n\n  makima -s {session_id}");
+                    eprintln!("Resume session:\n\n  makima -c {session_id}");
                 }
                 let started = Instant::now();
                 drop(stack);
@@ -577,19 +577,30 @@ mod tests {
         plugin_host.begin_shutdown();
     }
 
-    /// Bare `--resume` (no ID) is the only shape that opens the picker;
+    /// Bare `-c` (no ID) is the only shape that opens the picker;
     /// an absent flag must never trip it.
     #[test]
     fn session_picker_requested_requires_bare_resume() {
         use clap::Parser;
 
         assert!(!session_picker_requested(&Cli::parse_from(["maki"])));
+        assert!(session_picker_requested(&Cli::parse_from(["maki", "-c"])));
         assert!(session_picker_requested(&Cli::parse_from([
-            "maki", "--resume"
+            "maki",
+            "--continue"
         ])));
         assert!(!session_picker_requested(&Cli::parse_from([
-            "maki", "--resume", "abc"
+            "maki", "-c", "abc"
         ])));
+    }
+
+    #[test]
+    fn print_mode_bare_continue_errors() {
+        use clap::Parser;
+
+        let err = run(Cli::parse_from(["maki", "--print", "-c"]))
+            .expect_err("bare -c under --print fails before any stack work");
+        assert!(err.to_string().contains(PICKER_NEEDS_TUI_ERR));
     }
 
     /// Negative control for the test above: without `--no-plugins`, the
