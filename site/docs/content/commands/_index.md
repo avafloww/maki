@@ -43,6 +43,8 @@ The active registry combines built-ins, custom Markdown commands, MCP prompts, a
 | `/splash` | Preview and select a splash renderer |
 | `/thinking` | Set thinking effort (bare opens a selector) |
 
+Built-ins outside the TUI: SDK stream mode and ACP support `/model <spec>` with an explicit model; `--print` supports `/exit`. Every other built-in still resolves, but returns an unsupported-frontend error instead of running.
+
 ### Command arguments
 
 `/model` and `/theme` also accept an argument. While you type it, the palette lists the possible values (model specs, theme names), and submitting resolves the argument without opening the picker:

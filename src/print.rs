@@ -32,7 +32,7 @@ use maki_config::ModelPolicy;
 use maki_lua::EventHandle;
 use maki_providers::model::Model;
 use maki_providers::{TokenUsage, add_cost};
-use maki_storage::id::SessionRef;
+use maki_storage::id::{MakiId, SessionRef};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -277,6 +277,9 @@ fn drive_print(
     literal: AgentInput,
     runner: impl PrintRunner,
 ) -> Result<()> {
+    if !literal.images.is_empty() && registry.resolves_input(&literal.message) {
+        return Err(eyre!("slash commands cannot include images"));
+    }
     let target = registry.create_target();
     let input = match smol::block_on(registry.dispatch_input(&literal.message, 0, target))? {
         InputDispatch::Dispatched(dispatch) => match smol::block_on(dispatch.classification()) {
@@ -553,11 +556,32 @@ pub fn run(
         }
 
         match run_error {
-            Some(error) => Err(eyre!(error)),
+            // The error text is already in the emitted result; a detailed
+            // error report here would print it twice.
+            Some(_) => Err(eyre!("agent run failed")),
             None => Ok(()),
         }
     };
-    drive_print(&command_registry, &sink, literal, runner)
+    let outcome = drive_print(&command_registry, &sink, literal, runner);
+    if let (Err(error), true) = (
+        &outcome,
+        matches!(format, OutputFormat::Json | OutputFormat::StreamJson),
+    ) {
+        let result = PrintResult {
+            result_type: "result",
+            subtype: "error",
+            is_error: true,
+            duration_ms: 0,
+            num_turns: 0,
+            result: error.to_string(),
+            stop_reason: None,
+            session_id: SessionRef::from_id(MakiId::generate()),
+            total_cost_usd: 0.0,
+            usage: TokenUsage::default(),
+        };
+        println!("{}", serde_json::to_string(&result)?);
+    }
+    outcome
 }
 
 #[cfg(test)]

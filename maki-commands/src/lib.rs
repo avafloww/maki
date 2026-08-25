@@ -508,6 +508,14 @@ impl CommandRegistry {
         }
     }
 
+    /// Whether the first whitespace-delimited token of `input` resolves to a
+    /// registered command, without dispatching it. Frontends use this to
+    /// reject input combinations (such as images on a known command) before
+    /// any behavior runs.
+    pub fn resolves_input(&self, input: &str) -> bool {
+        ParsedInput::parse(input).is_some_and(|parsed| self.resolve(parsed.name).is_ok())
+    }
+
     pub fn dispatch_input(
         &self,
         input: &str,

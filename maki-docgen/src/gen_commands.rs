@@ -74,6 +74,13 @@ pub fn generate() -> String {
     }
 
     writeln!(out).unwrap();
+    writeln!(
+        out,
+        "Built-ins outside the TUI: SDK stream mode and ACP support `/model <spec>` with an explicit model; `--print` supports `/exit`. Every other built-in still resolves, but returns an unsupported-frontend error instead of running."
+    )
+    .unwrap();
+
+    writeln!(out).unwrap();
     writeln!(out, "### Command arguments").unwrap();
     writeln!(out).unwrap();
     writeln!(
