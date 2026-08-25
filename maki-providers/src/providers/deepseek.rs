@@ -9,7 +9,7 @@ use tracing::warn;
 use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
 use crate::pricing::{PricingSchedule, PricingWindow};
 use crate::provider::{BoxFuture, Provider};
-use crate::types::{ProviderUsage, UsageLimit};
+use crate::types::{ProviderUsage, UsageLimit, UsageWindow};
 use crate::{
     AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, ThinkingConfig, dialect,
 };
@@ -112,7 +112,7 @@ impl From<BalanceResponse> for ProviderUsage {
                 };
 
                 UsageLimit {
-                    label: "Balance".into(),
+                    kind: UsageWindow::Credits,
                     percentage: None,
                     reset_at: None,
                     detail: Some(format!(

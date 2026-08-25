@@ -301,6 +301,7 @@ pub struct App {
     pub(super) rewind_picker: RewindPicker,
     pub(super) help_modal: HelpModal,
     pub(super) usage_modal: UsageModal,
+    usage_readout_watch: Watch<UsageFetchState>,
     pub(super) btw_modal: BtwModal,
     pub(super) float_mgr: FloatManager,
     pub(super) search_modal: SearchModal,
@@ -407,6 +408,7 @@ impl App {
             rewind_picker: RewindPicker::new(),
             help_modal: HelpModal::new(),
             usage_modal: UsageModal::new(),
+            usage_readout_watch: Watch::default(),
             btw_modal: BtwModal::new(typewriter),
             float_mgr: FloatManager::new(),
             search_modal: SearchModal::new(),
@@ -2184,6 +2186,7 @@ impl App {
             | self.mcp_picker.refresh()
             | self.model_picker.refresh()
             | self.usage_modal.poll(&self.usage_slot)
+            | self.usage_readout_watch.poll(self.usage_slot.load_full())
             | self.hints.poll(self.hint_reader.load_full())
             | self.tick_file_picker()
             | self.tick_file_completion()

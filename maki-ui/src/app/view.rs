@@ -8,7 +8,7 @@ use crate::components::keybindings::key;
 use crate::components::queue_panel;
 use crate::components::split_layout::{MIN_CHAT_ROWS, SplitLayout, carve};
 use crate::components::status_bar::{self, StatusBarContext, UsageStats};
-use crate::components::usage_modal::UsageModalContext;
+use crate::components::usage_modal::{UsageFetchState, UsageModalContext, compact_usage_line};
 use crate::selection::{self, SelectableZone, SelectionZone, ZoneRegistry};
 use crate::theme;
 use maki_lua::Split;
@@ -405,6 +405,7 @@ impl App {
             fast: self.state.fast,
             workflow: self.state.workflow,
             restoring: self.restoring.load(Ordering::Relaxed),
+            usage: self.usage_readout(),
         };
         self.status_bar.view(frame, status_area, &ctx);
     }
@@ -504,6 +505,19 @@ impl App {
     pub(super) fn top_bar_rect(&self, area: Rect) -> Rect {
         let form_visible = self.permission_prompt.is_open() || self.plan_form_active();
         self.compute_layout(area, form_visible).top_bar_area
+    }
+
+    /// Inline quota readout (`5h30% w50%`) drawn in the status bar after the
+    /// context length and cost. Only `Ready` states render; providers without
+    /// a quota endpoint stay clean.
+    pub(super) fn usage_readout(&self) -> Option<Line<'static>> {
+        let state = self.usage_slot.load_full()?;
+        match &*state {
+            UsageFetchState::Ready(usage) if !usage.limits.is_empty() => {
+                Some(compact_usage_line(usage))
+            }
+            _ => None,
+        }
     }
 
     fn lua_hint_line(&self) -> Option<Line<'static>> {

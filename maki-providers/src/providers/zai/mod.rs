@@ -12,7 +12,7 @@ use crate::provider::{BoxFuture, Provider};
 use crate::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use crate::{
     AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse, UsageLimit,
-    dialect,
+    UsageWindow, dialect,
 };
 
 use super::{KeyPool, ResolvedAuth};
@@ -51,12 +51,12 @@ struct QuotaLimit {
     next_reset_time: Option<u64>,
 }
 
-fn quota_label(kind: &str, unit: u32) -> String {
+fn usage_window(kind: &str, unit: u32) -> UsageWindow {
     match (kind, unit) {
-        ("TOKENS_LIMIT", 3) => "5-hour tokens".into(),
-        ("TOKENS_LIMIT", 6) => "Weekly tokens".into(),
-        ("TIME_LIMIT", _) => "Subscription time".into(),
-        _ => format!("{kind} #{unit}"),
+        ("TOKENS_LIMIT", 3) => UsageWindow::Hours(5),
+        ("TOKENS_LIMIT", 6) => UsageWindow::Weekly { model: None },
+        ("TIME_LIMIT", _) => UsageWindow::Subscription,
+        _ => UsageWindow::Other(format!("{kind} #{unit}")),
     }
 }
 
@@ -69,7 +69,7 @@ impl From<QuotaResponse> for ProviderUsage {
                 .limits
                 .into_iter()
                 .map(|l| UsageLimit {
-                    label: quota_label(&l.kind, l.unit),
+                    kind: usage_window(&l.kind, l.unit),
                     percentage: Some(l.percentage),
                     reset_at: l.next_reset_time,
                     detail: None,
@@ -385,11 +385,11 @@ mod tests {
         let usage: ProviderUsage = parsed.into();
         assert_eq!(usage.plan.as_deref(), Some("lite"));
         assert_eq!(usage.limits.len(), 3);
-        assert_eq!(usage.limits[0].label, "5-hour tokens");
+        assert_eq!(usage.limits[0].kind, UsageWindow::Hours(5));
         assert_eq!(usage.limits[0].percentage, Some(16));
         assert_eq!(usage.limits[0].reset_at, Some(1777819631597));
-        assert_eq!(usage.limits[1].label, "Weekly tokens");
-        assert_eq!(usage.limits[2].label, "Subscription time");
+        assert_eq!(usage.limits[1].kind, UsageWindow::Weekly { model: None });
+        assert_eq!(usage.limits[2].kind, UsageWindow::Subscription);
         assert_eq!(usage.limits[2].reset_at, Some(1780336384978));
     }
 
@@ -401,7 +401,10 @@ mod tests {
         let parsed: QuotaResponse = serde_json::from_str(body).unwrap();
         let usage: ProviderUsage = parsed.into();
         assert!(usage.plan.is_none());
-        assert_eq!(usage.limits[0].label, "TOKENS_LIMIT #9");
+        assert_eq!(
+            usage.limits[0].kind,
+            UsageWindow::Other("TOKENS_LIMIT #9".into())
+        );
         assert_eq!(usage.limits[0].percentage, Some(50));
         assert_eq!(usage.limits[0].reset_at, None);
     }
