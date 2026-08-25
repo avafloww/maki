@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use color_eyre::Result;
 use color_eyre::eyre::{Context, bail};
+use crossterm::style::Stylize;
 
 use maki_agent::command::{self, CustomCommand};
 use maki_agent::tools::ToolRegistry;
@@ -236,6 +237,21 @@ fn session_picker_requested(cli: &Cli) -> bool {
     matches!(cli.continue_session, Some(None))
 }
 
+/// Exit hint offering both resume options; the flags and the session ID
+/// are cyan-highlighted only when stderr is a TTY, so piped output stays
+/// plain text.
+fn exit_resume_hint(id: &str, colored: bool) -> String {
+    if !colored {
+        return format!("Resume session:\n\n  makima -c {id}\n  makima -l");
+    }
+    format!(
+        "Resume session:\n\n  makima {} {}\n  makima {}",
+        "-c".cyan(),
+        id.cyan(),
+        "-l".cyan()
+    )
+}
+
 pub fn run(mut cli: Cli) -> Result<()> {
     if cli.print && session_picker_requested(&cli) {
         bail!(PICKER_NEEDS_TUI_ERR);
@@ -374,7 +390,8 @@ pub fn run(mut cli: Cli) -> Result<()> {
         match outcome {
             RunOutcome::Exit { session_id, code } => {
                 if let Some(session_id) = session_id {
-                    eprintln!("Resume session:\n\n  makima -c {session_id}");
+                    let colored = io::stderr().is_terminal();
+                    eprintln!("{}", exit_resume_hint(&session_id.to_string(), colored));
                 }
                 let started = Instant::now();
                 drop(stack);
@@ -601,6 +618,38 @@ mod tests {
         let err = run(Cli::parse_from(["maki", "--print", "-c"]))
             .expect_err("bare -c under --print fails before any stack work");
         assert!(err.to_string().contains(PICKER_NEEDS_TUI_ERR));
+    }
+
+    #[test]
+    fn exit_resume_hint_plain_mentions_both_flags() {
+        let hint = exit_resume_hint("abc", false);
+        assert!(hint.contains("makima -c abc"));
+        assert!(hint.contains("makima -l"));
+        assert!(!hint.contains("\u{1b}["));
+    }
+
+    #[test]
+    fn exit_resume_hint_colored_highlights_flags_and_id() {
+        let hint = exit_resume_hint("abc", true);
+        assert!(hint.contains("\u{1b}["));
+        assert_eq!(strip_ansi(&hint), exit_resume_hint("abc", false));
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 
     /// Negative control for the test above: without `--no-plugins`, the
