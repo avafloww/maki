@@ -311,6 +311,9 @@ pub(crate) struct PermissionPayload {
 pub(crate) struct InputDemand {
     kind: InputKind,
     blocked_by_modal: bool,
+    /// Alt+M manual deferral: held until the next submit instead of the 2s
+    /// idle timer. Auto-deferrals keep this `false`.
+    hold_until_submit: bool,
     perm: Option<PermissionPayload>,
 }
 
@@ -361,6 +364,9 @@ pub struct App {
     pub(super) input_queue: VecDeque<InputDemand>,
     /// Bell owed by a promotion/arrival; drained by the event loop after tick.
     pub(super) pending_bell: bool,
+    /// Armed by a keyboard submit (main or subagent input) to release a manual
+    /// Alt+M hold; consumed by the next promotion pass.
+    pub(super) submit_released: bool,
 
     pub(crate) storage: StateDir,
     pub(crate) theme_provider: Arc<dyn ThemesProvider>,
@@ -471,6 +477,7 @@ impl App {
             active_input: None,
             input_queue: VecDeque::new(),
             pending_bell: false,
+            submit_released: false,
             storage,
             theme_provider,
             usage_slot: Arc::new(ArcSwapOption::empty()),
@@ -829,6 +836,13 @@ impl App {
     }
 
     fn dispatch_overlay(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
+        // Alt+M hides the active permission/ask surface and returns focus to the
+        // input box; it is a no-op and still consumed when nothing is active.
+        if key::DEFER_INPUT.matches(key) {
+            self.defer_active_input();
+            return Some(vec![]);
+        }
+
         if self.permission_active() {
             if let Some(answer) = self.permission_prompt.handle_key(key) {
                 let subagent_id = self.permission_prompt.subagent_id().map(str::to_owned);
@@ -1417,7 +1431,10 @@ impl App {
     /// mode and Esc cancels the subagent, both handled in `handle_key`.
     fn handle_subagent_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {
         match self.input_box.handle_key(key) {
-            InputAction::Submit(sub) if !sub.is_empty() => self.submit_or_queue(sub.into()),
+            InputAction::Submit(sub) if !sub.is_empty() => {
+                self.submit_released = true;
+                self.submit_or_queue(sub.into())
+            }
             _ => vec![],
         }
     }
@@ -1437,6 +1454,9 @@ impl App {
     }
 
     pub(crate) fn handle_submit(&mut self, sub: Submission) -> Vec<Action> {
+        // Any main-input submit releases a manual Alt+M hold, so the deferred
+        // panel re-promotes once the user has placed their message.
+        self.submit_released = true;
         match std::mem::take(&mut self.pending_input) {
             PendingInput::AuthRetry { subagent_id } => {
                 self.send_to_agent(subagent_id.as_deref(), String::new());
@@ -1693,6 +1713,7 @@ impl App {
             let demand = InputDemand {
                 kind: InputKind::Permission,
                 blocked_by_modal: self.has_blocking_modal(),
+                hold_until_submit: false,
                 perm: Some(PermissionPayload {
                     id,
                     tool,
@@ -1781,6 +1802,7 @@ impl App {
             && self.begin_input_demand(InputDemand {
                 kind: InputKind::Question,
                 blocked_by_modal: self.has_blocking_modal(),
+                hold_until_submit: false,
                 perm: None,
             });
         let open_focus = if is_input_demand { !defer } else { focus };
@@ -2302,17 +2324,26 @@ impl App {
         if self.any_input_active() {
             return Dirty::NO;
         }
-        while let Some((kind, blocked_by_modal)) = self
+        // A submit arms the release once, even for the auto-idle path; consume
+        // it here so it cannot leak into later promotions.
+        let released = std::mem::take(&mut self.submit_released);
+        while let Some((kind, blocked_by_modal, hold_until_submit)) = self
             .input_queue
             .front()
-            .map(|d| (d.kind, d.blocked_by_modal))
+            .map(|d| (d.kind, d.blocked_by_modal, d.hold_until_submit))
         {
             // A queued Question whose float already closed is stale: drop it.
             if kind == InputKind::Question && !self.float_mgr.below_is_input() {
                 self.input_queue.pop_front();
                 continue;
             }
-            let ready = !self.is_busy() || (blocked_by_modal && !self.has_blocking_modal());
+            // An Alt+M hold ignores the idle/blocking-modal timers and waits
+            // for the user's next submit.
+            let ready = if hold_until_submit {
+                released
+            } else {
+                !self.is_busy() || (blocked_by_modal && !self.has_blocking_modal())
+            };
             if !ready {
                 return Dirty::NO;
             }
@@ -2342,6 +2373,57 @@ impl App {
             self.pending_bell = true;
         }
         Dirty::YES
+    }
+
+    /// Alt+M: hide the active input surface and hold it until the user's next
+    /// submit (instead of the 2s idle timer). Returns `false` when nothing was
+    /// active. The surface is re-promoted by `promote_deferred_if_ready` once
+    /// `submit_released` is armed by a keyboard submit.
+    pub(crate) fn defer_active_input(&mut self) -> bool {
+        if self.permission_active() {
+            let demand = InputDemand {
+                kind: InputKind::Permission,
+                blocked_by_modal: false,
+                hold_until_submit: true,
+                perm: Some(self.active_permission_payload()),
+            };
+            self.permission_prompt.close();
+            self.active_input = None;
+            self.input_queue.push_back(demand);
+            return true;
+        }
+        if self.question_active() {
+            self.float_mgr.release_focus();
+            self.active_input = None;
+            self.input_queue.push_back(InputDemand {
+                kind: InputKind::Question,
+                blocked_by_modal: false,
+                hold_until_submit: true,
+                perm: None,
+            });
+            return true;
+        }
+        false
+    }
+
+    /// Snapshots the open permission prompt into a queueable payload. Only
+    /// called while `permission_active()`, so the prompt is guaranteed open.
+    fn active_permission_payload(&self) -> PermissionPayload {
+        match &self.permission_prompt {
+            PermissionPrompt::Open {
+                id,
+                tool,
+                scopes,
+                subagent_id,
+                ..
+            } => PermissionPayload {
+                id: id.clone(),
+                tool: tool.clone(),
+                scopes: scopes.clone(),
+                subagent_id: subagent_id.clone(),
+            },
+            PermissionPrompt::Closed => unreachable!("permission_active requires an open prompt"),
+        }
     }
 
     /// Drains the bell owed by a promotion/arrival. The event loop rings it.

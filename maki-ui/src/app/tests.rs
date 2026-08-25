@@ -6333,6 +6333,7 @@ fn perm_demand(id: &str, tool: maki_config::ToolKey, scopes: Vec<String>) -> Inp
     InputDemand {
         kind: InputKind::Permission,
         blocked_by_modal: false,
+        hold_until_submit: false,
         perm: Some(PermissionPayload {
             id: id.into(),
             tool,
@@ -6494,6 +6495,10 @@ fn permission_drawn_on_top_of_model_picker() {
         both_bottom.contains("Permission Required"),
         "permission painted on top in the bottom area"
     );
+    assert!(
+        both_bottom.contains("defer"),
+        "Alt+M defer hint is shown on the active prompt"
+    );
 
     app.permission_prompt.close();
     app.active_input = None;
@@ -6634,6 +6639,10 @@ fn question_drawn_on_top_when_active() {
     assert!(
         both_below.contains(QUESTION_TEXT),
         "question painted on top in the below split"
+    );
+    assert!(
+        both_below.contains("defer"),
+        "Alt+M defer hint is shown on the active question float"
     );
 
     app.float_mgr.close_all();
@@ -6822,5 +6831,101 @@ fn queued_permission_no_overlay_side_effects() {
         zone.zone,
         SelectionZone::Input,
         "Input zone is not shadowed by an Overlay while a permission is queued"
+    );
+}
+
+// ---- manual Alt+M defer (plan 9) ----
+
+fn alt_m() -> KeyEvent {
+    KeyEvent {
+        code: KeyCode::Char('m'),
+        modifiers: KeyModifiers::ALT,
+        kind: crossterm::event::KeyEventKind::Press,
+        state: crossterm::event::KeyEventState::NONE,
+    }
+}
+
+#[test]
+fn alt_m_when_nothing_active_is_noop() {
+    let mut app = test_app();
+    app.last_input = None;
+    let actions = app.update(Msg::Key(alt_m()));
+    assert!(actions.is_empty(), "Alt+M is consumed without side effects");
+    assert!(app.input_queue.is_empty());
+    assert!(!app.permission_active());
+    assert!(!app.question_active());
+}
+
+#[test]
+fn alt_m_defers_active_permission_until_submit() {
+    let mut app = test_app();
+    app.last_input = None;
+    assert!(
+        !app.begin_input_demand(bash_perm_demand("perm")),
+        "idle demand activates immediately"
+    );
+    assert!(app.permission_active());
+
+    app.update(Msg::Key(alt_m()));
+    assert!(!app.permission_active(), "Alt+M hides the active prompt");
+    assert!(!app.permission_prompt.is_open(), "prompt closed on defer");
+    assert_eq!(app.input_queue.len(), 1, "deferred demand is queued");
+    assert!(
+        app.input_queue[0].hold_until_submit,
+        "manual defer holds until submit"
+    );
+
+    // The 2s idle timer must NOT release a manual hold.
+    app.last_input = Some(Instant::now() - IDLE_AGE);
+    let _ = app.tick();
+    assert!(!app.permission_active(), "hold ignores the idle timer");
+    assert!(!app.permission_prompt.is_open(), "prompt still hidden");
+    assert_eq!(app.input_queue.len(), 1);
+
+    // Typing in the freed input box must not answer the deferred prompt.
+    app.update(Msg::Key(key(KeyCode::Char('h'))));
+    assert!(
+        !app.permission_prompt.is_open(),
+        "typing does not misanswer"
+    );
+
+    // Submitting the focused input box releases the hold and re-promotes.
+    let actions = app.handle_submit(Submission::empty());
+    assert!(actions.is_empty(), "empty submit yields nothing");
+    assert!(app.submit_released, "submit arms the release");
+    let _ = app.promote_deferred_if_ready();
+    assert!(app.input_queue.is_empty());
+    assert!(app.permission_active(), "prompt re-promotes after submit");
+}
+
+#[test]
+fn alt_m_defers_active_question_until_submit() {
+    let mut app = test_app();
+    app.last_input = None;
+    let (active, _event_rx, _cmd_tx) = open_question_win(&mut app, true);
+    assert!(active, "idle question activates immediately");
+    assert!(app.question_active());
+    assert!(app.float_mgr.is_focused());
+
+    app.update(Msg::Key(alt_m()));
+    assert!(!app.question_active(), "Alt+M defers the question float");
+    assert!(!app.float_mgr.is_focused(), "float releases focus on defer");
+    assert_eq!(app.input_queue.len(), 1);
+    assert!(app.input_queue[0].hold_until_submit);
+
+    // The 2s idle timer must NOT release a manual hold either.
+    app.last_input = Some(Instant::now() - IDLE_AGE);
+    let _ = app.tick();
+    assert!(!app.question_active(), "hold ignores the idle timer");
+    assert!(!app.float_mgr.is_focused(), "float stays unfocused");
+    assert_eq!(app.input_queue.len(), 1);
+
+    let _ = app.handle_submit(Submission::empty());
+    let _ = app.promote_deferred_if_ready();
+    assert!(app.input_queue.is_empty());
+    assert!(app.question_active(), "float re-promotes after submit");
+    assert!(
+        app.float_mgr.is_focused(),
+        "focus restored on question promotion"
     );
 }

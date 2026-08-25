@@ -12,7 +12,7 @@ use crate::animation::{animation_elapsed_ms, spinner_str};
 use crate::components::split_layout::SplitReq;
 use crate::components::{
     Overlay,
-    keybindings::key_event_to_string,
+    keybindings::{key::DEFER_INPUT, key_event_to_string},
     scrollbar::render_vertical_scrollbar,
     tool_display::{SPINNER_STYLE_NAME, SPINNER_STYLE_PREFIX, resolve_span_style},
 };
@@ -288,6 +288,13 @@ impl FloatManager {
         }
     }
 
+    /// Drops focus so the input box regains the keyboard (Alt+M defer). The
+    /// window stays open; `focus_input_window` restores focus on promotion.
+    pub fn release_focus(&mut self) {
+        self.focused_id = None;
+        self.focused_rect = None;
+    }
+
     /// Whether any window is focused, i.e. the manager owns the keyboard.
     pub fn is_focused(&self) -> bool {
         self.focused_id.is_some()
@@ -421,6 +428,11 @@ impl FloatManager {
             }
             if !win.config.footer.is_empty() {
                 b = b.title_bottom(hint_footer(&win.config.footer).right_aligned());
+            }
+            if win.config.split == Split::Below && win.config.needs_input {
+                // The active input window is the one surface that can be
+                // deferred, so advertise the Alt+M affordance on it.
+                b = b.title_bottom(hint_footer(&[(DEFER_INPUT.label, "defer")]).left_aligned());
             }
             b
         } else {
@@ -809,6 +821,31 @@ mod tests {
         };
         mgr.open(make_buf(&[]), config, false, event_tx, cmd_rx);
         assert_eq!(mgr.below_is_input(), visible);
+    }
+
+    #[test]
+    fn release_focus_drops_only_focus_the_window_stays() {
+        let mut mgr = FloatManager::new();
+        let (etx, crx, _erx, _ctx) = make_channels();
+        mgr.open(
+            make_buf(&["input"]),
+            FloatConfig {
+                split: Split::Below,
+                needs_input: true,
+                ..FloatConfig::default()
+            },
+            true,
+            etx,
+            crx,
+        );
+        assert!(mgr.is_focused(), "opened focused");
+        assert!(mgr.below_is_input(), "window open");
+        mgr.release_focus();
+        assert!(!mgr.is_focused(), "release_focus clears focus");
+        assert!(
+            mgr.below_is_input(),
+            "window remains open so promotion can refocus it"
+        );
     }
 
     #[test]
