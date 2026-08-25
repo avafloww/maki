@@ -46,6 +46,16 @@ fn normalize_abs_path(abs: &Path) -> PathBuf {
     result
 }
 
+/// True when both directory strings refer to the same directory: exact
+/// match, or the same path after `canonicalize_clean`, so symlink and
+/// mount aliases (`~/proj` vs `/mnt/host/proj`) compare equal.
+pub fn dirs_equal(a: &str, b: &str) -> bool {
+    a == b
+        || (!a.is_empty()
+            && !b.is_empty()
+            && canonicalize_clean(Path::new(a)) == canonicalize_clean(Path::new(b)))
+}
+
 /// Canonicalize a path (resolving symlinks) but strip the `\\?\` prefix
 /// that Windows adds. Falls back to `normalize_path` if the path does not
 /// exist yet.

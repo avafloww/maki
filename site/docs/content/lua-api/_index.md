@@ -3179,14 +3179,36 @@ maki.session.list()
 ```
 
 Lists sessions stored for the current project. Answered from a
-background scan, so a slow disk never blocks the UI.
+background scan, so a slow disk never blocks the UI. `open_elsewhere` is
+true while another makima instance has the session open.
 
-**Returns:** (`table|nil`, `string|nil`) Array of `{id, title, updated_at}`, or nil and an error.
+**Returns:** (`table|nil`, `string|nil`) Array of `{id, title, updated_at, cwd, open_elsewhere}`, or nil and an error.
 
 **Example:**
 
 ```lua
 local stored, err = maki.session.list()
+```
+
+---
+
+### `maki.session.list_all()` {#maki-session-list_all}
+
+```lua
+maki.session.list_all()
+```
+
+Lists stored sessions across every project directory, most recently
+updated first. Answered from a background scan, so a slow disk never
+blocks the UI. `open_elsewhere` is true while another makima instance has
+the session open.
+
+**Returns:** (`table|nil`, `string|nil`) Array of `{id, title, updated_at, cwd, open_elsewhere}`, or nil and an error.
+
+**Example:**
+
+```lua
+local stored, err = maki.session.list_all()
 ```
 
 ---
@@ -3235,7 +3257,8 @@ local id = maki.session.current()
 maki.session.focus({id})
 ```
 
-Switches the UI to the session with {id}.
+Switches the UI to the session with {id}. The session must belong to
+the current directory and must not be open in another terminal.
 
 **Parameters:**
 

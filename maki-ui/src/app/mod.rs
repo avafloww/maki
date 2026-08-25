@@ -1923,6 +1923,13 @@ impl App {
         );
     }
 
+    /// Opens the `/sessions` picker for this directory (bare `maki -c`
+    /// before the agent starts). Fire-and-forget, same path as the Ctrl+P
+    /// binding.
+    pub(crate) fn open_session_picker(&self) {
+        self.run_lua_command(SESSIONS_COMMAND, String::new(), 0);
+    }
+
     fn execute_mcp_prompt(&mut self, name: &str, args: &str) -> Vec<Action> {
         let prompt = self.command_palette.find_mcp_prompt(name).unwrap().clone();
 
