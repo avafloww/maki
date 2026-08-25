@@ -100,11 +100,10 @@ Lists every model Maki currently knows about (built-ins, discovered, catalog). O
 ### `maki sessions`
 
 ```bash
-maki sessions
 maki sessions --json
 ```
 
-Lists every stored session across all directories, most recently updated first. Each row carries the ID, title, time since update, and directory. The ID is what you pass to `maki --resume <ID>`. Resuming an ID from another directory keeps your current directory as the working directory. `--json` prints a JSON array for scripting.
+Lists every stored session across all directories, most recently updated first. The command is `--json`-only and prints a JSON array; each entry carries the id, title, `updated_at` (epoch seconds), and `cwd`. The ID is what you pass to `maki --resume <ID>`. Resuming an ID from another directory keeps your current directory as the working directory.
 
 ### `maki mcp`
 
@@ -179,7 +178,7 @@ maki -p --yolo -m anthropic/claude-sonnet-4-6 "summarize the architecture"
 maki -c
 
 # List stored sessions
-maki sessions
+maki sessions --json
 
 # Pick a session to resume
 maki --resume

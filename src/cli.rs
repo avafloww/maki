@@ -217,7 +217,7 @@ pub enum Command {
     },
     /// List all available models
     Models,
-    /// List stored sessions, most recently updated first
+    /// List stored sessions as JSON
     Sessions {
         #[arg(long)]
         json: bool,

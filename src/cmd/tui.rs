@@ -24,6 +24,7 @@ use crate::setup;
 const FALLBACK_MODEL_SPEC: &str = "anthropic/claude-sonnet-4-20250514";
 const CONFIG_FALLBACK_WARNING: &str = "config reload failed, using previous config";
 const MODEL_FALLBACK_WARNING: &str = "model resolution failed, keeping previous model";
+const PICKER_NEEDS_TUI_ERR: &str = "continuing without a session ID opens the session picker, which needs the TUI; run `maki sessions --json` to list session IDs";
 
 /// One generation of the app: everything torn down and rebuilt on `/reload`.
 /// Dropping it joins the Lua thread via `PluginHost::drop`.
@@ -237,9 +238,7 @@ fn session_picker_requested(cli: &Cli) -> bool {
 
 pub fn run(mut cli: Cli) -> Result<()> {
     if cli.print && session_picker_requested(&cli) {
-        bail!(
-            "resuming without a session ID opens the session picker, which needs the TUI; run `maki sessions` to list session IDs"
-        );
+        bail!(PICKER_NEEDS_TUI_ERR);
     }
     let storage = StateDir::resolve().context("resolve data directory")?;
     maki_providers::model_registry::load_from_storage(&storage);
