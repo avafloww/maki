@@ -6,8 +6,10 @@
 //! Only write paths (`heartbeat`) mutate lock state. Readers (`open_elsewhere`)
 //! never reclaim: a stale lock is cleaned up by the next claimant's heartbeat.
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io;
+
+use fs2::FileExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -77,39 +79,40 @@ fn is_fresh(mtime: SystemTime, now: SystemTime) -> bool {
 /// beating after an initial claim detect losing the lock through [`LockBeat::Lost`].
 pub fn heartbeat(dir: &Path, id: &MakiId) -> io::Result<LockBeat> {
     let path = lock_path(dir, id);
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    if let Err(error) = file.try_lock_exclusive() {
+        if error.kind() == io::ErrorKind::WouldBlock {
+            return Ok(LockBeat::Lost);
+        }
+        return Err(error);
+    }
     let pid = std::process::id();
     let holder = holder_pid(&path);
     let foreign = holder.is_some_and(|holder| holder != pid);
-    if foreign && let Ok(mtime) = fs::metadata(&path).and_then(|m| m.modified()) {
-        if is_fresh(mtime, SystemTime::now()) {
-            return Ok(LockBeat::Lost);
-        }
-        let _ = fs::remove_file(&path);
-    } else if holder.is_none() && path.exists() {
-        let _ = fs::remove_file(&path);
-    }
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
+    if foreign
+        && fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|mtime| is_fresh(mtime, SystemTime::now()))
     {
-        Ok(mut file) => {
-            use std::io::Write;
-            file.write_all(pid.to_string().as_bytes())
-                .map_err(io::Error::other)?;
-            file.sync_data().map_err(io::Error::other)?;
-            Ok(LockBeat::Claimed)
-        }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            if holder_pid(&path) == Some(pid) {
-                crate::atomic_write(&path, pid.to_string().as_bytes()).map_err(io::Error::other)?;
-                Ok(LockBeat::Held)
-            } else {
-                Ok(LockBeat::Lost)
-            }
-        }
-        Err(e) => Err(e),
+        file.unlock()?;
+        return Ok(LockBeat::Lost);
     }
+    use std::io::{Seek, SeekFrom, Write};
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(pid.to_string().as_bytes())?;
+    file.sync_data()?;
+    file.unlock()?;
+    Ok(if foreign {
+        LockBeat::Claimed
+    } else {
+        LockBeat::Held
+    })
 }
 
 /// True when another process holds a fresh lock for the session. Read-only:
@@ -131,9 +134,13 @@ pub fn open_elsewhere(dir: &Path, id: &MakiId) -> bool {
 /// staleness window to clear.
 pub fn release(dir: &Path, id: &MakiId) {
     let path = lock_path(dir, id);
-    if holder_pid(&path) == Some(std::process::id()) {
+    let Ok(file) = File::open(&path) else {
+        return;
+    };
+    if file.try_lock_exclusive().is_ok() && holder_pid(&path) == Some(std::process::id()) {
         let _ = fs::remove_file(&path);
     }
+    let _ = file.unlock();
 }
 
 #[cfg(test)]

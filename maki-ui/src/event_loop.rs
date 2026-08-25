@@ -400,6 +400,7 @@ pub(crate) struct EventLoop<'t> {
     notifier: Option<terminal::TerminalNotifier>,
     ctx: SpawnCtx,
     sessions_dir: PathBuf,
+    session_cwd: String,
     last_heartbeat: Instant,
     input: InputReader,
     warn_rx: flume::Receiver<String>,
@@ -618,6 +619,7 @@ impl<'t> EventLoop<'t> {
             app.flash(w);
         }
 
+        let session_cwd = runtimes[focused].app.state.session.cwd.clone();
         Ok(Self {
             terminal,
             sessions: runtimes,
@@ -628,6 +630,7 @@ impl<'t> EventLoop<'t> {
             notifier,
             ctx,
             sessions_dir,
+            session_cwd,
             last_heartbeat: Instant::now(),
             input: InputReader::spawn(),
             warn_rx: bg.warn_rx,
@@ -1056,9 +1059,9 @@ impl<'t> EventLoop<'t> {
         match req {
             SessionRequest::List => {
                 let storage = self.ctx.storage.clone();
+                let cwd = self.session_cwd.clone();
                 smol::unblock(move || {
-                    let cwd = std::env::current_dir().unwrap_or_default();
-                    let reply = AppSession::list(&cwd.to_string_lossy(), &storage)
+                    let reply = AppSession::list(&cwd, &storage)
                         .map_err(|e| e.to_string())
                         .and_then(|list| serde_json::to_value(list).map_err(|e| e.to_string()));
                     let _ = reply_tx.send(reply);
@@ -1127,8 +1130,7 @@ impl<'t> EventLoop<'t> {
             SessionRequest::New { prompt, focus } => {
                 let session = {
                     let slot = self.ctx.model_slot.load();
-                    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-                    AppSession::new(&slot.model.spec(), &cwd.to_string_lossy())
+                    AppSession::new(&slot.model.spec(), &self.session_cwd)
                 };
                 let idx = self.push_runtime(self.ctx.spawn_runtime(session));
                 let id = self.sessions[idx].id();
@@ -1303,10 +1305,7 @@ impl<'t> EventLoop<'t> {
         }
         let session = AppSession::load(id, &self.ctx.storage)
             .map_err(|e| format!("Failed to load session: {e}"))?;
-        let cwd = std::env::current_dir()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
+        let cwd = self.session_cwd.clone();
         let open_elsewhere = session_lock::open_elsewhere(&self.sessions_dir, &id);
         if let Some(block) = session_lock::resume_block(&session.cwd, &cwd, open_elsewhere) {
             return Err(block.to_string());
