@@ -7,7 +7,7 @@ group = "Getting Started"
 
 # Quick Start
 
-Install Maki, connect a provider, run a first session. A few minutes, start to finish.
+Install Makima, connect a provider, run a first session. A few minutes, start to finish.
 
 ## Install
 
@@ -15,7 +15,7 @@ Install Maki, connect a provider, run a first session. A few minutes, start to f
 
 ```sh
 # Download and read the script first (don't blindly trust shell scripts).
-curl -fsSL https://maki.sh/install.sh -o install.sh
+curl -fsSL https://makima.ln4.net/install.sh -o install.sh
 cat install.sh
 
 # Then run.
@@ -25,16 +25,16 @@ chmod +x install.sh && sh install.sh
 One-liner:
 
 ```sh
-curl -fsSL https://maki.sh/install.sh | sh
+curl -fsSL https://makima.ln4.net/install.sh | sh
 ```
 
-Installs to `~/.local/bin`. Override with `MAKI_INSTALL_DIR`.
+Installs to `~/.local/bin`. Override with `MAKIMA_INSTALL_DIR`.
 
 ### Windows (PowerShell)
 
 ```powershell
 # Download and read the script first (don't blindly trust remote scripts).
-irm https://maki.sh/install.ps1 -OutFile install.ps1
+irm https://makima.ln4.net/install.ps1 -OutFile install.ps1
 Get-Content install.ps1
 
 # Then run.
@@ -44,35 +44,35 @@ Get-Content install.ps1
 One-liner:
 
 ```powershell
-irm https://maki.sh/install.ps1 | iex
+irm https://makima.ln4.net/install.ps1 | iex
 ```
 
 ### Windows (Git Bash)
 
 ```sh
-curl -fsSL https://maki.sh/install.sh | sh
+curl -fsSL https://makima.ln4.net/install.sh | sh
 ```
 
-Both install to `%LOCALAPPDATA%\maki` and add it to your user PATH. Override with `MAKI_INSTALL_DIR` / `$env:MAKI_INSTALL_DIR`.
+Both install to `%LOCALAPPDATA%\makima` and add it to your user PATH. Override with `MAKIMA_INSTALL_DIR` / `$env:MAKIMA_INSTALL_DIR`.
 
 ### Living on the edge (main branch)
 
 ```sh
-cargo install --locked --git https://github.com/tontinton/maki.git maki
+cargo install --locked --git https://github.com/lun-4/makima.git makima
 ```
 
 ### With Nix
 
 ```sh
-nix run github:tontinton/maki
+nix run github:lun-4/makima
 ```
 
-Or download a pre-built binary from [GitHub Releases](https://github.com/tontinton/maki/releases/latest).
+Or download a pre-built binary from [GitHub Releases](https://github.com/lun-4/makima/releases/latest).
 
 ## Connect a provider
 
 ```bash
-maki auth login              # interactive picker (OAuth or API key)
+makima auth login              # interactive picker (OAuth or API key)
 export ANTHROPIC_API_KEY=... # or just export a key
 ```
 
@@ -83,7 +83,7 @@ Anthropic, OpenAI, Google, Ollama, and friends all work; multiple keys in one va
 From a repo:
 
 ```bash
-maki
+makima
 ```
 
 Type what you want done, press Enter, watch it work. Worth knowing on day one:
@@ -91,7 +91,7 @@ Type what you want done, press Enter, watch it work. Worth knowing on day one:
 - **Permissions.** File edits inside the repo run freely. `bash` and web tools ask first: `y` allows once, `s` for the session, `a` for the project. Deny rules always win; `/yolo` skips the prompts. Details in [Permissions](/docs/permissions/).
 - **Plan mode.** `Tab` toggles it. The agent may only write the plan file until you approve, then back to build mode.
 - **Models.** `/model` switches mid-session. Type `@` in the input to reference a file, skill, subagent, or model inline; see [References](/docs/references/).
-- **Sessions.** `/new` starts a second session while the first keeps working in the background; `/sessions` jumps between them. Tomorrow, `maki -l` resumes where you left off, `maki sessions --json` lists stored sessions, and `maki -c` opens the session picker for this directory (or `maki -c <ID>` jumps straight in).
+- **Sessions.** `/new` starts a second session while the first keeps working in the background; `/sessions` jumps between them. Tomorrow, `makima -l` resumes where you left off, `makima sessions --json` lists stored sessions, and `makima -c` opens the session picker for this directory (or `makima -c <ID>` jumps straight in).
 - **Your shell.** Prefix input with `!` to run a command yourself (`!cargo test`). `!!` hides command and output from the agent.
 - **Escape hatch.** `Esc Esc` cancels a streaming response. When idle, it rewinds instead.
 - **Help.** `Ctrl+H` lists every keybinding, or see [Keybindings](/docs/keybindings/).
@@ -99,7 +99,7 @@ Type what you want done, press Enter, watch it work. Worth knowing on day one:
 ## Default model (optional)
 
 ```lua
--- ~/.config/maki/init.lua
+-- ~/.config/makima/init.lua
 maki.setup({
     provider = {
         default_model = "anthropic/claude-sonnet-4-6",
@@ -107,14 +107,14 @@ maki.setup({
 })
 ```
 
-Without it, Maki remembers the last model you used.
+Without it, Makima remembers the last model you used.
 
 ## Teach it your project
 
-Maki loads `AGENTS.md` (or `CLAUDE.md`, `.cursorrules`, and friends) from your repo automatically. Per-project settings live under `.maki/`:
+Makima loads `AGENTS.md` (or `CLAUDE.md`, `.cursorrules`, and friends) from your repo automatically. Per-project settings live under `.makima/`:
 
 ```
-.maki/
+.makima/
 ├── init.lua           # overrides global config
 ├── permissions.toml   # permission rules
 ├── mcp.toml           # MCP server config

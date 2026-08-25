@@ -27,7 +27,7 @@ async fn roundtrip(
 
 /// Lists sessions stored for the current project. Answered from a
 /// background scan, so a slow disk never blocks the UI. `open_elsewhere` is
-/// true while another maki instance has the session open.
+/// true while another makima instance has the session open.
 ///
 /// @return (table|nil, string|nil) Array of `{id, title, updated_at, cwd, open_elsewhere}`, or nil and an error.
 /// @example
@@ -39,7 +39,7 @@ async fn list(lua: Lua, #[ctx] tx: Option<flume::Sender<UiAction>>) -> LuaResult
 
 /// Lists stored sessions across every project directory, most recently
 /// updated first. Answered from a background scan, so a slow disk never
-/// blocks the UI. `open_elsewhere` is true while another maki instance has
+/// blocks the UI. `open_elsewhere` is true while another makima instance has
 /// the session open.
 ///
 /// @return (table|nil, string|nil) Array of `{id, title, updated_at, cwd, open_elsewhere}`, or nil and an error.
