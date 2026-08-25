@@ -203,6 +203,33 @@ synchronous `slot.store(Loading)` before the spawn makes the transition
 deterministic, but there is **no regression test**. Flagged so a future session
 can add an `EventLoop` test constructor if desired.
 
+### Label abstraction — later refactor (`UsageWindow`)
+
+The labeling model in the earlier sections changed after the first
+implementation. `UsageLimit.label: String` was replaced by
+`UsageLimit.kind: UsageWindow`, an enum in `maki-providers/src/types.rs` with
+centralized `label()` (modal wording) and `short()` (compact-readout code):
+
+- Synthetic now emits `kind: UsageWindow::Hours(5)` (the 5h lane, including the
+  `subscription` fallback) and `UsageWindow::Weekly { model: None }` (weekly
+  lane) instead of constructing `label: "5h"` / `"w"` directly.
+- The `Decision (operator)` in the Risks section ended up resolved generically
+  rather than per-provider: every provider normalizes into the same enum, so the
+  readout short codes are uniform (`5h`, `w`) and the modal uses shared
+  verbiage. Consequence vs. the plan sketch: Synthetic's `/usage` modal label
+  now reads **"5-hour usage"** / **"Weekly usage"** (via `kind.label()`), not
+  `"5h"` / `"w"` as the earlier text assumed. The compact readout is unchanged
+  (`5h30% w50%` via `kind.short()`), so AC.4 still holds as written.
+- `compact_usage_line` and the modal (both in `usage_modal.rs`) render off
+  `kind.label()` / `kind.short()`. The short-lived string-abbreviation helper
+  that had been added to `usage_modal.rs` is gone — that mapping now lives in
+  `UsageWindow` once, not as text scraping in the UI.
+- Each provider maps its native shape once at parse time: OpenAI from
+  `limit_window_seconds`, Z.AI from `(kind, unit)`, Anthropic from
+  `ApiLimit.kind` (plus the fallback windows), DeepSeek balance → `Credits`.
+  Anthropic's internal wire window struct was renamed `AnthropicWindow` to avoid
+  colliding with the new enum.
+
 ### Docs
 
 `site/docs/content/token-economy/_index.md` gained a one-liner describing the

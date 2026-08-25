@@ -20,7 +20,9 @@ use maki_lua::test_support::{HintWriterHandle, hint_writer_pair};
 use maki_lua::{
     BuiltinAction, CommandArgumentItem, HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader,
 };
-use maki_providers::{ContentBlock, Effort, Message, ProviderUsage, Role, TokenUsage, UsageLimit};
+use maki_providers::{
+    ContentBlock, Effort, Message, ProviderUsage, Role, TokenUsage, UsageLimit, UsageWindow,
+};
 use maki_storage::sessions::{StoredMode, StoredSubagent, StoredThinking};
 use ratatui::layout::Rect;
 use std::env;
@@ -1454,13 +1456,13 @@ fn usage_readout_draws_in_status_bar() {
         plan: None,
         limits: vec![
             UsageLimit {
-                label: "5h".into(),
+                kind: UsageWindow::Hours(5),
                 percentage: Some(30),
                 reset_at: None,
                 detail: None,
             },
             UsageLimit {
-                label: "w".into(),
+                kind: UsageWindow::Weekly { model: None },
                 percentage: Some(50),
                 reset_at: None,
                 detail: None,

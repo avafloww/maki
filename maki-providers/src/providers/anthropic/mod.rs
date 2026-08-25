@@ -19,6 +19,7 @@ use crate::model::Model;
 use crate::provider::{BoxFuture, Provider};
 use crate::{
     AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse, UsageLimit,
+    UsageWindow,
 };
 
 use super::KeyPool;
@@ -31,8 +32,6 @@ const USAGE_PATH: &str = "/api/oauth/usage";
 const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
 const MONEY_EXPONENT: u32 = 2;
-const LABEL_SESSION: &str = "Current session";
-const LABEL_WEEK_ALL: &str = "Current week (all models)";
 
 const ENV_VAR: &str = "ANTHROPIC_API_KEY";
 
@@ -66,10 +65,10 @@ fn apply_fast_mode(body: &mut Value, model: &Model, opts: RequestOptions) -> boo
 struct OauthUsage {
     limits: Vec<ApiLimit>,
     spend: Option<Spend>,
-    five_hour: Option<UsageWindow>,
-    seven_day: Option<UsageWindow>,
-    seven_day_sonnet: Option<UsageWindow>,
-    seven_day_opus: Option<UsageWindow>,
+    five_hour: Option<AnthropicWindow>,
+    seven_day: Option<AnthropicWindow>,
+    seven_day_sonnet: Option<AnthropicWindow>,
+    seven_day_opus: Option<AnthropicWindow>,
     extra_usage: Option<ExtraUsage>,
 }
 
@@ -103,7 +102,7 @@ struct Money {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct UsageWindow {
+struct AnthropicWindow {
     utilization: Option<f64>,
     resets_at: Option<String>,
 }
@@ -131,19 +130,18 @@ fn spent(minor_units: f64, exponent: Option<u32>, currency: Option<&str>) -> Str
     }
 }
 
-fn limit_label(l: &ApiLimit) -> String {
+fn usage_window(l: &ApiLimit) -> UsageWindow {
     match l.kind.as_str() {
-        "session" => LABEL_SESSION.into(),
-        "weekly_all" => LABEL_WEEK_ALL.into(),
-        "weekly_scoped" => match l
-            .scope
-            .pointer("/model/display_name")
-            .and_then(Value::as_str)
-        {
-            Some(name) => format!("Current week ({name})"),
-            None => "Current week".into(),
+        "session" => UsageWindow::Hours(5),
+        "weekly_all" => UsageWindow::Weekly { model: None },
+        "weekly_scoped" => UsageWindow::Weekly {
+            model: l
+                .scope
+                .pointer("/model/display_name")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
         },
-        other => other.into(),
+        other => UsageWindow::Other(other.into()),
     }
 }
 
@@ -163,7 +161,7 @@ fn credits_limit(u: &OauthUsage) -> Option<UsageLimit> {
         _ => return None,
     };
     Some(UsageLimit {
-        label: "Usage credits".into(),
+        kind: UsageWindow::Credits,
         percentage: Some(percent.round() as u32),
         reset_at: None,
         detail,
@@ -177,7 +175,7 @@ impl From<OauthUsage> for ProviderUsage {
             .iter()
             .filter_map(|l| {
                 Some(UsageLimit {
-                    label: limit_label(l),
+                    kind: usage_window(l),
                     percentage: Some(l.percent?.round() as u32),
                     reset_at: l.resets_at.as_deref().and_then(parse_reset),
                     detail: None,
@@ -186,15 +184,25 @@ impl From<OauthUsage> for ProviderUsage {
             .collect();
         if limits.is_empty() {
             let windows = [
-                (LABEL_SESSION, &u.five_hour),
-                (LABEL_WEEK_ALL, &u.seven_day),
-                ("Current week (Sonnet)", &u.seven_day_sonnet),
-                ("Current week (Opus)", &u.seven_day_opus),
+                (UsageWindow::Hours(5), &u.five_hour),
+                (UsageWindow::Weekly { model: None }, &u.seven_day),
+                (
+                    UsageWindow::Weekly {
+                        model: Some("Sonnet".into()),
+                    },
+                    &u.seven_day_sonnet,
+                ),
+                (
+                    UsageWindow::Weekly {
+                        model: Some("Opus".into()),
+                    },
+                    &u.seven_day_opus,
+                ),
             ];
-            limits.extend(windows.into_iter().filter_map(|(label, w)| {
+            limits.extend(windows.into_iter().filter_map(|(kind, w)| {
                 let w = w.as_ref()?;
                 Some(UsageLimit {
-                    label: label.into(),
+                    kind,
                     percentage: Some(w.utilization?.round() as u32),
                     reset_at: w.resets_at.as_deref().and_then(parse_reset),
                     detail: None,
@@ -567,14 +575,19 @@ mod tests {
         let usage: ProviderUsage = parsed.into();
         assert!(usage.plan.is_none());
         assert_eq!(usage.limits.len(), 4);
-        assert_eq!(usage.limits[0].label, "Current session");
+        assert_eq!(usage.limits[0].kind, UsageWindow::Hours(5));
         assert_eq!(usage.limits[0].percentage, Some(14));
         assert_eq!(usage.limits[0].reset_at, Some(1770415200000));
-        assert_eq!(usage.limits[1].label, "Current week (all models)");
+        assert_eq!(usage.limits[1].kind, UsageWindow::Weekly { model: None });
         assert_eq!(usage.limits[1].percentage, Some(2));
-        assert_eq!(usage.limits[2].label, "Current week (Fable)");
+        assert_eq!(
+            usage.limits[2].kind,
+            UsageWindow::Weekly {
+                model: Some("Fable".into())
+            }
+        );
         assert_eq!(usage.limits[2].percentage, Some(3));
-        assert_eq!(usage.limits[3].label, "Usage credits");
+        assert_eq!(usage.limits[3].kind, UsageWindow::Credits);
         assert_eq!(usage.limits[3].percentage, Some(2));
         assert_eq!(usage.limits[3].reset_at, None);
         assert_eq!(usage.limits[3].detail.as_deref(), Some("$2.33 spent"));
@@ -592,14 +605,24 @@ mod tests {
         let parsed: OauthUsage = serde_json::from_str(body).unwrap();
         let usage: ProviderUsage = parsed.into();
         assert_eq!(usage.limits.len(), 5);
-        assert_eq!(usage.limits[0].label, "Current session");
+        assert_eq!(usage.limits[0].kind, UsageWindow::Hours(5));
         assert_eq!(usage.limits[0].percentage, Some(35));
         assert_eq!(usage.limits[0].reset_at, Some(1770415200000));
-        assert_eq!(usage.limits[1].label, "Current week (all models)");
-        assert_eq!(usage.limits[2].label, "Current week (Sonnet)");
-        assert_eq!(usage.limits[3].label, "Current week (Opus)");
+        assert_eq!(usage.limits[1].kind, UsageWindow::Weekly { model: None });
+        assert_eq!(
+            usage.limits[2].kind,
+            UsageWindow::Weekly {
+                model: Some("Sonnet".into())
+            }
+        );
+        assert_eq!(
+            usage.limits[3].kind,
+            UsageWindow::Weekly {
+                model: Some("Opus".into())
+            }
+        );
         assert_eq!(usage.limits[3].percentage, Some(3));
-        assert_eq!(usage.limits[4].label, "Usage credits");
+        assert_eq!(usage.limits[4].kind, UsageWindow::Credits);
         assert_eq!(usage.limits[4].percentage, Some(2));
         assert_eq!(usage.limits[4].detail.as_deref(), Some("$2.33 spent"));
     }
@@ -614,7 +637,7 @@ mod tests {
         let parsed: OauthUsage = serde_json::from_str(body).unwrap();
         let usage: ProviderUsage = parsed.into();
         assert_eq!(usage.limits.len(), 1);
-        assert_eq!(usage.limits[0].label, "Current session");
+        assert_eq!(usage.limits[0].kind, UsageWindow::Hours(5));
         assert_eq!(usage.limits[0].reset_at, None);
     }
 

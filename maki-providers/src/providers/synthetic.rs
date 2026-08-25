@@ -9,7 +9,7 @@ use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
 use crate::provider::{BoxFuture, Provider};
 use crate::{
     AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse, UsageLimit,
-    dialect,
+    UsageWindow, dialect,
 };
 
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
@@ -25,8 +25,6 @@ static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
 };
 
 const QUOTA_URL: &str = "https://api.synthetic.new/v2/quotas";
-const LABEL_5H: &str = "5h";
-const LABEL_WEEKLY: &str = "w";
 const EMPTY_USAGE_ERROR: &str = "Synthetic usage response contained no recognisable quota lane; the endpoint schema likely changed";
 
 inventory::submit!(maki_config::providers::BuiltInProvider {
@@ -235,14 +233,14 @@ fn parse_quotas(response: &str) -> Result<ProviderUsage, AgentError> {
     // `subscription` (requests `limit`). Prefer the v3 key, fall back.
     if let Some(lane) = resp.rolling_five_hour.as_ref() {
         limits.push(UsageLimit {
-            label: LABEL_5H.into(),
+            kind: UsageWindow::Hours(5),
             percentage: usage_percentage(lane.max - lane.remaining, lane.max),
             reset_at: lane.next_tick_at.as_deref().and_then(parse_reset),
             detail: None,
         });
     } else if let Some(lane) = resp.subscription.as_ref() {
         limits.push(UsageLimit {
-            label: LABEL_5H.into(),
+            kind: UsageWindow::Hours(5),
             percentage: usage_percentage(lane.requests, lane.limit),
             reset_at: lane.renews_at.as_deref().and_then(parse_reset),
             detail: None,
@@ -250,7 +248,7 @@ fn parse_quotas(response: &str) -> Result<ProviderUsage, AgentError> {
     }
     if let Some(lane) = resp.weekly_token.as_ref() {
         limits.push(UsageLimit {
-            label: LABEL_WEEKLY.into(),
+            kind: UsageWindow::Weekly { model: None },
             percentage: usage_percentage(100.0 - lane.percent_remaining, 100.0),
             reset_at: lane.next_regen_at.as_deref().and_then(parse_reset),
             detail: None,
@@ -294,13 +292,13 @@ mod tests {
             usage.limits,
             vec![
                 UsageLimit {
-                    label: LABEL_5H.into(),
+                    kind: UsageWindow::Hours(5),
                     percentage: Some(70),
                     reset_at: Some(EPOCH_MS),
                     detail: None,
                 },
                 UsageLimit {
-                    label: LABEL_WEEKLY.into(),
+                    kind: UsageWindow::Weekly { model: None },
                     percentage: Some(50),
                     reset_at: Some(EPOCH_MS),
                     detail: None,
@@ -316,7 +314,7 @@ mod tests {
         assert_eq!(
             usage.limits[0],
             UsageLimit {
-                label: LABEL_5H.into(),
+                kind: UsageWindow::Hours(5),
                 percentage: Some(50),
                 reset_at: Some(EPOCH_MS),
                 detail: None,

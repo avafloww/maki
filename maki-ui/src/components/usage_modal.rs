@@ -323,12 +323,12 @@ fn quota_lines(
             let label_w = usage
                 .limits
                 .iter()
-                .map(|l| l.label.chars().count())
+                .map(|l| l.kind.label().chars().count())
                 .max()
                 .unwrap_or(0);
             for limit in &usage.limits {
                 let mut spans = vec![Span::styled(
-                    format!("{PREFIX}{:<label_w$}", limit.label),
+                    format!("{PREFIX}{:<label_w$}", limit.kind.label()),
                     fg,
                 )];
                 if let Some(pct) = limit.percentage {
@@ -352,7 +352,7 @@ fn quota_lines(
 }
 
 /// One dense line for the inline readout near the input box, joining each
-/// lane as `<label><pct>%` (e.g. `5h30% w50%`), each span colored by usage.
+/// lane as `<abbr><pct>%` (e.g. `5h30% w50%`), each span colored by usage.
 /// Lanes without a percentage are skipped. Non-`Ready` states render nothing
 /// so providers without a quota endpoint keep the area clean.
 pub fn compact_usage_line(usage: &ProviderUsage) -> Line<'static> {
@@ -365,7 +365,7 @@ pub fn compact_usage_line(usage: &ProviderUsage) -> Line<'static> {
             spans.push(Span::raw(" "));
         }
         spans.push(Span::styled(
-            format!("{}{pct}%", limit.label),
+            format!("{}{pct}%", limit.kind.short()),
             crate::theme::usage_color(pct),
         ));
     }
@@ -407,7 +407,7 @@ mod tests {
     use crate::components::{buffer_text, test_model};
     use crate::repaint::expect::{OWED, QUIET};
     use crossterm::event::KeyModifiers;
-    use maki_providers::UsageLimit;
+    use maki_providers::{UsageLimit, UsageWindow};
     use std::sync::Arc;
     use test_case::test_case;
 
@@ -438,13 +438,13 @@ mod tests {
             plan: None,
             limits: vec![
                 UsageLimit {
-                    label: "5h".into(),
+                    kind: UsageWindow::Hours(5),
                     percentage: Some(30),
                     reset_at: None,
                     detail: None,
                 },
                 UsageLimit {
-                    label: "w".into(),
+                    kind: UsageWindow::Weekly { model: None },
                     percentage: Some(50),
                     reset_at: None,
                     detail: None,
@@ -461,13 +461,28 @@ mod tests {
         let usage = ProviderUsage {
             plan: None,
             limits: vec![UsageLimit {
-                label: "5h".into(),
+                kind: UsageWindow::Hours(5),
                 percentage: None,
                 reset_at: None,
                 detail: None,
             }],
         };
         assert_eq!(compact_usage_line(&usage).spans.len(), 0);
+    }
+
+    /// Each variant renders the same modal `label()` and terse `short()` code
+    /// regardless of which provider produced it.
+    #[test_case(UsageWindow::Hours(5), "5-hour usage", "5h" ; "five_hour")]
+    #[test_case(UsageWindow::Days(1), "Daily usage", "d"    ; "daily")]
+    #[test_case(UsageWindow::Days(3), "3-day usage", "3d"   ; "multi_day")]
+    #[test_case(UsageWindow::Weekly { model: None }, "Weekly usage", "w" ; "weekly")]
+    #[test_case(UsageWindow::Weekly { model: Some("Sonnet".into()) }, "Current week (Sonnet)", "w" ; "weekly_scoped")]
+    #[test_case(UsageWindow::Credits, "Usage credits", "cr" ; "credits")]
+    #[test_case(UsageWindow::Subscription, "Subscription", "sub" ; "subscription")]
+    #[test_case(UsageWindow::Other("TOKENS_LIMIT #9".into()), "TOKENS_LIMIT #9", "TOKENS_LIMIT #9" ; "unknown_falls_back")]
+    fn usage_window_vocabulary_is_consistent(kind: UsageWindow, label: &str, short: &str) {
+        assert_eq!(kind.label(), label);
+        assert_eq!(kind.short(), short);
     }
 
     #[test_case(key(KeyCode::Esc, KeyModifiers::NONE) ; "esc_closes")]
@@ -505,13 +520,13 @@ mod tests {
             plan: Some("lite".into()),
             limits: vec![
                 UsageLimit {
-                    label: "Current session".into(),
+                    kind: UsageWindow::Hours(5),
                     percentage: Some(16),
                     reset_at: Some(0),
                     detail: None,
                 },
                 UsageLimit {
-                    label: "Usage credits".into(),
+                    kind: UsageWindow::Credits,
                     percentage: Some(4),
                     reset_at: None,
                     detail: Some("$2.33 spent".into()),
@@ -530,7 +545,7 @@ mod tests {
             lines[1]
                 .spans
                 .iter()
-                .any(|s| s.content.contains("Current session"))
+                .any(|s| s.content.contains("5-hour usage"))
         );
         assert!(lines[1].spans.iter().any(|s| s.content.contains("16%")));
         assert!(lines[1].spans.iter().any(|s| s.content.contains("used")));
