@@ -6,7 +6,9 @@ Stop input-requiring tool-call UI (permission prompts and the `question`/ask too
 window) from (a) painting *behind* other overlays like the `/model` picker and
 (b) silently hijacking the keyboard mid-typing. When such a demand arrives while
 the user is busy, hold it pending; show it on top and take focus only after 2s of
-input idleness or an explicit yield (the blocking modal closes).
+input idleness or an explicit yield (the blocking modal closes). Give the user a
+*manual* escape too (`Alt+M`): hide whatever input surface is currently active,
+keep typing, and let it come back only after the focused input box submits.
 
 ## Implementation Summary
 
@@ -47,6 +49,12 @@ the surface is rendered in a new **topmost** pass at the end of `App::view`, on
 top of all pickers/modals. The queue (not a single slot) is what makes a second
 demand arriving mid-deferral wait its turn instead of becoming an invisible
 zombie.
+
+Alongside the automatic queue, a *manual* path reuses the same queue: `Alt+M`
+(`key::DEFER_INPUT`) on an active surface snapshots it back into the queue marked
+`hold_until_submit`, and the queue head with that marker waits for the user's next
+submit instead of the 2s idle timer. The affordance is advertised on both input
+surfaces.
 
 **Draw/input-switch invariant:** rendering and input routing share a single
 source of truth — `active_input` / the `*_active()` predicates. A queued demand
@@ -440,6 +448,64 @@ single topmost layer; pending ones wait. See Risks for the multi-demand caveat.
     `attention_float_marks_app_as_awaiting_input_until_close`,
     `cancel_clears_pending_input` (`app/tests.rs:1793`).
 
+### Phase 9 — Manual `Alt+M` hold-and-queue deferral (extension)
+
+The queue from Phase 1 is the single slot; `Alt+M` moves an *active* surface
+back into it with a marker that changes *when* it promotes. No new timers, no new
+arbitration entry point — just a manual demotion and a submit-driven release.
+
+25. **Keybinding** (`components/keybindings.rs`): add `key::DEFER_INPUT = Alt+M`
+    next to `EDIT_INPUT` (modifiers `ALT` is already the `Alt+O` pattern), plus a
+    `KEYBINDS` help entry in the `General` context so it shows in the in-app
+    keybindings help and the generated keybindings docs.
+26. **Demand marker** (`app/mod.rs`): `InputDemand` gains `hold_until_submit:
+    bool`, default `false` on both Phase-2 arrival constructors (the permission
+    request and the `UiAction::OpenWin` question) so auto-deferral is unchanged.
+27. **Release flag** (`app/mod.rs`): `App` gains `submit_released: bool` (init
+    `false`), armed by any keyboard submit — at the top of `handle_submit`
+    (`app/mod.rs:1439`, covers the main input box, `exit`, and `!`-shell also)
+    and in `handle_subagent_chat_key`'s `InputAction::Submit` arm. It is consumed
+    once by the next promotion pass (`std::mem::take`, so it cannot leak into a
+    later promotion after a normal submit).
+28. **`defer_active_input(&mut self) -> bool`** (`app/mod.rs`): the manual
+    demotion. If `permission_active()`, snapshot the open prompt's
+    `id/tool/scopes/subagent_id` via `active_permission_payload()`, close the
+    prompt, clear `active_input`, and enqueue a `hold_until_submit` Permission
+    demand. If `question_active()`, call `float_mgr.release_focus()` (the window
+    stays open) and enqueue a `hold_until_submit` Question demand. Otherwise a
+    no-op returning `false`. Wired as the first branch of `dispatch_overlay`
+    (`app/mod.rs:832`): `Alt+M` is consumed even as a no-op so it is a reserved
+    hotkey and never types a char, and it works for both surfaces without either
+    of their existing branches eating the key.
+29. **Promotion change** (`promote_deferred_if_ready`, `app/mod.rs:2300`): after
+    `reconcile_active`, take `submit_released` once; for a front demand with
+    `hold_until_submit`, `ready = submit_released` (ignore `is_busy()` and the
+    `blocked_by_modal` clause). Non-held demands keep the Phase-1 readiness rule.
+    A manual hold therefore *never* promotes on the 2s idle timer or a modal
+    close — only after the focused input box submits, which re-appears the
+    surface (and rings its bell via the existing `activate_deferred_input`).
+30. **Why submitted text is queued, not misdelivered** (`app/mod.rs`): deferring
+    a permission leaves the agent parked on its answer guard with the run still
+    `Status::Streaming`, so a main-box submit already routes through
+    `submit_or_queue` → `queue_and_notify` and lands in the shared queue as a new
+    user message. The deferral only *releases* the hold; it never redirects the
+    typed text into the tool's answer channel.
+31. **Float manager** (`components/lua_float.rs`): add `release_focus()` (clears
+    `focused_id`/`focused_rect`, the inverse of `focus_input_window`). This is the
+    one deliberate focus release; Phase 6 step 19's M.3 avoidance of
+    `release_focus` does not apply because the float being released *is* the
+    active surface rather than a pre-existing popup, and the enqueued demand is
+    `blocked_by_modal: false` + `hold_until_submit: true`, so it cannot be
+    promoted prematurely through the modal-close clause.
+32. **Affordance on the ask window** (`lua_float.rs:render_window`): when the
+    window is `Split::Below` + `needs_input` (the active ask), add a
+    left-aligned `Alt+M defer` bottom title next to the existing right-aligned
+    footer. Only the active input window is ever rendered (Phase 5), so the hint
+    never appears on a queued/hidden window.
+33. **Affordance on the permission prompt** (`permission_prompt.rs`): append
+    `HINT_DEFER_ROW = (key::DEFER_INPUT.label, "defer, keep typing")` to the
+    Normal-state hint rows.
+
 ## Acceptance Criteria
 
 - **AC.1** A permission prompt arriving while the user is typing (last keystroke
@@ -487,6 +553,21 @@ single topmost layer; pending ones wait. See Risks for the multi-demand caveat.
   `any_overlay_open()`: while it is queued (user typing, no picker open), the
   input cursor stays visible, `@`-file-completion still renders, and a mouse
   click in the input area focuses it. Verified by `queued_permission_no_overlay_side_effects`.
+- **AC.14** An active permission prompt or ask float shows the `Alt+M` defer
+  affordance. Verified by render assertions in `permission_drawn_on_top_of_model_picker`
+  and `question_drawn_on_top_when_active`.
+- **AC.15** `Alt+M` hides the active surface, clears its focus, returns focus to
+  the input box, and (re)queues the demand marked `hold_until_submit`. Verified by
+  `alt_m_defers_active_permission_until_submit` and
+  `alt_m_defers_active_question_until_submit`.
+- **AC.16** A manually-held demand does **not** promote on 2s idle or on modal
+  close; it promotes only after the focused input box submits, re-appearing and
+  ringing its bell. The idle-immunity half is asserted in the AC.15 tests by
+  tuning `last_input` to idle and ticking with the hold still queued.
+- **AC.17** Typing/submitting at the main input box while a demand is held never
+  misdelivers the text as the tool answer; it flows through the normal
+  submit/queue path. `Alt+M` with no active surface is a harmless no-op. Verified
+  by `alt_m_when_nothing_active_is_noop`.
 
 ## Test Strategy
 
@@ -528,6 +609,15 @@ code reading.
 | AC.11 | `non_input_window_not_deferred` | unit |
 | AC.12 | `second_demand_enqueues_not_zombie` | unit |
 | AC.13 | `queued_permission_no_overlay_side_effects` | unit + render |
+| AC.14 | `permission_drawn_on_top_of_model_picker` + `question_drawn_on_top_when_active` (hint asserts) | render |
+| AC.15 | `alt_m_defers_active_permission_until_submit` + `alt_m_defers_active_question_until_submit` | unit |
+| AC.16 | same as AC.15 (idle-immunity half) | unit |
+| AC.17 | `alt_m_when_nothing_active_is_noop` | unit |
+
+The `Alt+M` tests use an `alt_m()` key helper (`KeyCode::Char('m')` +
+`KeyModifiers::ALT`) and drive the release via `app.handle_submit(Submission::
+empty())`, which arms `submit_released` without starting a run, then
+`promote_deferred_if_ready()`.
 
 Test sketches (a test-local `perm_demand(id, tool, scopes)` helper builds
 `InputDemand { kind: Permission, blocked_by_modal: false, perm: Some(PermissionPayload{..}) }`;
@@ -628,9 +718,27 @@ Test sketches (a test-local `perm_demand(id, tool, scopes)` helper builds
   `!app.has_modal_overlay()` so a mouse click in the input area would focus it
   (verify via `register_zones`/`layout_geometry` that the Input zone is not
   shadowed by an Overlay zone at the input rect).
+- `alt_m_when_nothing_active_is_noop` (AC.17): with `last_input=None` and no
+  surface open, send `alt_m()` via `update`; assert empty actions, empty queue,
+  and `!permission_active()`/`!question_active()`.
+- `alt_m_defers_active_permission_until_submit` (AC.15/AC.16): idle-activate a
+  permission (`begin_input_demand` returns false); `update(alt_m())`; assert
+  `!permission_active()`, `!permission_prompt.is_open()`, queue length 1 with
+  `hold_until_submit`. Set `last_input` idle and `tick()` → assert the hold still
+  queued (idle-immunity); a typed `'h'` does not open/misanswer the prompt; then
+  `handle_submit(Submission::empty())` + `promote_deferred_if_ready()` → prompt
+  re-opens and the queue drains.
+- `alt_m_defers_active_question_until_submit` (AC.15/AC.16): idle-open a
+  question (`open_question_win(..)` active, float focused); `update(alt_m())`;
+  assert `!question_active()`, `!float_mgr.is_focused()` (focus released),
+  queue length 1 with `hold_until_submit`; idle `tick()` keeps it held; submit +
+  promote → `question_active()` and float focused again.
 
 Add a `lua_float.rs` unit test for `below_is_input()` and `focus_input_window()`
-(toggle `focused_id` to the below+needs_input window).
+(toggle `focused_id` to the below+needs_input window), plus
+`release_focus_drops_only_focus_the_window_stays` (Phase 9 step 31): open a
+below+needs_input window focused, `release_focus()` clears focus while the
+window stays open (`below_is_input()` still true).
 
 Scope to the crate while iterating: `cargo check -p maki-ui --tests`,
 `cargo clippy -p maki-ui --tests -- -D warnings`, `cargo nextest run -p maki-ui`.
@@ -648,11 +756,13 @@ Final: `just ci` on the remote build box (`.ssh/remote-ci.sh`).
 
 ## Documentation Strategy
 
-No user-facing docs change is required: the behavior is a correctness fix to
-existing UI (permission prompts, the ask tool) and is covered by existing docs on
-permissions/ask. If the deferred prompt's "pending" state needs a visible affordance
-later, that would warrant a docs note — not in this change. `AGENTS.md` needs no
-update (architecture unchanged).
+No hand-written user-facing docs change is required: the behavior is a
+correctness fix to existing UI (permission prompts, the ask tool) and is covered
+by existing docs on permissions/ask. The `Alt+M` affordance is surfaced through
+the generated keybindings docs: registering `key::DEFER_INPUT` in `KEYBINDS`
+(Phase 9 step 25) flows into `site/docs/content/keybindings/_index.md` via
+`just gen-docs`, so no prose edit is needed. `AGENTS.md` needs no update
+(architecture unchanged).
 
 ## Risks, Blockers, and Required Decisions
 
