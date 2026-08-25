@@ -1290,10 +1290,10 @@ fn publish(inner: &McpManagerInner, published: &ArcSwap<McpPublishedState>) {
     if let (Some(producer), Some(registrations)) = (&inner.command_producer, registrations)
         && let Err(error) = producer.replace(registrations)
     {
+        // Drop only the prompt-command projection; tools and server state
+        // stay live until the next republish fixes the registrations.
         producer.replace(Vec::new()).ok();
-        published.store(Arc::new(McpPublishedState::default()));
         warn!(%error, "failed to publish MCP prompt commands");
-        return;
     }
     published.store(state);
 }
