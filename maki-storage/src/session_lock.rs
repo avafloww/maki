@@ -2,6 +2,9 @@
 //! sessions dir: the file holds the holder's PID, its mtime is the heartbeat.
 //! A session whose lock is fresh and held by another process is open
 //! elsewhere and cannot be continued from here.
+//!
+//! Only write paths (`heartbeat`) mutate lock state. Readers (`open_elsewhere`)
+//! never reclaim: a stale lock is cleaned up by the next claimant's heartbeat.
 
 use std::fs;
 use std::io;
@@ -28,7 +31,7 @@ pub fn resume_block(
     current_cwd: &str,
     open_elsewhere: bool,
 ) -> Option<ResumeBlock> {
-    if session_cwd != current_cwd {
+    if !crate::paths::dirs_equal(session_cwd, current_cwd) {
         return Some(ResumeBlock::OtherCwd(session_cwd.to_owned()));
     }
     open_elsewhere.then_some(ResumeBlock::OpenElsewhere)
@@ -42,50 +45,86 @@ fn holder_pid(path: &Path) -> Option<u32> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-/// A lock is fresh while its mtime is within `STALE_AFTER` of `now` (or the
-/// clock skew puts it in the future).
+/// Outcome of a `heartbeat` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockBeat {
+    /// The lock was absent, stale, or malformed and we now hold it.
+    Claimed,
+    /// We already held the lock; the beat refreshed it.
+    Held,
+    /// A fresh foreign lock exists: another process holds this session and
+    /// this process must not treat itself as the holder. Callers should stop
+    /// beating (or surface the loss to the user); a later beat may still
+    /// observe the lock going stale and reclaim it.
+    Lost,
+}
+
+/// A lock is fresh while its mtime is within `STALE_AFTER` of `now` on
+/// either side: a small future skew (coarse clocks, timezone-clobbered mtimes)
+/// still counts as fresh, but a far-future mtime goes stale like any other so
+/// a skewed lock cannot block a session forever.
 fn is_fresh(mtime: SystemTime, now: SystemTime) -> bool {
-    match now.duration_since(mtime) {
-        Ok(d) => d <= STALE_AFTER,
-        Err(_) => true,
-    }
+    let skew = if mtime > now {
+        mtime.duration_since(now).unwrap_or_default()
+    } else {
+        now.duration_since(mtime).unwrap_or_default()
+    };
+    skew <= STALE_AFTER
 }
 
 /// Claim the lock if it is absent, stale, malformed, or ours; never clobber a
-/// fresh foreign one. Doubles as the periodic heartbeat.
-pub fn heartbeat(dir: &Path, id: &MakiId) -> io::Result<()> {
+/// fresh foreign one. Doubles as the periodic heartbeat: callers that keep
+/// beating after an initial claim detect losing the lock through [`LockBeat::Lost`].
+pub fn heartbeat(dir: &Path, id: &MakiId) -> io::Result<LockBeat> {
     let path = lock_path(dir, id);
     let pid = std::process::id();
-    if let Some(holder) = holder_pid(&path)
-        && holder != pid
-        && let Ok(mtime) = fs::metadata(&path).and_then(|m| m.modified())
-        && is_fresh(mtime, SystemTime::now())
-    {
-        return Ok(());
+    let holder = holder_pid(&path);
+    let foreign = holder.is_some_and(|holder| holder != pid);
+    if foreign && let Ok(mtime) = fs::metadata(&path).and_then(|m| m.modified()) {
+        if is_fresh(mtime, SystemTime::now()) {
+            return Ok(LockBeat::Lost);
+        }
+        let _ = fs::remove_file(&path);
+    } else if holder.is_none() && path.exists() {
+        let _ = fs::remove_file(&path);
     }
-    crate::atomic_write(&path, pid.to_string().as_bytes()).map_err(io::Error::other)
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(pid.to_string().as_bytes())
+                .map_err(io::Error::other)?;
+            file.sync_data().map_err(io::Error::other)?;
+            Ok(LockBeat::Claimed)
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            if holder_pid(&path) == Some(pid) {
+                crate::atomic_write(&path, pid.to_string().as_bytes()).map_err(io::Error::other)?;
+                Ok(LockBeat::Held)
+            } else {
+                Ok(LockBeat::Lost)
+            }
+        }
+        Err(e) => Err(e),
+    }
 }
 
-/// True when another process holds a fresh lock for the session. A stale lock
-/// (its holder crashed) is reclaimed best-effort.
+/// True when another process holds a fresh lock for the session. Read-only:
+/// stale or malformed locks are left for the next claimant's heartbeat to
+/// reclaim.
 pub fn open_elsewhere(dir: &Path, id: &MakiId) -> bool {
     let path = lock_path(dir, id);
     let (Ok(meta), Some(holder)) = (fs::metadata(&path), holder_pid(&path)) else {
-        // Absent or malformed: best-effort reclaim.
-        let _ = fs::remove_file(&path);
         return false;
     };
     if holder == std::process::id() {
         return false;
     }
-    let Some(mtime) = meta.modified().ok() else {
-        return false;
-    };
-    if !is_fresh(mtime, SystemTime::now()) {
-        let _ = fs::remove_file(&path);
-        return false;
-    }
-    true
+    meta.modified()
+        .is_ok_and(|mtime| is_fresh(mtime, SystemTime::now()))
 }
 
 /// Drop the lock if we hold it. Best effort: a foreign lock is left for its
@@ -229,7 +268,8 @@ mod tests {
             STALE_AFTER + Duration::from_secs(5),
         );
         assert!(!open_elsewhere(dir.path(), &id));
-        assert!(!lock_path(dir.path(), &id).exists());
+        assert!(lock_path(dir.path(), &id).exists());
+        assert_eq!(holder_pid(&lock_path(dir.path(), &id)), Some(FAKE_PID));
     }
 
     #[test]

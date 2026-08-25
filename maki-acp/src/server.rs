@@ -483,6 +483,13 @@ fn install_session(
     let lock = match maki_storage::StateDir::resolve().and_then(|s| s.ensure_subdir(SESSIONS_DIR)) {
         Ok(dir) => {
             let id = handle.session_id.id();
+            if matches!(
+                session_lock::heartbeat(&dir, &id),
+                Ok(session_lock::LockBeat::Lost)
+            ) {
+                warn!(session_id = %id, "session lock claim failed: open elsewhere");
+                return;
+            }
             let (stop_tx, stop_rx) = flume::bounded(1);
             let beat_dir = dir.clone();
             let thread = std::thread::spawn(move || {

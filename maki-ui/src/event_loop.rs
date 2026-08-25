@@ -41,6 +41,15 @@ use maki_storage::sessions::{
 use serde_json::json;
 use tracing::{info, warn};
 
+fn claim_lock(dir: &std::path::Path, id: &MakiId) -> Result<()> {
+    match session_lock::heartbeat(dir, id)? {
+        session_lock::LockBeat::Lost => Err(eyre!(
+            "session is open in another terminal; close it there first"
+        )),
+        session_lock::LockBeat::Claimed | session_lock::LockBeat::Held => Ok(()),
+    }
+}
+
 use crate::AppSession;
 use crate::agent::{
     AgentCommand, AgentHandles, ModelSlot, SystemPromptOverride, shared_queue::QueueItem,
@@ -591,7 +600,7 @@ impl<'t> EventLoop<'t> {
             return Err(eyre!("event loop needs at least one session"));
         }
         for rt in &runtimes {
-            if let Err(e) = session_lock::heartbeat(&sessions_dir, &rt.id()) {
+            if let Err(e) = claim_lock(&sessions_dir, &rt.id()) {
                 warn!(id = %rt.id(), error = %e, "session lock claim failed");
             }
         }
@@ -757,8 +766,12 @@ impl<'t> EventLoop<'t> {
             let ids: Vec<MakiId> = self.sessions.iter().map(|rt| rt.id()).collect();
             smol::unblock(move || {
                 for id in &ids {
-                    if let Err(e) = session_lock::heartbeat(&sessions_dir, id) {
-                        warn!(id = %id, error = %e, "session lock heartbeat failed");
+                    match session_lock::heartbeat(&sessions_dir, id) {
+                        Ok(session_lock::LockBeat::Lost) => {
+                            warn!(id = %id, "session lock lost to another process")
+                        }
+                        Err(e) => warn!(id = %id, error = %e, "session lock heartbeat failed"),
+                        Ok(_) => {}
                     }
                 }
             })
@@ -1269,7 +1282,7 @@ impl<'t> EventLoop<'t> {
         let id = rt.id();
         let sessions_dir = self.sessions_dir.clone();
         smol::unblock(move || {
-            if let Err(e) = session_lock::heartbeat(&sessions_dir, &id) {
+            if let Err(e) = claim_lock(&sessions_dir, &id) {
                 warn!(id = %id, error = %e, "session lock claim failed");
             }
         })

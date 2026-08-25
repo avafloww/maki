@@ -558,8 +558,13 @@ pub fn run(params: SdkParams) -> Result<()> {
     let sessions_dir = storage
         .ensure_subdir(SESSIONS_DIR)
         .context("create sessions dir")?;
-    if let Err(e) = session_lock::heartbeat(&sessions_dir, &locked_id) {
-        warn!(error = %e, session_id = %locked_id, "session lock claim failed");
+    if matches!(
+        session_lock::heartbeat(&sessions_dir, &locked_id),
+        Ok(session_lock::LockBeat::Lost)
+    ) {
+        return Err(eyre!(
+            "session is open in another terminal; close it there first"
+        ));
     }
     let (lock_stop_tx, lock_stop_rx) = flume::bounded(1);
     let lock_dir = sessions_dir.clone();
@@ -571,7 +576,12 @@ pub fn run(params: SdkParams) -> Result<()> {
             {
                 return;
             }
-            let _ = session_lock::heartbeat(&lock_dir, &locked_id);
+            if matches!(
+                session_lock::heartbeat(&lock_dir, &locked_id),
+                Ok(session_lock::LockBeat::Lost)
+            ) {
+                return;
+            }
         }
     });
     let lock_guard = LockGuard {

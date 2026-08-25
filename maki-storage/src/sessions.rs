@@ -78,6 +78,8 @@ pub enum SessionError {
     },
     #[error("session log diverged ({reason}); rewrite required")]
     LogDiverged { reason: &'static str },
+    #[error("session is open in another terminal; close it there first")]
+    OpenElsewhere,
 }
 
 /// Per-model token breakdown entry. Mirrors the four usage counters tracked by
@@ -1230,7 +1232,7 @@ fn scan_headers(cwd: Option<&str>, dir: &Path) -> Result<Vec<SessionSummary>, St
             }
         };
         if let Some(h) = &entry.header
-            && cwd.is_none_or(|c| h.cwd == c)
+            && cwd.is_none_or(|c| crate::paths::dirs_equal(&h.cwd, c))
         {
             out.push(SessionSummary {
                 id: h.id,
@@ -1736,6 +1738,9 @@ where
     }
 
     pub fn delete_from(id: MakiId, dir: &Path) -> Result<(), SessionError> {
+        if session_lock::open_elsewhere(dir, &id) {
+            return Err(SessionError::OpenElsewhere);
+        }
         let mut removed = try_remove(&jsonl_path(dir, id))?;
         removed |= remove_legacy_files(dir, id)?;
         // Backups, not the session: failing to sweep them must not fail a
@@ -1746,13 +1751,7 @@ where
         {
             warn!(error = %e, session_id = %id, "session archives remain after delete");
         }
-        // The lock dies with the session, even if a foreign holder still
-        // claims it: the session file it locked is gone.
-        if let Err(e) = fs::remove_file(session_lock::lock_path(dir, &id))
-            && e.kind() != ErrorKind::NotFound
-        {
-            warn!(error = %e, session_id = %id, "session lock remains after delete");
-        }
+        session_lock::release(dir, &id);
         if !removed {
             return Err(StorageError::NotFound(id.to_string()).into());
         }
