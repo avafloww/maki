@@ -622,6 +622,9 @@ impl<'t> EventLoop<'t> {
             let actions = self.focused_app().handle_submit(sub);
             self.dispatch(self.focused, actions);
         }
+        // Populate the inline quota readout without waiting for `/usage` or
+        // Ctrl+R; provider/model changes below trigger their own refresh.
+        self.refresh_usage();
         // The first frame always paints. After that only a poller, an event or
         // an animation tick owes another.
         let mut dirty = Dirty::YES;
@@ -1405,6 +1408,7 @@ impl<'t> EventLoop<'t> {
                         model: new_model,
                         provider: Arc::from(new_provider),
                     }));
+                    self.refresh_usage_into(Arc::clone(&self.sessions[idx].app.usage_slot));
                 }
                 self.respawn_agent(idx, loaded.messages);
             }
@@ -1503,6 +1507,7 @@ impl<'t> EventLoop<'t> {
             model: new_model,
             provider: Arc::from(new_provider),
         }));
+        self.refresh_usage();
         Ok(())
     }
 
@@ -1523,8 +1528,12 @@ impl<'t> EventLoop<'t> {
     }
 
     fn refresh_usage(&mut self) {
-        let provider = Arc::clone(&self.ctx.model_slot.load().provider);
         let slot = Arc::clone(&self.focused_app().usage_slot);
+        self.refresh_usage_into(slot);
+    }
+
+    fn refresh_usage_into(&self, slot: Arc<ArcSwapOption<UsageFetchState>>) {
+        let provider = Arc::clone(&self.ctx.model_slot.load().provider);
         slot.store(Some(Arc::new(UsageFetchState::Loading)));
         smol::spawn(async move {
             let state = match provider.fetch_usage().await {
@@ -1548,6 +1557,7 @@ impl<'t> EventLoop<'t> {
                     model,
                     provider: Arc::from(provider),
                 }));
+                self.refresh_usage();
             }
         } else if let Some(builtin) = maki_config::providers::builtin_provider(&slug)
             && let Err(e) = self.change_model(builtin.default_model)

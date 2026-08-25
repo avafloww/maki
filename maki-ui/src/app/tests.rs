@@ -20,7 +20,7 @@ use maki_lua::test_support::{HintWriterHandle, hint_writer_pair};
 use maki_lua::{
     BuiltinAction, CommandArgumentItem, HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader,
 };
-use maki_providers::{ContentBlock, Effort, Message, Role, TokenUsage};
+use maki_providers::{ContentBlock, Effort, Message, ProviderUsage, Role, TokenUsage, UsageLimit};
 use maki_storage::sessions::{StoredMode, StoredSubagent, StoredThinking};
 use ratatui::layout::Rect;
 use std::env;
@@ -1445,6 +1445,59 @@ fn rendered_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
                 .collect()
         })
         .collect()
+}
+
+#[test]
+fn usage_readout_draws_in_status_bar() {
+    let mut app = test_app();
+    let usage = ProviderUsage {
+        plan: None,
+        limits: vec![
+            UsageLimit {
+                label: "5h".into(),
+                percentage: Some(30),
+                reset_at: None,
+                detail: None,
+            },
+            UsageLimit {
+                label: "w".into(),
+                percentage: Some(50),
+                reset_at: None,
+                detail: None,
+            },
+        ],
+    };
+    app.usage_slot
+        .store(Some(Arc::new(UsageFetchState::Ready(usage))));
+    let rows = rendered_rows(&mut app, 80, 24);
+    let text = rows.join("\n");
+    assert!(
+        text.contains("5h30% w50%"),
+        "usage readout missing from rendered bottom region:\n{text}"
+    );
+}
+
+#[test]
+fn usage_readout_blank_for_non_ready_states() {
+    let app = test_app();
+    app.usage_slot
+        .store(Some(Arc::new(UsageFetchState::Loading)));
+    assert!(
+        app.usage_readout().is_none(),
+        "Loading must not paint a readout"
+    );
+    app.usage_slot
+        .store(Some(Arc::new(UsageFetchState::Unsupported)));
+    assert!(
+        app.usage_readout().is_none(),
+        "Unsupported must not paint a readout"
+    );
+    app.usage_slot
+        .store(Some(Arc::new(UsageFetchState::Error("boom".into()))));
+    assert!(
+        app.usage_readout().is_none(),
+        "Error must not paint a readout"
+    );
 }
 
 #[test]

@@ -47,6 +47,9 @@ pub struct StatusBarContext<'a> {
     pub stats: UsageStats,
     pub auto_scroll: bool,
     pub retry_info: Option<&'a RetryInfo>,
+    /// Inline provider quota readout (`5h30% w50%`), drawn after the context
+    /// length and cost. `None` for providers without a quota endpoint.
+    pub usage: Option<Line<'static>>,
     pub thinking_label: Option<Cow<'static, str>>,
     pub fast: bool,
     pub workflow: bool,
@@ -220,6 +223,11 @@ impl StatusBar {
                     ));
                 }
 
+                if let Some(usage) = ctx.usage.as_ref() {
+                    rest_spans.push(Span::raw(" "));
+                    rest_spans.extend(usage.spans.iter().cloned());
+                }
+
                 let left_width: usize = left_spans.iter().map(Span::width).sum();
                 let rest_width: usize = rest_spans.iter().map(Span::width).sum();
                 let available = (area.width as usize).saturating_sub(left_width + rest_width);
@@ -378,6 +386,7 @@ mod tests {
             fast: false,
             workflow: false,
             restoring: false,
+            usage: None,
         };
         terminal.draw(|f| bar.view(f, f.area(), &ctx)).unwrap();
         crate::components::buffer_text(terminal.backend().buffer())
@@ -539,6 +548,7 @@ mod tests {
             fast: false,
             workflow: false,
             restoring: false,
+            usage: None,
         };
         term.draw(|frame| bar.view(frame, frame.area(), &ctx))
             .unwrap();

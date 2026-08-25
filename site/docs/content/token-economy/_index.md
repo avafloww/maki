@@ -69,4 +69,6 @@ in context forever               1 turn, 1 line in context
 
 `/usage` shows the token breakdown of the current session, and `--output-format json` in [Headless Mode](/docs/headless/) reports `total_cost_usd` per run. Cheap is a feature you can measure.
 
+When a provider exposes a quota endpoint (Synthetic, OpenAI, Z.AI, DeepSeek), a compact readout like `5h30% w50%` lines up next to the input box so you see remaining quota at a glance, with each lane colored blue to red as it fills. `/usage` still shows the full detail.
+
 Each turn is priced when it happens and that number is stored with the session. Prices move (DeepSeek, for one, doubles every rate during peak UTC hours), so a total re-priced later would be a guess. What you see is what you were billed.

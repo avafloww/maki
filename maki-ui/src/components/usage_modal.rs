@@ -351,6 +351,27 @@ fn quota_lines(
     }
 }
 
+/// One dense line for the inline readout near the input box, joining each
+/// lane as `<label><pct>%` (e.g. `5h30% w50%`), each span colored by usage.
+/// Lanes without a percentage are skipped. Non-`Ready` states render nothing
+/// so providers without a quota endpoint keep the area clean.
+pub fn compact_usage_line(usage: &ProviderUsage) -> Line<'static> {
+    let mut spans: Vec<Span> = Vec::with_capacity(usage.limits.len() * 2);
+    for limit in &usage.limits {
+        let Some(pct) = limit.percentage else {
+            continue;
+        };
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            format!("{}{pct}%", limit.label),
+            crate::theme::usage_color(pct),
+        ));
+    }
+    Line::from(spans).style(theme::current().status_dim)
+}
+
 fn format_reset(epoch_ms: u64, tz: &TimeZone, clock: ClockFormat) -> String {
     let secs = (epoch_ms / 1000) as i64;
     let Ok(ts) = Timestamp::from_second(secs) else {
@@ -409,6 +430,44 @@ mod tests {
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn compact_usage_line_joins_lanes_with_color() {
+        let usage = ProviderUsage {
+            plan: None,
+            limits: vec![
+                UsageLimit {
+                    label: "5h".into(),
+                    percentage: Some(30),
+                    reset_at: None,
+                    detail: None,
+                },
+                UsageLimit {
+                    label: "w".into(),
+                    percentage: Some(50),
+                    reset_at: None,
+                    detail: None,
+                },
+            ],
+        };
+        let line = compact_usage_line(&usage);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "5h30% w50%");
+    }
+
+    #[test]
+    fn compact_usage_line_skips_lanes_without_percentage() {
+        let usage = ProviderUsage {
+            plan: None,
+            limits: vec![UsageLimit {
+                label: "5h".into(),
+                percentage: None,
+                reset_at: None,
+                detail: None,
+            }],
+        };
+        assert_eq!(compact_usage_line(&usage).spans.len(), 0);
     }
 
     #[test_case(key(KeyCode::Esc, KeyModifiers::NONE) ; "esc_closes")]
