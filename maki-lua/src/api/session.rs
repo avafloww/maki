@@ -26,9 +26,10 @@ async fn roundtrip(
 }
 
 /// Lists sessions stored for the current project. Answered from a
-/// background scan, so a slow disk never blocks the UI.
+/// background scan, so a slow disk never blocks the UI. `open_elsewhere` is
+/// true while another maki instance has the session open.
 ///
-/// @return (table|nil, string|nil) Array of `{id, title, updated_at}`, or nil and an error.
+/// @return (table|nil, string|nil) Array of `{id, title, updated_at, cwd, open_elsewhere}`, or nil and an error.
 /// @example
 /// local stored, err = maki.session.list()
 #[lua_fn]
@@ -38,9 +39,10 @@ async fn list(lua: Lua, #[ctx] tx: Option<flume::Sender<UiAction>>) -> LuaResult
 
 /// Lists stored sessions across every project directory, most recently
 /// updated first. Answered from a background scan, so a slow disk never
-/// blocks the UI.
+/// blocks the UI. `open_elsewhere` is true while another maki instance has
+/// the session open.
 ///
-/// @return (table|nil, string|nil) Array of `{id, title, updated_at, cwd}`, or nil and an error.
+/// @return (table|nil, string|nil) Array of `{id, title, updated_at, cwd, open_elsewhere}`, or nil and an error.
 /// @example
 /// local stored, err = maki.session.list_all()
 #[lua_fn]
@@ -71,7 +73,7 @@ async fn current(lua: Lua, #[ctx] tx: Option<flume::Sender<UiAction>>) -> LuaRes
 }
 
 /// Switches the UI to the session with {id}. The session must belong to
-/// the current directory.
+/// the current directory and must not be open in another terminal.
 ///
 /// @param id string Session id, as returned by `list()` or `live()`.
 /// @return (boolean|nil, string|nil) true on success, or nil and an error.

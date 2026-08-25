@@ -28,7 +28,8 @@ use maki_providers::model::Model;
 use maki_providers::provider::{available_model_specs, fetch_all_models};
 use maki_providers::{Message, TokenUsage, add_cost, settle_session};
 use maki_storage::id::{MakiId, SessionRef};
-use maki_storage::sessions::StoredTokenUsage;
+use maki_storage::session_lock;
+use maki_storage::sessions::{SESSIONS_DIR, StoredTokenUsage};
 use serde::Serialize;
 use serde_json::Value;
 use smol::io::AsyncBufReadExt;
@@ -54,12 +55,48 @@ struct Pending {
 
 type PendingState = Arc<Mutex<Pending>>;
 
+/// A session's cross-process lock: the heartbeat thread that keeps it fresh
+/// and where to release it. Dropping stops the thread and releases the lock;
+/// the join in the drop guarantees no beat lands after the release, which
+/// also covers process shutdown after stdin EOF, where `close_session` never
+/// runs.
+struct SessionLock {
+    dir: PathBuf,
+    id: MakiId,
+    stop_tx: flume::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SessionLock {
+    /// Stop the heartbeat thread and release the lock. Only releases if the
+    /// thread stopped cleanly, so no beat can land after the release.
+    fn shutdown(mut self) {
+        self.release();
+    }
+
+    fn release(&mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(t) = self.thread.take()
+            && t.join().is_ok()
+        {
+            session_lock::release(&self.dir, &self.id);
+        }
+    }
+}
+
+impl Drop for SessionLock {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 struct SessionState {
     handle: InteractiveHandle,
     mcp: Option<McpHandle>,
     current_mode: AgentMode,
     current_model: String,
     pending: PendingState,
+    lock: Option<SessionLock>,
 }
 
 struct Server {
@@ -397,7 +434,7 @@ async fn start_mcp(cwd: &Path, servers: &[McpServer]) -> Option<McpHandle> {
 /// Stop the old session before the next one starts, so two generations of the
 /// same MCP servers never fight over a port or a lock file.
 async fn close_session(srv: &mut Server) {
-    let Some(state) = srv.session.take() else {
+    let Some(mut state) = srv.session.take() else {
         return;
     };
     // The event pump dies with the session, so the prompt it owed an answer to
@@ -412,6 +449,9 @@ async fn close_session(srv: &mut Server) {
     state.handle.task.cancel().await;
     if let Some(mcp) = state.mcp {
         mcp.shutdown().await;
+    }
+    if let Some(lock) = state.lock.take() {
+        lock.shutdown();
     }
 }
 
@@ -435,12 +475,46 @@ fn install_session(
         maki_storage::paths::home(),
         initial_cost,
     );
+    // Claim-if-free heartbeat: beats every interval while the session is
+    // open, so the lock goes stale only when this process stops beating. A
+    // dedicated std thread keeps the periodic file I/O off the smol executor
+    // and, being joinable, lets the drop in `SessionLock` prove no beat is in
+    // flight when the lock releases.
+    let lock = match maki_storage::StateDir::resolve().and_then(|s| s.ensure_subdir(SESSIONS_DIR)) {
+        Ok(dir) => {
+            let id = handle.session_id.id();
+            let (stop_tx, stop_rx) = flume::bounded(1);
+            let beat_dir = dir.clone();
+            let thread = std::thread::spawn(move || {
+                loop {
+                    if stop_rx
+                        .recv_timeout(session_lock::HEARTBEAT_INTERVAL)
+                        .is_ok()
+                    {
+                        return;
+                    }
+                    let _ = session_lock::heartbeat(&beat_dir, &id);
+                }
+            });
+            Some(SessionLock {
+                dir,
+                id,
+                stop_tx,
+                thread: Some(thread),
+            })
+        }
+        Err(e) => {
+            warn!(error = %e, "session lock unavailable, continuing unlocked");
+            None
+        }
+    };
     srv.session = Some(SessionState {
         handle,
         mcp,
         current_mode: AgentMode::Build,
         current_model,
         pending,
+        lock,
     });
 }
 
@@ -470,6 +544,12 @@ fn load_history_from(
     > = maki_storage::sessions::Session::load(session_id, storage).map_err(|e| {
         AcpError::resource_not_found(Some(format!("session/{session_id}"))).data(json_str(&e))
     })?;
+    let sessions_dir = storage
+        .ensure_subdir(SESSIONS_DIR)
+        .map_err(|e| AcpError::internal_error().data(json_str(&e)))?;
+    if session_lock::open_elsewhere(&sessions_dir, &session_id) {
+        return Err(AcpError::internal_error().data(json_str(&session_lock::OPEN_ELSEWHERE_MSG)));
+    }
     let cwd = Path::new(&session.cwd)
         .is_absolute()
         .then(|| PathBuf::from(&session.cwd));
@@ -874,6 +954,7 @@ mod tests {
                     permission: Some(ANSWERED_ID),
                     ..Default::default()
                 })),
+                lock: None,
             }),
             elicitation: false,
         };
@@ -1069,6 +1150,31 @@ mod tests {
         let dir = StateDir::from_path(tmp.path().to_path_buf());
         let err = load_history_from(&dir, MakiId::generate()).unwrap_err();
         assert_eq!(err.code, AcpError::resource_not_found(None).code);
+    }
+
+    #[test]
+    fn load_history_from_rejects_session_open_elsewhere() {
+        const FAKE_PID: u32 = u32::MAX - 1;
+        let tmp = TempDir::new().unwrap();
+        let dir = StateDir::from_path(tmp.path().to_path_buf());
+        let mut session: Session<Message, TokenUsage, maki_agent::ToolOutput> =
+            Session::new("anthropic/test-model", "/project");
+        session.replace_messages(vec![Message::user("hi".into())]);
+        session.save(&dir).unwrap();
+        let id = session.id;
+
+        let sessions_dir = dir.ensure_subdir(SESSIONS_DIR).unwrap();
+        let lock = session_lock::lock_path(&sessions_dir, &id);
+        std::fs::write(&lock, FAKE_PID.to_string()).unwrap();
+        let err = load_history_from(&dir, id).unwrap_err();
+        assert_eq!(err.code, AcpError::internal_error().code);
+        assert_eq!(
+            err.data,
+            Some(Value::String(session_lock::OPEN_ELSEWHERE_MSG.to_owned()))
+        );
+
+        std::fs::remove_file(&lock).unwrap();
+        assert!(load_history_from(&dir, id).is_ok());
     }
 
     #[test]

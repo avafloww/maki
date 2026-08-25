@@ -17,7 +17,7 @@ use maki_providers::model::Model;
 use maki_storage::StateDir;
 use maki_storage::id::MakiId;
 use maki_storage::session_lock;
-use maki_storage::sessions::StoredThinking;
+use maki_storage::sessions::{SESSIONS_DIR, StoredThinking};
 use maki_ui::{AppSession, RunOutcome};
 
 use crate::cli::{Cli, normalize_tool_name};
@@ -200,12 +200,14 @@ fn resolve_session(
     cwd: &str,
     storage: &StateDir,
 ) -> Result<AppSession> {
+    let sessions_dir = storage.ensure_subdir(SESSIONS_DIR)?;
     if let Some(raw) = session_id {
         let id: MakiId = raw
             .parse()
             .map_err(|e| color_eyre::eyre::eyre!("invalid session id {raw:?}: {e}"))?;
         let session = AppSession::load(id, storage).map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
-        if let Some(block) = session_lock::other_cwd_block(&session.cwd, cwd) {
+        let locked = session_lock::open_elsewhere(&sessions_dir, &session.id);
+        if let Some(block) = session_lock::resume_block(&session.cwd, cwd, locked) {
             return Err(color_eyre::eyre::eyre!("session {id}: {block}"));
         }
         return Ok(session);
@@ -213,7 +215,8 @@ fn resolve_session(
     if last_session {
         match AppSession::latest(cwd, storage) {
             Ok(Some(session)) => {
-                if let Some(block) = session_lock::other_cwd_block(&session.cwd, cwd) {
+                let locked = session_lock::open_elsewhere(&sessions_dir, &session.id);
+                if let Some(block) = session_lock::resume_block(&session.cwd, cwd, locked) {
                     return Err(color_eyre::eyre::eyre!("session {}: {block}", session.id));
                 }
                 return Ok(session);
@@ -476,6 +479,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use test_case::test_case;
 
     /// `second_saw_first` requires both joins: `defer` joining the first
     /// closure before spawning the second, and `Drop` joining the second
@@ -632,6 +636,8 @@ mod tests {
 
     const OTHER_CWD: &str = "/elsewhere";
     const THIS_CWD: &str = "/here";
+    /// A pid no live process on this machine has.
+    const FAKE_PID: u32 = u32::MAX - 1;
 
     #[test]
     fn resolve_session_rejects_session_from_other_cwd() {
@@ -650,6 +656,35 @@ mod tests {
         )
         .expect_err("a session stored under another cwd must be rejected");
         assert!(err.to_string().contains(OTHER_CWD));
+    }
+
+    #[test_case(true; "valued_continue")]
+    #[test_case(false; "last")]
+    fn resolve_session_rejects_session_open_elsewhere(valued: bool) {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().unwrap();
+        let storage = StateDir::from_path(tmp.path().to_path_buf());
+        let mut session = AppSession::new("test-model", THIS_CWD);
+        session.save(&storage).unwrap();
+        let sessions_dir = storage.ensure_subdir(SESSIONS_DIR).unwrap();
+        let (last, id_arg) = match valued {
+            true => (false, Some(session.id.to_string())),
+            false => (true, None),
+        };
+
+        let loaded = resolve_session(last, id_arg.as_deref(), "test-model", THIS_CWD, &storage)
+            .expect("an unlocked session loads");
+        assert_eq!(loaded.id, session.id);
+
+        fs::write(
+            session_lock::lock_path(&sessions_dir, &session.id),
+            FAKE_PID.to_string(),
+        )
+        .unwrap();
+        let err = resolve_session(last, id_arg.as_deref(), "test-model", THIS_CWD, &storage)
+            .expect_err("a session locked by another instance must be rejected");
+        assert!(err.to_string().contains(session_lock::OPEN_ELSEWHERE_MSG));
     }
 
     #[test]

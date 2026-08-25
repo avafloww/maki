@@ -1,10 +1,12 @@
 -- The /sessions picker: one flat list of every session in this directory,
 -- live or stored. Live ones get a colored icon, and row order is frozen
 -- while the picker is open so rows never jump around under the cursor
--- while background agents keep working.
+-- while background agents keep working. A session open in another terminal
+-- is greyed out and cannot be opened from here.
 
 local TextInput = require("maki.text_input")
 local Spans = require("maki.spans")
+local Helpers = require("sessions_helpers")
 
 local FILTER_PREFIX = "❯ "
 local RENAME_PREFIX = "Rename: "
@@ -14,20 +16,12 @@ local RENAME_USAGE = "Usage: /rename <title>"
 local EMPTY_HINT = "  No sessions yet. Press Ctrl+N to start one."
 local NO_MATCHES_HINT = "  No matches"
 local LOADING_HINT = "  Loading sessions…"
-local CURRENT_LABEL = "current"
+local OPEN_ELSEWHERE_MSG = "session is open in another terminal"
 local TICK_MS = 100
 local AGE_TICKS = 10
 -- Placeholder only: the host swaps "spinner:*"-styled spans for the live
 -- animated frame, so working rows spin without this plugin redrawing.
 local WORKING_ICON = "· "
-local AGE_UNITS = {
-  { 31536000, "y" },
-  { 2592000, "mo" },
-  { 604800, "w" },
-  { 86400, "d" },
-  { 3600, "h" },
-  { 60, "m" },
-}
 local FILTER_KEYS = {
   { "Enter", "open" },
   { "Ctrl+N", "new" },
@@ -137,16 +131,6 @@ local function filter_changed()
   apply_filter()
 end
 
-local function age(updated_at)
-  local secs = math.max(os.time() - (updated_at or 0), 0)
-  for _, u in ipairs(AGE_UNITS) do
-    if secs >= u[1] then
-      return math.floor(secs / u[1]) .. u[2] .. " ago"
-    end
-  end
-  return "just now"
-end
-
 local function dispw(s)
   return utf8.len(s) or #s
 end
@@ -169,9 +153,8 @@ local function render()
   for i, s in ipairs(board.items) do
     local selected = s.id == board.sel_id
     local icon, icon_style, spinning = icon_of(s)
-    local base = selected and "selected" or "item"
-    local right = s.focused and CURRENT_LABEL or age(s.updated_at)
-    local right_style = selected and "selected" or (s.focused and "accent" or "dim")
+    local base = Helpers.row_style(s, selected)
+    local right, right_style = Helpers.right(s, selected)
     if selected then
       icon_style = "selected"
     end
@@ -227,19 +210,7 @@ local function refresh()
     render()
     return
   end
-  local seen, all = {}, {}
-  for _, s in ipairs(live) do
-    seen[s.id] = true
-    s.live = true
-    all[#all + 1] = s
-  end
-  for _, s in ipairs(board.stored or {}) do
-    if not seen[s.id] then
-      s.status = "idle"
-      s.focused = false
-      all[#all + 1] = s
-    end
-  end
+  local all = Helpers.merge(live, board.stored or {})
   board.counts = { needs_input = 0, working = 0 }
   for _, s in ipairs(all) do
     if board.counts[s.status] then
@@ -312,6 +283,10 @@ local function open_selected()
     return
   end
   if not s.focused then
+    if not Helpers.can_open(s) then
+      maki.ui.flash(OPEN_ELSEWHERE_MSG)
+      return
+    end
     local _, err = maki.session.focus(s.id)
     if err then
       maki.ui.flash(err)
@@ -453,7 +428,7 @@ local function handle_key(key)
   end
 end
 
-local function open(opts)
+local function open()
   if board then
     return
   end

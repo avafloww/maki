@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::mem;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -30,9 +30,9 @@ use maki_config::ModelPolicy;
 use maki_providers::model::Model;
 use maki_providers::{ImageSource, Message, StopReason, Timeouts, TokenUsage, add_cost};
 use maki_storage::StateDir;
-use maki_storage::id::SessionRef;
+use maki_storage::id::{MakiId, SessionRef};
 use maki_storage::session_lock;
-use maki_storage::sessions::Session;
+use maki_storage::sessions::{SESSIONS_DIR, Session};
 use serde::Serialize;
 use serde_json::Value;
 use tracing::warn;
@@ -461,6 +461,28 @@ struct Shared {
     pending: HashSet<String>,
 }
 
+/// Stops the session's heartbeat thread and releases its lock on drop, so
+/// every exit path from `run` (including early `?` errors) tears the lock
+/// down: the stop token wakes the loop, the join proves no beat is in
+/// flight, and only then does the release run.
+struct LockGuard {
+    stop_tx: flume::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    dir: PathBuf,
+    id: MakiId,
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(t) = self.thread.take()
+            && t.join().is_ok()
+        {
+            session_lock::release(&self.dir, &self.id);
+        }
+    }
+}
+
 pub fn run(params: SdkParams) -> Result<()> {
     let SdkParams {
         cli,
@@ -526,6 +548,37 @@ pub fn run(params: SdkParams) -> Result<()> {
     let writer = SdkWriter {
         session_id: handle.session_id.clone(),
         out_tx,
+    };
+    // This run owns the session from here on: claim its lock and keep it
+    // fresh on a dedicated thread, so other instances see it as open
+    // elsewhere for the whole run. The guard tears the lock down on every
+    // exit path; a std::thread keeps the periodic blocking I/O off smol's
+    // global executor and is joinable, which a smol task is not.
+    let locked_id = handle.session_id.id();
+    let sessions_dir = storage
+        .ensure_subdir(SESSIONS_DIR)
+        .context("create sessions dir")?;
+    if let Err(e) = session_lock::heartbeat(&sessions_dir, &locked_id) {
+        warn!(error = %e, session_id = %locked_id, "session lock claim failed");
+    }
+    let (lock_stop_tx, lock_stop_rx) = flume::bounded(1);
+    let lock_dir = sessions_dir.clone();
+    let lock_heartbeat = std::thread::spawn(move || {
+        loop {
+            if lock_stop_rx
+                .recv_timeout(session_lock::HEARTBEAT_INTERVAL)
+                .is_ok()
+            {
+                return;
+            }
+            let _ = session_lock::heartbeat(&lock_dir, &locked_id);
+        }
+    });
+    let lock_guard = LockGuard {
+        stop_tx: lock_stop_tx,
+        thread: Some(lock_heartbeat),
+        dir: sessions_dir,
+        id: locked_id,
     };
     let tools: Vec<&str> = handle
         .tool_names
@@ -658,6 +711,7 @@ pub fn run(params: SdkParams) -> Result<()> {
         task.await;
         pump.await;
     });
+    drop(lock_guard);
     drop(writer);
     let _ = writer_thread.join();
     Ok(())
@@ -670,6 +724,9 @@ fn resolve_session(
     cwd: &str,
     storage: &StateDir,
 ) -> Result<(Option<SessionRef>, Vec<Message>)> {
+    let sessions_dir = storage
+        .ensure_subdir(SESSIONS_DIR)
+        .context("create sessions dir")?;
     // A bare continue flag (no ID) is rejected by the TUI guard before SDK
     // mode starts, so only a valued ID reaches this branch.
     let (resumed_id, history) =
@@ -679,9 +736,9 @@ fn resolve_session(
                 .map_err(|e| eyre!("invalid session id {id}: {e}"))?;
             let session = StoredSession::load(session_ref.id(), storage)
                 .map_err(|e| eyre!("load session {id}: {e}"))?;
-            // The fork source is a read-only copy: no cwd check on it.
+            // The fork source is a read-only copy: no resume-block checks on it.
             if !cli.fork_session
-                && let Some(block) = session_lock::other_cwd_block(&session.cwd, cwd)
+                && let Some(block) = resume_block_for(&sessions_dir, &session, cwd)
             {
                 return Err(eyre!("session {id}: {block}"));
             }
@@ -690,7 +747,7 @@ fn resolve_session(
         } else if cli.last_session {
             match StoredSession::latest(cwd, storage) {
                 Ok(Some(session)) => {
-                    if let Some(block) = session_lock::other_cwd_block(&session.cwd, cwd) {
+                    if let Some(block) = resume_block_for(&sessions_dir, &session, cwd) {
                         return Err(eyre!("session {}: {block}", session.id));
                     }
                     (Some(SessionRef::from(session.id)), session.take_messages())
@@ -707,12 +764,13 @@ fn resolve_session(
     });
     let cli_session_id = match cli_session_id {
         // A successful load proves the pinned ID pre-exists, so it must
-        // belong to this directory; a fresh ID simply starts new.
+        // belong to this directory and be free of other holders; a fresh ID
+        // simply starts new.
         Some(Ok(id)) => {
             if let Ok(session) = StoredSession::load(id.id(), storage)
-                && let Some(block) = session_lock::other_cwd_block(&session.cwd, cwd)
+                && let Some(block) = resume_block_for(&sessions_dir, &session, cwd)
             {
-                return Err(eyre!("session {}: {block}", id.id()));
+                return Err(eyre!("session {}: {block}", session.id));
             }
             Some(id)
         }
@@ -721,6 +779,18 @@ fn resolve_session(
     };
 
     Ok((cli_session_id.or(resumed_id), history))
+}
+
+fn resume_block_for(
+    sessions_dir: &Path,
+    session: &StoredSession,
+    cwd: &str,
+) -> Option<session_lock::ResumeBlock> {
+    session_lock::resume_block(
+        &session.cwd,
+        cwd,
+        session_lock::open_elsewhere(sessions_dir, &session.id),
+    )
 }
 
 fn parse_or_warn<T: serde::de::DeserializeOwned>(payload: Value, what: &str) -> Option<T> {
@@ -1124,6 +1194,8 @@ mod tests {
 
     const OTHER_CWD: &str = "/elsewhere";
     const THIS_CWD: &str = "/here";
+    /// A pid no live process on this machine has.
+    const FAKE_PID: u32 = u32::MAX - 1;
 
     #[test]
     fn sdk_resolve_session_rejects_session_from_other_cwd() {
@@ -1144,6 +1216,41 @@ mod tests {
                 .expect_err("a session stored under another cwd must be rejected");
             assert!(err.to_string().contains(OTHER_CWD));
         }
+    }
+
+    #[test_case("-c"; "valued_continue")]
+    #[test_case("--session-id"; "pinned_id")]
+    #[test_case("-l"; "last")]
+    fn sdk_resolve_session_rejects_session_open_elsewhere(flag: &str) {
+        use clap::Parser;
+        use std::fs;
+        use tempfile::tempdir;
+
+        let tmp = tempdir().unwrap();
+        let storage = StateDir::from_path(tmp.path().to_path_buf());
+        let mut session = StoredSession::new("test-model", THIS_CWD);
+        session.save(&storage).unwrap();
+        let sessions_dir = storage.ensure_subdir(SESSIONS_DIR).unwrap();
+
+        let mut args = vec!["maki".to_string()];
+        args.push(flag.to_string());
+        if flag != "-l" {
+            args.push(session.id.to_string());
+        }
+        let cli = Cli::parse_from(args.iter().map(String::as_str));
+
+        let (resumed, _history) =
+            resolve_session(&cli, THIS_CWD, &storage).expect("an unlocked session loads");
+        assert_eq!(resumed.map(|r| r.id()), Some(session.id));
+
+        fs::write(
+            session_lock::lock_path(&sessions_dir, &session.id),
+            FAKE_PID.to_string(),
+        )
+        .unwrap();
+        let err = resolve_session(&cli, THIS_CWD, &storage)
+            .expect_err("a session locked by another instance must be rejected");
+        assert!(err.to_string().contains(session_lock::OPEN_ELSEWHERE_MSG));
     }
 
     fn claude_to_maki_tool_name(name: &str) -> &str {

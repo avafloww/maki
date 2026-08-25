@@ -7,6 +7,7 @@
 //! waits on every event source at once and wakes the moment a plugin action,
 //! agent event, or keypress arrives instead of sleeping in `event::poll`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -34,7 +35,9 @@ use maki_storage::StateDir;
 use maki_storage::StorageError;
 use maki_storage::id::{MakiId, MakiIdParseError, SessionRef};
 use maki_storage::session_lock;
-use maki_storage::sessions::{Prefs, SessionError, StoredThinking, normalize_title, write_prefs};
+use maki_storage::sessions::{
+    Prefs, SESSIONS_DIR, SessionError, StoredThinking, normalize_title, write_prefs,
+};
 use serde_json::json;
 use tracing::{info, warn};
 
@@ -387,6 +390,8 @@ pub(crate) struct EventLoop<'t> {
     terminal_focused: bool,
     notifier: Option<terminal::TerminalNotifier>,
     ctx: SpawnCtx,
+    sessions_dir: PathBuf,
+    last_heartbeat: Instant,
     input: InputReader,
     warn_rx: flume::Receiver<String>,
     warn_tx: flume::Sender<String>,
@@ -551,6 +556,7 @@ impl<'t> EventLoop<'t> {
         }));
         let bg = spawn_model_fetch(&model_slot, timeouts, Arc::clone(&model_policy));
         let storage_writer = Arc::new(StorageWriter::new(storage.clone(), bg.warn_tx.clone()));
+        let sessions_dir = storage.ensure_subdir(SESSIONS_DIR)?;
 
         let notifier = terminal::TerminalNotifier::new(ui_config.notifications);
         let ctx = SpawnCtx {
@@ -584,6 +590,11 @@ impl<'t> EventLoop<'t> {
         if runtimes.is_empty() {
             return Err(eyre!("event loop needs at least one session"));
         }
+        for rt in &runtimes {
+            if let Err(e) = session_lock::heartbeat(&sessions_dir, &rt.id()) {
+                warn!(id = %rt.id(), error = %e, "session lock claim failed");
+            }
+        }
         let focused = focused.min(runtimes.len() - 1);
         let app = &mut runtimes[focused].app;
         app.exit_on_done = exit_on_done;
@@ -607,6 +618,8 @@ impl<'t> EventLoop<'t> {
             terminal_focused: false,
             notifier,
             ctx,
+            sessions_dir,
+            last_heartbeat: Instant::now(),
             input: InputReader::spawn(),
             warn_rx: bg.warn_rx,
             warn_tx: bg.warn_tx,
@@ -737,6 +750,20 @@ impl<'t> EventLoop<'t> {
     /// looking at would lose the output.
     fn tick(&mut self) -> Dirty {
         let mut dirty = Dirty::NO;
+        let now = Instant::now();
+        if now.duration_since(self.last_heartbeat) >= session_lock::HEARTBEAT_INTERVAL {
+            self.last_heartbeat = now;
+            let sessions_dir = self.sessions_dir.clone();
+            let ids: Vec<MakiId> = self.sessions.iter().map(|rt| rt.id()).collect();
+            smol::unblock(move || {
+                for id in &ids {
+                    if let Err(e) = session_lock::heartbeat(&sessions_dir, id) {
+                        warn!(id = %id, error = %e, "session lock heartbeat failed");
+                    }
+                }
+            })
+            .detach();
+        }
         let mut login_actions: Vec<(usize, Vec<Action>)> = Vec::new();
         for (i, rt) in self.sessions.iter_mut().enumerate() {
             if i == self.focused {
@@ -1226,6 +1253,12 @@ impl<'t> EventLoop<'t> {
     fn remove_runtime(&mut self, idx: usize) -> SessionRuntime {
         debug_assert_ne!(idx, self.focused);
         let rt = self.sessions.remove(idx);
+        let id = rt.id();
+        let sessions_dir = self.sessions_dir.clone();
+        smol::unblock(move || {
+            session_lock::release(&sessions_dir, &id);
+        })
+        .detach();
         if idx < self.focused {
             self.focused -= 1;
         }
@@ -1233,6 +1266,14 @@ impl<'t> EventLoop<'t> {
     }
 
     fn push_runtime(&mut self, rt: SessionRuntime) -> usize {
+        let id = rt.id();
+        let sessions_dir = self.sessions_dir.clone();
+        smol::unblock(move || {
+            if let Err(e) = session_lock::heartbeat(&sessions_dir, &id) {
+                warn!(id = %id, error = %e, "session lock claim failed");
+            }
+        })
+        .detach();
         self.sessions.push(rt);
         self.sessions.len() - 1
     }
@@ -1240,7 +1281,8 @@ impl<'t> EventLoop<'t> {
     /// Focus a live session, or bring a stored one up: in place when the
     /// focused session is a blank idle one (nothing worth keeping), otherwise
     /// as a new runtime so the session you came from stays live. A stored
-    /// session from another directory is rejected.
+    /// session from another directory, or one held open by a live process
+    /// elsewhere, is rejected.
     fn focus_session(&mut self, id: MakiId) -> Result<(), String> {
         if let Some(i) = self.position(id) {
             self.focused = i;
@@ -1252,12 +1294,26 @@ impl<'t> EventLoop<'t> {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        if let Some(block) = session_lock::other_cwd_block(&session.cwd, &cwd) {
+        let open_elsewhere = session_lock::open_elsewhere(&self.sessions_dir, &id);
+        if let Some(block) = session_lock::resume_block(&session.cwd, &cwd, open_elsewhere) {
             return Err(block.to_string());
         }
         let focused = &mut self.sessions[self.focused];
         if SessionStatus::of(&focused.app) == SessionStatus::Idle && !focused.app.has_content() {
+            let old_id = focused.id();
             let actions = focused.app.load_loaded_session(session);
+            let sessions_dir = self.sessions_dir.clone();
+            smol::unblock(move || {
+                session_lock::release(&sessions_dir, &old_id);
+            })
+            .detach();
+            let sessions_dir = self.sessions_dir.clone();
+            smol::unblock(move || {
+                if let Err(e) = session_lock::heartbeat(&sessions_dir, &id) {
+                    warn!(id = %id, error = %e, "session lock claim failed");
+                }
+            })
+            .detach();
             self.dispatch(self.focused, actions);
             return Ok(());
         }
@@ -1591,6 +1647,9 @@ impl<'t> EventLoop<'t> {
             elapsed
         };
         let exit = self.sessions[self.focused].app.exit_request;
+        for rt in &self.sessions {
+            session_lock::release(&self.sessions_dir, &rt.id());
+        }
         if let Some(ref h) = self.ctx.mcp_handle {
             mcp::kill_process_groups(&h.reader().load().pids);
         }

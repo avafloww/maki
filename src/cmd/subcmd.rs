@@ -760,6 +760,7 @@ mod tests {
             title: title.into(),
             updated_at,
             cwd: cwd.into(),
+            open_elsewhere: false,
         }
     }
 
@@ -783,12 +784,15 @@ mod tests {
         for entry in arr {
             let obj = entry.as_object().unwrap();
             let keys: BTreeSet<&str> = obj.keys().map(String::as_str).collect();
-            let expected: BTreeSet<_> = ["cwd", "id", "title", "updated_at"].into_iter().collect();
+            let expected: BTreeSet<_> = ["cwd", "id", "open_elsewhere", "title", "updated_at"]
+                .into_iter()
+                .collect();
             assert_eq!(keys, expected);
             assert!(obj["id"].is_string());
             assert!(obj["title"].is_string());
             assert!(obj["updated_at"].is_u64());
             assert!(obj["cwd"].is_string());
+            assert!(!obj["open_elsewhere"].as_bool().unwrap());
         }
     }
 }
