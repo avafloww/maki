@@ -170,7 +170,7 @@ impl PromptSink for CommandDispatcher {
         prompt: String,
         invocation: CommandInvocation,
     ) -> CommandFuture<Result<(), CommandError>> {
-        route_command(&self.mailboxes, invocation, CommandRoute::Prompt(prompt))
+        route_agent_turn(&self.mailboxes, invocation, CommandRoute::Prompt(prompt))
     }
 }
 
@@ -180,7 +180,7 @@ impl McpPromptSink for CommandDispatcher {
         invocation: CommandInvocation,
         prompt: McpPromptRequest,
     ) -> CommandFuture<Result<(), CommandError>> {
-        route_command(&self.mailboxes, invocation, CommandRoute::Mcp(prompt))
+        route_agent_turn(&self.mailboxes, invocation, CommandRoute::Mcp(prompt))
     }
 }
 
@@ -202,6 +202,23 @@ fn route_command(
                 lifecycle: invocation.lifecycle,
             })
             .map_err(|_| CommandError::StaleTarget)
+    })
+}
+
+/// Routes a command whose effect is an agent turn and classifies the
+/// invocation synchronously, so a frontend awaiting the classification never
+/// observes a premature terminal state while the producing handler runs on.
+fn route_agent_turn(
+    mailboxes: &Arc<Mutex<HashMap<InvocationTargetId, flume::Sender<RoutedCommand>>>>,
+    invocation: CommandInvocation,
+    route: CommandRoute,
+) -> CommandFuture<Result<(), CommandError>> {
+    let lifecycle = invocation.lifecycle.clone();
+    let routed = route_command(mailboxes, invocation, route);
+    Box::pin(async move {
+        routed.await?;
+        lifecycle.transition(CommandClassification::AgentTurnAccepted);
+        Ok(())
     })
 }
 
@@ -257,5 +274,48 @@ mod tests {
             smol::block_on(registry.dispatch_input("/model stale", 0, stale_target)).unwrap_err();
         assert_eq!(error, CommandError::StaleTarget);
         assert!(second.receiver().is_empty());
+    }
+
+    #[test]
+    fn prompt_submit_classifies_agent_turn_before_the_handler_finishes() {
+        let dispatcher = CommandDispatcher::new(CommandRegistry::new(), &[]);
+        let mailbox = dispatcher.create_mailbox();
+        let producer = dispatcher
+            .registry()
+            .create_producer(ProducerPrecedence::Application);
+        command::register_commands(
+            &producer,
+            &[command::CustomCommand {
+                name: "greet".into(),
+                description: "greets".into(),
+                content: "hello $ARGUMENTS".into(),
+                scope: maki_agent::command::CommandScope::Project,
+                accepts_args: true,
+            }],
+            Arc::new(dispatcher.clone()) as Arc<dyn command::PromptSink>,
+        )
+        .unwrap();
+
+        let InputDispatch::Dispatched(dispatch) = smol::block_on(
+            dispatcher
+                .registry()
+                .dispatch_input("/project:greet world", 0, mailbox.target()),
+        )
+        .unwrap() else {
+            panic!("custom command did not dispatch");
+        };
+
+        // The sink classifies the invocation synchronously, so a producing
+        // handler that keeps running cannot be mistaken for a completed
+        // command, and the routed prompt is already queued.
+        assert_eq!(
+            smol::block_on(futures_lite::future::poll_once(dispatch.classification())).unwrap(),
+            CommandClassification::AgentTurnAccepted
+        );
+        let routed = smol::block_on(mailbox.receiver().recv_async()).unwrap();
+        let CommandRoute::Prompt(prompt) = routed.route else {
+            panic!("expected a prompt route");
+        };
+        assert_eq!(prompt, "hello world");
     }
 }

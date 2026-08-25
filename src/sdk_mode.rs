@@ -485,7 +485,6 @@ enum CommandRoute {
     Agent {
         message: String,
         prompt: Option<Box<McpPromptRef>>,
-        lifecycle: InvocationLifecycle,
     },
     Model {
         argument: String,
@@ -504,11 +503,16 @@ impl PromptSink for PromptRouteSink {
         prompt: String,
         invocation: CommandInvocation,
     ) -> CommandFuture<Result<(), CommandError>> {
-        let result = self.tx.send(CommandRoute::Agent {
-            message: prompt,
-            prompt: None,
-            lifecycle: invocation.lifecycle,
-        });
+        let lifecycle = invocation.lifecycle.clone();
+        let result = self
+            .tx
+            .send(CommandRoute::Agent {
+                message: prompt,
+                prompt: None,
+            })
+            .inspect(|_| {
+                lifecycle.transition(CommandClassification::AgentTurnAccepted);
+            });
         Box::pin(async move { result.map_err(|_| CommandError::StaleTarget) })
     }
 }
@@ -519,14 +523,19 @@ impl McpPromptSink for PromptRouteSink {
         invocation: CommandInvocation,
         prompt: McpPromptRequest,
     ) -> CommandFuture<Result<(), CommandError>> {
-        let result = self.tx.send(CommandRoute::Agent {
-            message: prompt.display_text,
-            prompt: Some(Box::new(McpPromptRef {
-                qualified_name: prompt.qualified_name,
-                arguments: prompt.arguments,
-            })),
-            lifecycle: invocation.lifecycle,
-        });
+        let lifecycle = invocation.lifecycle.clone();
+        let result = self
+            .tx
+            .send(CommandRoute::Agent {
+                message: prompt.display_text,
+                prompt: Some(Box::new(McpPromptRef {
+                    qualified_name: prompt.qualified_name,
+                    arguments: prompt.arguments,
+                })),
+            })
+            .inspect(|_| {
+                lifecycle.transition(CommandClassification::AgentTurnAccepted);
+            });
         Box::pin(async move { result.map_err(|_| CommandError::StaleTarget) })
     }
 }
@@ -1023,11 +1032,7 @@ fn spawn_command_driver(params: CommandDriverParams) -> smol::Task<()> {
         } = params;
         while let Ok(route) = route_rx.recv_async().await {
             match route {
-                CommandRoute::Agent {
-                    message,
-                    prompt,
-                    lifecycle,
-                } => {
+                CommandRoute::Agent { message, prompt } => {
                     let mode = shared.lock().unwrap().permission_mode;
                     let input = AgentInput {
                         message,
@@ -1039,12 +1044,7 @@ fn spawn_command_driver(params: CommandDriverParams) -> smol::Task<()> {
                         workflow,
                         prompt,
                     };
-                    let classification = if input_tx.send(input).is_ok() {
-                        CommandClassification::AgentTurnAccepted
-                    } else {
-                        CommandClassification::Failed(CommandError::StaleTarget)
-                    };
-                    lifecycle.transition(classification);
+                    let _ = input_tx.send(input);
                 }
                 CommandRoute::Model {
                     argument,

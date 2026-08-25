@@ -3406,6 +3406,7 @@ pub fn spawn(registry: Arc<ToolRegistry>, config: SpawnConfig) -> Result<LuaThre
                                 let lua = rt.lua.clone();
                                 ex.spawn(async move {
                                     let lifecycle = invocation.lifecycle.clone();
+                                    let is_root = invocation.depth == 0;
                                     let arguments = invocation.arguments.to_string();
                                     let run = async {
                                         let opts = lua.create_table()?;
@@ -3419,18 +3420,23 @@ pub fn spawn(registry: Arc<ToolRegistry>, config: SpawnConfig) -> Result<LuaThre
                                     };
                                     match run_command_scoped(&lua, invocation, run).await {
                                         Ok(()) => {
-                                            lifecycle.transition(CommandClassification::Completed);
+                                            if is_root {
+                                                lifecycle
+                                                    .transition(CommandClassification::Completed);
+                                            }
                                         }
                                         Err(e) => {
                                             tracing::warn!(plugin = %plugin, command = %command, error = %e, "command handler failed");
-                                            lifecycle.transition(CommandClassification::Failed(
-                                                CommandError::Producer(Arc::from(strip_traceback(&e))),
-                                            ));
+                                            if is_root {
+                                                lifecycle.transition(CommandClassification::Failed(
+                                                    CommandError::Producer(Arc::from(strip_traceback(&e))),
+                                                ));
+                                            }
                                         }
                                     }
                                 })
                                 .detach();
-                            } else {
+                            } else if invocation.depth == 0 {
                                 invocation.lifecycle.transition(CommandClassification::Failed(
                                     CommandError::Producer(Arc::from("Lua command handler is unavailable")),
                                 ));

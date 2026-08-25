@@ -694,9 +694,17 @@ async fn handle_prompt(srv: &mut Server, raw: &Value, id: &RequestId) -> Result<
             .await
             .map_err(command_error)?;
         let InputDispatch::Dispatched(dispatch) = dispatch else {
-            unreachable!("resolved slash command must dispatch");
+            // The registry changed between the resolve pre-check and the
+            // dispatch (plugin reload, MCP reconnect); the text is no longer a
+            // command, so treat it as an ordinary prompt.
+            warn!("resolved command disappeared before dispatch; forwarding as prompt");
+            return send_agent_input(
+                session,
+                id,
+                agent_input(message, images, session.current_mode.clone(), None),
+            );
         };
-        return handle_command(srv, id, dispatch.classification()).await;
+        return handle_command(srv, id, dispatch).await;
     }
 
     send_agent_input(
@@ -709,32 +717,63 @@ async fn handle_prompt(srv: &mut Server, raw: &Value, id: &RequestId) -> Result<
 async fn handle_command(
     srv: &mut Server,
     id: &RequestId,
-    classification: maki_commands::CommandFuture<CommandClassification>,
+    dispatch: maki_commands::CommandDispatch,
 ) -> Result<(), AcpError> {
-    let session = srv.session.as_ref().ok_or_else(no_session)?;
-    match futures_lite::future::race(
-        async { Either::Classification(classification.await) },
-        async { Either::Route(session.command_mailbox.receiver().recv_async().await) },
-    )
-    .await
-    {
-        Either::Classification(CommandClassification::Completed) => {
+    let lifecycle = dispatch.lifecycle().clone();
+    // Synchronous behaviors queue their route during dispatch_input, so an
+    // already-routed command takes priority over awaiting classification.
+    if let Some(command) = next_routed_command(srv, &lifecycle, false).await? {
+        return execute_command(srv, id, command);
+    }
+    match dispatch.classification().await {
+        CommandClassification::Completed => {
             respond_prompt(&srv.out_tx, id.clone(), StopReason::EndTurn);
             Ok(())
         }
-        Either::Classification(CommandClassification::Failed(error)) => Err(command_error(error)),
-        Either::Classification(CommandClassification::AgentTurnAccepted) => {
-            session.pending.lock().unwrap().prompt = Some(id.clone());
-            Ok(())
+        CommandClassification::Failed(error) => Err(command_error(error)),
+        CommandClassification::AgentTurnAccepted => {
+            let command = next_routed_command(srv, &lifecycle, true)
+                .await?
+                .ok_or_else(|| AcpError::new(-32603, "command dispatcher ended"))?;
+            execute_command(srv, id, command)
         }
-        Either::Route(Ok(command)) => execute_command(srv, id, command),
-        Either::Route(Err(_)) => Err(AcpError::new(-32603, "command dispatcher ended")),
     }
 }
 
-enum Either {
-    Classification(CommandClassification),
-    Route(Result<RoutedCommand, flume::RecvError>),
+/// Waits for the routed command belonging to this invocation, dropping stale
+/// routes left behind by earlier invocations. With `wait` unset, returns an
+/// already-queued matching route or `None`.
+async fn next_routed_command(
+    srv: &Server,
+    lifecycle: &maki_commands::InvocationLifecycle,
+    wait: bool,
+) -> Result<Option<RoutedCommand>, AcpError> {
+    let session = srv.session.as_ref().ok_or_else(no_session)?;
+    let receiver = session.command_mailbox.receiver();
+    loop {
+        let received: Result<RoutedCommand, flume::RecvError> = if wait {
+            match receiver.recv_async().await {
+                Ok(command) => Ok(command),
+                Err(_) => return Err(AcpError::new(-32603, "command dispatcher ended")),
+            }
+        } else {
+            match receiver.try_recv() {
+                Ok(command) => Ok(command),
+                Err(flume::TryRecvError::Empty) => return Ok(None),
+                Err(flume::TryRecvError::Disconnected) => {
+                    return Err(AcpError::new(-32603, "command dispatcher ended"));
+                }
+            }
+        };
+        let command = match received {
+            Ok(command) => command,
+            Err(_) => return Err(AcpError::new(-32603, "command dispatcher ended")),
+        };
+        if command.lifecycle == *lifecycle {
+            return Ok(Some(command));
+        }
+        tracing::warn!(target: "maki_acp", "dropping stale routed command from a previous invocation");
+    }
 }
 
 fn execute_command(
@@ -755,7 +794,6 @@ fn execute_command(
                     None,
                 ),
             )?;
-            commands::complete(&command, CommandClassification::AgentTurnAccepted);
         }
         CommandRoute::Mcp(prompt) => {
             let prompt_ref = maki_agent::McpPromptRef {
@@ -772,21 +810,27 @@ fn execute_command(
                     Some(prompt_ref),
                 ),
             )?;
-            commands::complete(&command, CommandClassification::AgentTurnAccepted);
         }
         CommandRoute::Model(spec) => {
             if !srv.model_policy.allows(spec) {
-                return Err(
-                    AcpError::invalid_params().data(json_str(&"model is not allowed by policy"))
-                );
+                let error = maki_commands::CommandError::Producer(Arc::from(
+                    "model is not allowed by policy",
+                ));
+                commands::complete(&command, CommandClassification::Failed(error.clone()));
+                return Err(AcpError::invalid_params().data(json_str(&error.to_string())));
             }
-            let model = Model::from_spec(spec)
-                .map_err(|error| AcpError::invalid_params().data(json_str(&error)))?;
-            session
-                .handle
-                .model_tx
-                .send(model)
-                .map_err(|_| AcpError::new(-32603, "session ended"))?;
+            let model = Model::from_spec(spec).map_err(|error| {
+                let error = maki_commands::CommandError::Producer(Arc::from(error.to_string()));
+                commands::complete(&command, CommandClassification::Failed(error.clone()));
+                AcpError::invalid_params().data(json_str(&error.to_string()))
+            })?;
+            session.handle.model_tx.send(model).map_err(|_| {
+                let error = maki_commands::CommandError::Producer(Arc::from(
+                    "session ended before model change",
+                ));
+                commands::complete(&command, CommandClassification::Failed(error.clone()));
+                AcpError::new(-32603, error.to_string())
+            })?;
             session.current_model = spec.clone();
             commands::complete(&command, CommandClassification::Completed);
             respond_prompt(&srv.out_tx, id.clone(), StopReason::EndTurn);

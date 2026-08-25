@@ -553,6 +553,7 @@ impl CommandRegistry {
             }
             Ok(InputDispatch::Dispatched(CommandDispatch::new(
                 classification,
+                lifecycle,
             )))
         })
     }
@@ -605,9 +606,9 @@ impl CommandRegistry {
         let arguments = arguments.to_owned();
         Box::pin(async move {
             registry
-                .dispatch_resolved(command, &arguments, depth, target_id, lifecycle)
+                .dispatch_resolved(command, &arguments, depth, target_id, lifecycle.clone())
                 .await?;
-            Ok(CommandDispatch::new(classification))
+            Ok(CommandDispatch::new(classification, lifecycle))
         })
     }
 
@@ -650,7 +651,7 @@ impl CommandRegistry {
                 .inspect_err(|error| {
                     lifecycle.transition(CommandClassification::Failed(error.clone()));
                 })?;
-            Ok(CommandDispatch::new(lifecycle.classification()))
+            Ok(CommandDispatch::new(lifecycle.classification(), lifecycle))
         })
     }
 }
@@ -1036,15 +1037,26 @@ pub struct DispatchRequest {
 
 pub struct CommandDispatch {
     classification: CommandFuture<CommandClassification>,
+    lifecycle: InvocationLifecycle,
 }
 
 impl CommandDispatch {
-    pub fn new(classification: CommandFuture<CommandClassification>) -> Self {
-        Self { classification }
+    pub fn new(
+        classification: CommandFuture<CommandClassification>,
+        lifecycle: InvocationLifecycle,
+    ) -> Self {
+        Self {
+            classification,
+            lifecycle,
+        }
     }
 
     pub fn classification(self) -> CommandFuture<CommandClassification> {
         self.classification
+    }
+
+    pub fn lifecycle(&self) -> &InvocationLifecycle {
+        &self.lifecycle
     }
 }
 
@@ -1057,6 +1069,12 @@ pub enum CommandClassification {
 
 #[derive(Clone)]
 pub struct InvocationLifecycle(Arc<dyn ClassifyInvocation>);
+
+impl PartialEq for InvocationLifecycle {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 struct ClassificationState {
     inner: Mutex<ClassificationInner>,
