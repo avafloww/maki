@@ -1,9 +1,7 @@
 -- The /sessions picker: one flat list of every session in this directory,
 -- live or stored. Live ones get a colored icon, and row order is frozen
 -- while the picker is open so rows never jump around under the cursor
--- while background agents keep working. Opened with the "all" arg (bare
--- `maki -c`, or `/sessions all`) it lists every directory instead,
--- one dim cwd per row.
+-- while background agents keep working.
 
 local TextInput = require("maki.text_input")
 local Spans = require("maki.spans")
@@ -30,7 +28,6 @@ local AGE_UNITS = {
   { 3600, "h" },
   { 60, "m" },
 }
-local CWD_MAX = 40
 local FILTER_KEYS = {
   { "Enter", "open" },
   { "Ctrl+N", "new" },
@@ -154,23 +151,6 @@ local function dispw(s)
   return utf8.len(s) or #s
 end
 
--- UTF-8-safe truncation for the all-directories cwd span.
-local function truncate(s, max)
-  if dispw(s) <= max then
-    return s
-  end
-  local out = {}
-  local n = 0
-  for _, c in utf8.codes(s) do
-    if n >= max - 1 then
-      break
-    end
-    out[#out + 1] = utf8.char(c)
-    n = n + 1
-  end
-  return table.concat(out) .. "…"
-end
-
 local function render()
   local lines = {}
   local inner = board.width - 4
@@ -209,18 +189,6 @@ local function render()
       line[#line + 1] = sp
     end
     local used = 2 + dispw(icon) + dispw(s.title)
-    if board.all_dirs and s.cwd then
-      -- Two leading spaces plus at least the minimum pad must survive, or
-      -- the age column would be pushed off the row. A pending delete
-      -- confirm appends its hint behind the cwd, so budget for it too.
-      local confirm_w = board.confirm == s.id and dispw(CONFIRM_HINT) or 0
-      local room = math.max(inner - used - dispw(right) - 3 - confirm_w, 0)
-      if room >= 1 then
-        local cwd = truncate(s.cwd, math.min(CWD_MAX, room))
-        line[#line + 1] = { "  " .. cwd, "dim" }
-        used = used + 2 + dispw(cwd)
-      end
-    end
     if board.confirm == s.id then
       line[#line + 1] = { CONFIRM_HINT, selected and "match_selected" or "error" }
       used = used + dispw(CONFIRM_HINT)
@@ -489,7 +457,6 @@ local function open(opts)
   if board then
     return
   end
-  local all_dirs = opts ~= nil and opts.args == "all" or false
   local buf = maki.ui.buf()
   local win = maki.ui.open_win(buf, {
     title = " Sessions ",
@@ -516,7 +483,6 @@ local function open(opts)
     sel_id = nil,
     frame = 0,
     loading = true,
-    all_dirs = all_dirs,
   }
   -- Two-phase load: live sessions are cheap, so they show up and take keys
   -- right away; the stored scan can be slow, so a background task merges it
@@ -524,8 +490,7 @@ local function open(opts)
   refresh()
   local this_board = board
   maki.async.run(function()
-    local list_fn = all_dirs and maki.session.list_all or maki.session.list
-    local stored, err = list_fn()
+    local stored, err = maki.session.list()
     if board ~= this_board then
       return
     end

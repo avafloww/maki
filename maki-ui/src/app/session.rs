@@ -363,15 +363,9 @@ impl App {
         self.install_local_history()
     }
 
-    pub(crate) fn load_session(&mut self, session_id: MakiId) -> Vec<Action> {
-        let session = match AppSession::load(session_id, &self.storage) {
-            Ok(s) => s,
-            Err(e) => {
-                self.status_bar
-                    .flash(format!("Failed to load session: {e}"));
-                return vec![];
-            }
-        };
+    /// Applies an already-loaded session, for callers that loaded it
+    /// themselves (e.g. to run their own checks first).
+    pub(crate) fn load_loaded_session(&mut self, session: AppSession) -> Vec<Action> {
         let loaded = self.apply_loaded_session(session, &self.state.model.clone());
         vec![Action::LoadSession(Box::new(loaded))]
     }

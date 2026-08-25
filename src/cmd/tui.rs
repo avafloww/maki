@@ -16,6 +16,7 @@ use maki_lua::PluginHost;
 use maki_providers::model::Model;
 use maki_storage::StateDir;
 use maki_storage::id::MakiId;
+use maki_storage::session_lock;
 use maki_storage::sessions::StoredThinking;
 use maki_ui::{AppSession, RunOutcome};
 
@@ -203,11 +204,20 @@ fn resolve_session(
         let id: MakiId = raw
             .parse()
             .map_err(|e| color_eyre::eyre::eyre!("invalid session id {raw:?}: {e}"))?;
-        return AppSession::load(id, storage).map_err(|e| color_eyre::eyre::eyre!("{e}"));
+        let session = AppSession::load(id, storage).map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
+        if let Some(block) = session_lock::other_cwd_block(&session.cwd, cwd) {
+            return Err(color_eyre::eyre::eyre!("session {id}: {block}"));
+        }
+        return Ok(session);
     }
     if last_session {
         match AppSession::latest(cwd, storage) {
-            Ok(Some(session)) => return Ok(session),
+            Ok(Some(session)) => {
+                if let Some(block) = session_lock::other_cwd_block(&session.cwd, cwd) {
+                    return Err(color_eyre::eyre::eyre!("session {}: {block}", session.id));
+                }
+                return Ok(session);
+            }
             Ok(None) => {
                 tracing::info!("no previous session found for this directory, starting new");
             }
@@ -618,6 +628,28 @@ mod tests {
         let err = run(Cli::parse_from(["maki", "--print", "-c"]))
             .expect_err("bare -c under --print fails before any stack work");
         assert!(err.to_string().contains(PICKER_NEEDS_TUI_ERR));
+    }
+
+    const OTHER_CWD: &str = "/elsewhere";
+    const THIS_CWD: &str = "/here";
+
+    #[test]
+    fn resolve_session_rejects_session_from_other_cwd() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().unwrap();
+        let storage = StateDir::from_path(tmp.path().to_path_buf());
+        let mut session = AppSession::new("test-model", OTHER_CWD);
+        session.save(&storage).unwrap();
+        let err = resolve_session(
+            false,
+            Some(&session.id.to_string()),
+            "test-model",
+            THIS_CWD,
+            &storage,
+        )
+        .expect_err("a session stored under another cwd must be rejected");
+        assert!(err.to_string().contains(OTHER_CWD));
     }
 
     #[test]

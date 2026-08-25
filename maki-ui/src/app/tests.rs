@@ -857,7 +857,7 @@ fn load_session_clears_plan() {
     let id = app.state.session.id;
     app.state.mode = Mode::Build;
     app.state.plan = PlanState::Ready(PathBuf::from("old-plan.md"));
-    app.load_session(id);
+    app.load_loaded_session(AppSession::load(id, &app.storage).unwrap());
     assert_eq!(app.state.mode, Mode::Build);
     assert_eq!(app.state.plan.path(), None);
 }
@@ -3285,10 +3285,10 @@ fn run_cmdline_forwards_depth_to_lua_command() {
     );
 }
 
-/// The bare `-c` startup path must reach the picker with the `all`
-/// arg, so every directory's sessions show up, not just this one's.
+/// The bare `-c` startup path must reach the picker with no arg, so the
+/// picker lists this directory's sessions only.
 #[test]
-fn open_session_picker_sends_all_arg_to_lua() {
+fn open_session_picker_sends_no_arg_to_lua() {
     let dir = StateDir::from_path(env::temp_dir());
     let mut app = build_app_with_lua(
         dir.clone(),
@@ -3308,7 +3308,7 @@ fn open_session_picker_sends_all_arg_to_lua() {
 
     assert_eq!(
         probe.try_recv_command(),
-        Some(("/sessions".to_string(), "all".to_string(), 0))
+        Some(("/sessions".to_string(), String::new(), 0))
     );
 }
 
@@ -5234,7 +5234,7 @@ fn load_session_persists_the_new_session_and_leaks_no_history_into_it() {
     app.checkpoint();
     let (live_id, sent_revision) = (app.state.session.id, app.state.session.revision());
 
-    app.load_session(stored.id);
+    app.load_loaded_session(AppSession::load(stored.id, &dir).unwrap());
     assert_eq!(app.state.session.id, stored.id);
     // Walk the loaded session up to the revision already sent for the live one,
     // so the checkpoint below lands on the exact collision.

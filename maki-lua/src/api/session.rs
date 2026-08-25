@@ -70,7 +70,8 @@ async fn current(lua: Lua, #[ctx] tx: Option<flume::Sender<UiAction>>) -> LuaRes
     roundtrip(lua, tx, SessionRequest::Current).await
 }
 
-/// Switches the UI to the session with {id}.
+/// Switches the UI to the session with {id}. The session must belong to
+/// the current directory.
 ///
 /// @param id string Session id, as returned by `list()` or `live()`.
 /// @return (boolean|nil, string|nil) true on success, or nil and an error.

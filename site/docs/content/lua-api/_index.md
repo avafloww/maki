@@ -3255,7 +3255,8 @@ local id = maki.session.current()
 maki.session.focus({id})
 ```
 
-Switches the UI to the session with {id}.
+Switches the UI to the session with {id}. The session must belong to
+the current directory.
 
 **Parameters:**
 

@@ -31,6 +31,7 @@ use maki_providers::model::Model;
 use maki_providers::{ImageSource, Message, StopReason, Timeouts, TokenUsage, add_cost};
 use maki_storage::StateDir;
 use maki_storage::id::SessionRef;
+use maki_storage::session_lock;
 use maki_storage::sessions::Session;
 use serde::Serialize;
 use serde_json::Value;
@@ -481,7 +482,8 @@ pub fn run(params: SdkParams) -> Result<()> {
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     let working_dir = cwd.to_string_lossy().into_owned();
-    let (session_id, initial_history) = resolve_session(&cli, &working_dir)?;
+    let storage = StateDir::resolve().context("resolve state dir")?;
+    let (session_id, initial_history) = resolve_session(&cli, &working_dir, &storage)?;
 
     let (mcp_handle, mcp_config_errors) = smol::block_on(mcp::start_connected(&cwd));
     if !mcp_config_errors.is_empty() {
@@ -663,23 +665,36 @@ pub fn run(params: SdkParams) -> Result<()> {
 
 type StoredSession = Session<Message, TokenUsage, ToolOutput>;
 
-fn resolve_session(cli: &Cli, cwd: &str) -> Result<(Option<SessionRef>, Vec<Message>)> {
+fn resolve_session(
+    cli: &Cli,
+    cwd: &str,
+    storage: &StateDir,
+) -> Result<(Option<SessionRef>, Vec<Message>)> {
     // A bare continue flag (no ID) is rejected by the TUI guard before SDK
     // mode starts, so only a valued ID reaches this branch.
     let (resumed_id, history) =
         if let Some(id) = cli.continue_session.as_ref().and_then(|o| o.as_deref()) {
-            let storage = StateDir::resolve().context("resolve state dir")?;
             let session_ref: SessionRef = id
                 .parse()
                 .map_err(|e| eyre!("invalid session id {id}: {e}"))?;
-            let session = StoredSession::load(session_ref.id(), &storage)
+            let session = StoredSession::load(session_ref.id(), storage)
                 .map_err(|e| eyre!("load session {id}: {e}"))?;
+            // The fork source is a read-only copy: no cwd check on it.
+            if !cli.fork_session
+                && let Some(block) = session_lock::other_cwd_block(&session.cwd, cwd)
+            {
+                return Err(eyre!("session {id}: {block}"));
+            }
             let resumed = (!cli.fork_session).then_some(session_ref);
             (resumed, session.take_messages())
         } else if cli.last_session {
-            let storage = StateDir::resolve().context("resolve state dir")?;
-            match StoredSession::latest(cwd, &storage) {
-                Ok(Some(session)) => (Some(SessionRef::from(session.id)), session.take_messages()),
+            match StoredSession::latest(cwd, storage) {
+                Ok(Some(session)) => {
+                    if let Some(block) = session_lock::other_cwd_block(&session.cwd, cwd) {
+                        return Err(eyre!("session {}: {block}", session.id));
+                    }
+                    (Some(SessionRef::from(session.id)), session.take_messages())
+                }
                 _ => (None, Vec::new()),
             }
         } else {
@@ -691,7 +706,16 @@ fn resolve_session(cli: &Cli, cwd: &str) -> Result<(Option<SessionRef>, Vec<Mess
             .map_err(|e| eyre!("invalid session id {s:?}: {e}"))
     });
     let cli_session_id = match cli_session_id {
-        Some(Ok(id)) => Some(id),
+        // A successful load proves the pinned ID pre-exists, so it must
+        // belong to this directory; a fresh ID simply starts new.
+        Some(Ok(id)) => {
+            if let Ok(session) = StoredSession::load(id.id(), storage)
+                && let Some(block) = session_lock::other_cwd_block(&session.cwd, cwd)
+            {
+                return Err(eyre!("session {}: {block}", id.id()));
+            }
+            Some(id)
+        }
         Some(Err(e)) => return Err(e),
         None => None,
     };
@@ -1097,6 +1121,30 @@ fn map_tool_names_in_content(content: &Value) -> Value {
 mod tests {
     use super::*;
     use test_case::test_case;
+
+    const OTHER_CWD: &str = "/elsewhere";
+    const THIS_CWD: &str = "/here";
+
+    #[test]
+    fn sdk_resolve_session_rejects_session_from_other_cwd() {
+        use clap::Parser;
+        use tempfile::tempdir;
+
+        let tmp = tempdir().unwrap();
+        let storage = StateDir::from_path(tmp.path().to_path_buf());
+        let mut session = StoredSession::new("test-model", OTHER_CWD);
+        session.save(&storage).unwrap();
+        let id = session.id.to_string();
+        for flags in [vec!["-c".to_string()], vec!["--session-id".to_string()]] {
+            let mut args = vec!["maki".to_string()];
+            args.extend(flags);
+            args.push(id.clone());
+            let cli = Cli::parse_from(args.iter().map(String::as_str));
+            let err = resolve_session(&cli, THIS_CWD, &storage)
+                .expect_err("a session stored under another cwd must be rejected");
+            assert!(err.to_string().contains(OTHER_CWD));
+        }
+    }
 
     fn claude_to_maki_tool_name(name: &str) -> &str {
         TOOL_NAME_MAP

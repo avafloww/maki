@@ -33,6 +33,7 @@ use maki_providers::{Message, Model, ThinkingConfig};
 use maki_storage::StateDir;
 use maki_storage::StorageError;
 use maki_storage::id::{MakiId, MakiIdParseError, SessionRef};
+use maki_storage::session_lock;
 use maki_storage::sessions::{Prefs, SessionError, StoredThinking, normalize_title, write_prefs};
 use serde_json::json;
 use tracing::{info, warn};
@@ -1238,20 +1239,28 @@ impl<'t> EventLoop<'t> {
 
     /// Focus a live session, or bring a stored one up: in place when the
     /// focused session is a blank idle one (nothing worth keeping), otherwise
-    /// as a new runtime so the session you came from stays live.
+    /// as a new runtime so the session you came from stays live. A stored
+    /// session from another directory is rejected.
     fn focus_session(&mut self, id: MakiId) -> Result<(), String> {
         if let Some(i) = self.position(id) {
             self.focused = i;
             return Ok(());
         }
+        let session = AppSession::load(id, &self.ctx.storage)
+            .map_err(|e| format!("Failed to load session: {e}"))?;
+        let cwd = std::env::current_dir()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        if let Some(block) = session_lock::other_cwd_block(&session.cwd, &cwd) {
+            return Err(block.to_string());
+        }
         let focused = &mut self.sessions[self.focused];
         if SessionStatus::of(&focused.app) == SessionStatus::Idle && !focused.app.has_content() {
-            let actions = focused.app.load_session(id);
+            let actions = focused.app.load_loaded_session(session);
             self.dispatch(self.focused, actions);
             return Ok(());
         }
-        let session = AppSession::load(id, &self.ctx.storage)
-            .map_err(|e| format!("Failed to load session: {e}"))?;
         let idx = self.push_runtime(self.ctx.spawn_runtime(session));
         self.focused = idx;
         Ok(())
