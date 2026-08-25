@@ -836,10 +836,11 @@ impl App {
     }
 
     fn dispatch_overlay(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
-        // Alt+M hides the active permission/ask surface and returns focus to the
-        // input box; it is a no-op and still consumed when nothing is active.
+        // Alt+M hides the active permission/ask surface and returns focus to
+        // the input box; pressed again while a demand is held it restores it.
+        // It is still consumed when neither side of the toggle applies.
         if key::DEFER_INPUT.matches(key) {
-            self.defer_active_input();
+            self.toggle_defer_input();
             return Some(vec![]);
         }
 
@@ -2375,6 +2376,26 @@ impl App {
         Dirty::YES
     }
 
+    /// Alt+M toggles: defer the active input surface, or restore one this key
+    /// deferred earlier (a hold-until-submit demand at the queue head).
+    pub(crate) fn toggle_defer_input(&mut self) -> bool {
+        if self.defer_active_input() {
+            return true;
+        }
+        if !self
+            .input_queue
+            .front()
+            .is_some_and(|d| d.hold_until_submit)
+        {
+            return false;
+        }
+        // Arm the submit release so `promote_deferred_if_ready` treats the held
+        // head as ready regardless of idle/modal timers.
+        self.submit_released = true;
+        let _ = self.promote_deferred_if_ready();
+        true
+    }
+
     /// Alt+M: hide the active input surface and hold it until the user's next
     /// submit (instead of the 2s idle timer). Returns `false` when nothing was
     /// active. The surface is re-promoted by `promote_deferred_if_ready` once
@@ -2434,6 +2455,11 @@ impl App {
     /// A below-split input window that is *not* the active surface (queued).
     pub(crate) fn below_input_hidden(&self) -> bool {
         self.float_mgr.below_is_input() && !self.question_active()
+    }
+
+    /// A manually deferred (Alt+M) input demand is waiting in the queue.
+    pub(crate) fn held_input_pending(&self) -> bool {
+        self.input_queue.iter().any(|d| d.hold_until_submit)
     }
 
     pub fn any_overlay_open(&self) -> bool {

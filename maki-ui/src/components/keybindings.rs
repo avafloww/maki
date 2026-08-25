@@ -469,7 +469,7 @@ pub const KEYBINDS: &[Keybind] = &[
     },
     Keybind {
         label: KeyLabel::Single(key::DEFER_INPUT.label),
-        description: "Defer an input prompt, keep typing",
+        description: "Defer an input prompt, press again to restore",
         context: KeybindContext::General,
         platform: Platform::All,
     },

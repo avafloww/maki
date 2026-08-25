@@ -6929,3 +6929,78 @@ fn alt_m_defers_active_question_until_submit() {
         "focus restored on question promotion"
     );
 }
+
+#[test]
+fn alt_m_toggles_back_to_the_held_permission() {
+    let mut app = test_app();
+    app.last_input = None;
+    assert!(!app.begin_input_demand(bash_perm_demand("perm")));
+    assert!(app.permission_active());
+
+    app.update(Msg::Key(alt_m()));
+    assert!(!app.permission_active());
+    assert!(app.held_input_pending(), "held demand reports pending");
+
+    let actions = app.update(Msg::Key(alt_m()));
+    assert!(actions.is_empty(), "toggle yields no agent actions");
+    assert!(
+        app.permission_active(),
+        "second Alt+M restores the held prompt"
+    );
+    assert!(app.input_queue.is_empty());
+    assert!(!app.held_input_pending());
+}
+
+#[test]
+fn alt_m_toggle_ignores_auto_deferred_head() {
+    // An auto-deferral (typing window) at the head promotes via the idle
+    // timer; Alt+M must not force it, nor reach past FIFO order.
+    let mut app = test_app();
+    app.last_input = Some(Instant::now());
+    assert!(app.begin_input_demand(bash_perm_demand("perm")));
+    assert!(!app.held_input_pending());
+
+    app.update(Msg::Key(alt_m()));
+    assert!(
+        !app.permission_active(),
+        "auto-deferred head is not promoted by Alt+M"
+    );
+    assert_eq!(app.input_queue.len(), 1);
+
+    app.last_input = Some(Instant::now() - IDLE_AGE);
+    let _ = app.tick();
+    assert!(app.permission_active(), "idle timer still releases it");
+}
+
+#[test]
+fn defer_hint_pins_above_status_bar_until_restored() {
+    let hint_row = |rows: &[String]| rows[RENDER_AREA.height as usize - 2].clone();
+
+    let mut app = test_app();
+    app.last_input = None;
+    assert!(!app.begin_input_demand(bash_perm_demand("perm")));
+    let baseline = rendered_area(&mut app);
+    assert!(
+        !hint_row(&baseline).contains("Undefer"),
+        "no hint while the prompt is active"
+    );
+
+    app.update(Msg::Key(alt_m()));
+    let deferred = rendered_area(&mut app);
+    let row = hint_row(&deferred);
+    assert!(
+        row.contains("Undefer pending model input"),
+        "hint appears once the demand is deferred"
+    );
+    assert!(
+        row.starts_with('('),
+        "the hint sits flush with the left edge: {row:?}"
+    );
+
+    app.update(Msg::Key(alt_m()));
+    let restored = rendered_area(&mut app);
+    assert!(
+        !hint_row(&restored).contains("Undefer"),
+        "hint clears once the demand is restored"
+    );
+}

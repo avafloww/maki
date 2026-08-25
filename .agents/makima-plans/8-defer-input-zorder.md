@@ -8,7 +8,10 @@ window) from (a) painting *behind* other overlays like the `/model` picker and
 the user is busy, hold it pending; show it on top and take focus only after 2s of
 input idleness or an explicit yield (the blocking modal closes). Give the user a
 *manual* escape too (`Alt+M`): hide whatever input surface is currently active,
-keep typing, and let it come back only after the focused input box submits.
+keep typing, and bring it back either by submitting the focused input box or by
+pressing `Alt+M` again. While a demand is held, a left-aligned hint pinned on
+top of the status bar (`(Alt+M Undefer pending model input)`) advertises the
+restore.
 
 ## Implementation Summary
 
@@ -52,9 +55,15 @@ zombie.
 
 Alongside the automatic queue, a *manual* path reuses the same queue: `Alt+M`
 (`key::DEFER_INPUT`) on an active surface snapshots it back into the queue marked
-`hold_until_submit`, and the queue head with that marker waits for the user's next
-submit instead of the 2s idle timer. The affordance is advertised on both input
-surfaces.
+`hold_until_submit`, and the queue head with that marker waits for the user's
+next submit instead of the 2s idle timer. The affordance is advertised on both
+input surfaces.
+
+A follow-up pass (Phase 10) rounds the manual path out: `Alt+M` becomes a toggle
+(pressing it again while a demand is held promotes the held head immediately,
+no submit needed), and a pending hold pins a left-aligned
+`(Alt+M Undefer pending model input)` hint to the row directly above the status
+bar so the deferred demand is visible in the chrome.
 
 **Draw/input-switch invariant:** rendering and input routing share a single
 source of truth — `active_input` / the `*_active()` predicates. A queued demand
@@ -473,10 +482,10 @@ arbitration entry point — just a manual demotion and a submit-driven release.
     prompt, clear `active_input`, and enqueue a `hold_until_submit` Permission
     demand. If `question_active()`, call `float_mgr.release_focus()` (the window
     stays open) and enqueue a `hold_until_submit` Question demand. Otherwise a
-    no-op returning `false`. Wired as the first branch of `dispatch_overlay`
-    (`app/mod.rs:832`): `Alt+M` is consumed even as a no-op so it is a reserved
-    hotkey and never types a char, and it works for both surfaces without either
-    of their existing branches eating the key.
+    no-op returning `false`. Called from `dispatch_overlay` via
+    `toggle_defer_input` (Phase 10 step 34), so `Alt+M` is consumed even as a
+    no-op — a reserved hotkey that never types a char — and it works for both
+    surfaces without either of their existing branches eating the key.
 29. **Promotion change** (`promote_deferred_if_ready`, `app/mod.rs:2300`): after
     `reconcile_active`, take `submit_released` once; for a front demand with
     `hold_until_submit`, `ready = submit_released` (ignore `is_busy()` and the
@@ -505,6 +514,42 @@ arbitration entry point — just a manual demotion and a submit-driven release.
 33. **Affordance on the permission prompt** (`permission_prompt.rs`): append
     `HINT_DEFER_ROW = (key::DEFER_INPUT.label, "defer, keep typing")` to the
     Normal-state hint rows.
+
+### Phase 10 — Undefer toggle + status-bar hint (follow-up)
+
+As originally specified, a manual hold released only via the next submit, and a
+deferring user lost all sight of the demand. This follow-up makes `Alt+M` a true
+toggle and surfaces the held state in the chrome.
+
+34. **Toggle** (`app/mod.rs`): add `toggle_defer_input(&mut self) -> bool`
+    ahead of `defer_active_input`. It first tries `defer_active_input()` (the
+    demotion path). If that returns `false` — nothing was active — and the queue
+    head is `hold_until_submit`, it arms `submit_released = true` and runs
+    `promote_deferred_if_ready()` on the spot, so the held head re-promotes on
+    the same keystroke (focus and bell via the normal activation path).
+    FIFO safety falls out of inspecting the *head* only: an auto-deferred demand
+    sitting in front is never reached past (it keeps its own idle/modal release),
+    and with an empty queue the key stays a consumed no-op (AC.17 unchanged).
+    `dispatch_overlay`'s `DEFER_INPUT` branch now calls this instead of
+    `defer_active_input` directly.
+35. **Pending query** (`app/mod.rs`): add
+    `held_input_pending(&self) -> bool` —
+    `self.input_queue.iter().any(|d| d.hold_until_submit)` — the view layer's
+    only new dependency on the queue.
+36. **Hint row** (`app/view.rs`): when `held_input_pending()`,
+    `compute_layout` carves one extra full-width row between the content region
+    and the status bar (`Constraint::Length(defer_hint_h)` added to the opening
+    vertical split; `ViewLayout` gains `defer_hint_area`). A zero-length
+    constraint makes the extra carve a no-op when nothing is held.
+    `render_defer_hint(frame, layout.defer_hint_area)` draws the row flush-left
+    as `(key::DEFER_INPUT.label Undefer pending model input)` — paren and
+    description in `tool_dim`, key label in `keybind_key` — right after
+    `render_status_bar`, bailing out on `area.height == 0`. The hint vanishes
+    automatically once promotion drains the hold.
+37. **Help copy** (`components/keybindings.rs`): the `DEFER_INPUT` `KEYBINDS`
+    entry's description becomes "Defer an input prompt, press again to restore",
+    flowing into `site/docs/content/keybindings/_index.md` via
+    `cargo run -p maki-docgen`.
 
 ## Acceptance Criteria
 
@@ -561,13 +606,24 @@ arbitration entry point — just a manual demotion and a submit-driven release.
   `alt_m_defers_active_permission_until_submit` and
   `alt_m_defers_active_question_until_submit`.
 - **AC.16** A manually-held demand does **not** promote on 2s idle or on modal
-  close; it promotes only after the focused input box submits, re-appearing and
-  ringing its bell. The idle-immunity half is asserted in the AC.15 tests by
-  tuning `last_input` to idle and ticking with the hold still queued.
+  close; it promotes after the focused input box submits **or** on a second
+  `Alt+M` press (AC.18), re-appearing and ringing its bell. The idle-immunity
+  half is asserted in the AC.15 tests by tuning `last_input` to idle and ticking
+  with the hold still queued.
 - **AC.17** Typing/submitting at the main input box while a demand is held never
   misdelivers the text as the tool answer; it flows through the normal
   submit/queue path. `Alt+M` with no active surface is a harmless no-op. Verified
   by `alt_m_when_nothing_active_is_noop`.
+- **AC.18** (Phase 10) Pressing `Alt+M` again while a demand is held promotes
+  the held head immediately — queue drains, focus restored, no submit needed.
+  Verified by `alt_m_toggles_back_to_the_held_permission`.
+- **AC.19** (Phase 10) The toggle respects FIFO order: an auto-deferred head
+  (typing window) is not force-promoted by `Alt+M` and keeps releasing via its
+  own idle rule. Verified by `alt_m_toggle_ignores_auto_deferred_head`.
+- **AC.20** (Phase 10) While a demand is held, a left-aligned
+  `(Alt+M Undefer pending model input)` hint occupies the row directly above the
+  status bar; it is absent while the surface is active and clears once the hold
+  is restored. Verified by `defer_hint_pins_above_status_bar_until_restored`.
 
 ## Test Strategy
 
@@ -613,11 +669,15 @@ code reading.
 | AC.15 | `alt_m_defers_active_permission_until_submit` + `alt_m_defers_active_question_until_submit` | unit |
 | AC.16 | same as AC.15 (idle-immunity half) | unit |
 | AC.17 | `alt_m_when_nothing_active_is_noop` | unit |
+| AC.18 | `alt_m_toggles_back_to_the_held_permission` | unit |
+| AC.19 | `alt_m_toggle_ignores_auto_deferred_head` | unit |
+| AC.20 | `defer_hint_pins_above_status_bar_until_restored` | render |
 
 The `Alt+M` tests use an `alt_m()` key helper (`KeyCode::Char('m')` +
 `KeyModifiers::ALT`) and drive the release via `app.handle_submit(Submission::
 empty())`, which arms `submit_released` without starting a run, then
-`promote_deferred_if_ready()`.
+`promote_deferred_if_ready()`. The Phase-10 toggle tests (AC.18/AC.19) drive the
+release with a second `alt_m()` press instead.
 
 Test sketches (a test-local `perm_demand(id, tool, scopes)` helper builds
 `InputDemand { kind: Permission, blocked_by_modal: false, perm: Some(PermissionPayload{..}) }`;
@@ -762,7 +822,8 @@ by existing docs on permissions/ask. The `Alt+M` affordance is surfaced through
 the generated keybindings docs: registering `key::DEFER_INPUT` in `KEYBINDS`
 (Phase 9 step 25) flows into `site/docs/content/keybindings/_index.md` via
 `just gen-docs`, so no prose edit is needed. `AGENTS.md` needs no update
-(architecture unchanged).
+(architecture unchanged). The Phase-10 follow-up changes only the generated
+`Alt+M` description text (step 37), regenerated the same way.
 
 ## Risks, Blockers, and Required Decisions
 

@@ -21,7 +21,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Ctrl+T` | Toggle plan panel |
 | `Ctrl+X` | Open tasks |
 | `Ctrl+M` | Model picker |
-| `Alt+M` | Defer an input prompt, keep typing |
+| `Alt+M` | Defer an input prompt, press again to restore |
 
 ## Editing
 

@@ -32,6 +32,7 @@ struct ViewLayout {
     msg_area: Rect,
     bottom_area: Rect,
     status_area: Rect,
+    defer_hint_area: Rect,
     queue_area: Rect,
     panel_windows: Vec<(usize, Rect)>,
     input_area: Rect,
@@ -53,6 +54,7 @@ impl App {
         self.render_splits(frame, &layout);
         let mut overlay_rect = self.render_picker_overlays(frame, &layout);
         self.render_status_bar(frame, layout.status_area, render_chat);
+        self.render_defer_hint(frame, layout.defer_hint_area);
         overlay_rect = self.render_top_modals(frame, overlay_rect);
         self.register_zones(&layout, overlay_rect);
         self.apply_selection(frame, render_chat);
@@ -63,9 +65,15 @@ impl App {
         let permission_open = self.permission_active();
 
         // Carve the full-width status bar first so the split carving below only
-        // ever deals with the content region above it.
-        let [mut content, status_area] =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+        // ever deals with the content region above it. A manually deferred
+        // (Alt+M) input demand pins an undefer hint on the row above it.
+        let defer_hint_h = u16::from(self.held_input_pending());
+        let [mut content, defer_hint_area, status_area] = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(defer_hint_h),
+            Constraint::Length(1),
+        ])
+        .areas(area);
 
         // A persistent one-line info bar pinned to the top: the active chat
         // badge, a running-subagent hint, and the cwd:branch. It never crowds
@@ -147,6 +155,7 @@ impl App {
             msg_area,
             bottom_area,
             status_area,
+            defer_hint_area,
             queue_area,
             panel_windows,
             input_area,
@@ -436,6 +445,21 @@ impl App {
             restoring: self.restoring.load(Ordering::Relaxed),
         };
         self.status_bar.view(frame, status_area, &ctx);
+    }
+
+    /// Left-aligned affordance pinned on the row above the status bar while an
+    /// Alt+M-deferred prompt waits: how to bring it back without submitting.
+    fn render_defer_hint(&self, frame: &mut Frame, area: Rect) {
+        if area.height == 0 {
+            return;
+        }
+        let t = theme::current();
+        let line = Line::from(vec![
+            Span::styled("(", t.tool_dim),
+            Span::styled(key::DEFER_INPUT.label, t.keybind_key),
+            Span::styled(" Undefer pending model input)", t.tool_dim),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
     }
 
     fn register_zones(&mut self, layout: &ViewLayout, overlay_rect: Rect) {
