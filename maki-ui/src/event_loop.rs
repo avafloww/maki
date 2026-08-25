@@ -7,6 +7,7 @@
 //! waits on every event source at once and wakes the moment a plugin action,
 //! agent event, or keypress arrives instead of sleeping in `event::poll`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,9 +33,21 @@ use maki_providers::{Message, Model, ThinkingConfig};
 use maki_storage::StateDir;
 use maki_storage::StorageError;
 use maki_storage::id::{MakiId, MakiIdParseError, SessionRef};
-use maki_storage::sessions::{Prefs, SessionError, StoredThinking, normalize_title, write_prefs};
+use maki_storage::session_lock;
+use maki_storage::sessions::{
+    Prefs, SESSIONS_DIR, SessionError, StoredThinking, normalize_title, write_prefs,
+};
 use serde_json::json;
 use tracing::{info, warn};
+
+fn claim_lock(dir: &std::path::Path, id: &MakiId) -> Result<()> {
+    match session_lock::heartbeat(dir, id)? {
+        session_lock::LockBeat::Lost => Err(eyre!(
+            "session is open in another terminal; close it there first"
+        )),
+        session_lock::LockBeat::Claimed | session_lock::LockBeat::Held => Ok(()),
+    }
+}
 
 use crate::AppSession;
 use crate::agent::{
@@ -87,6 +100,8 @@ pub struct EventLoopParams {
     pub timeouts: Timeouts,
     pub exit_on_done: bool,
     pub command_registry: maki_commands::CommandRegistry,
+    /// One-shot startup request to open the session picker (bare `-c`).
+    pub session_picker: bool,
     pub keymap_reader: KeymapReader,
     pub hint_reader: HintReader,
     pub ui_action_rx: flume::Receiver<UiAction>,
@@ -378,10 +393,14 @@ pub(crate) struct EventLoop<'t> {
     terminal: &'t mut ratatui::DefaultTerminal,
     sessions: Vec<SessionRuntime>,
     focused: usize,
+    session_picker: bool,
     last_focused: Option<MakiId>,
     terminal_focused: bool,
     notifier: Option<terminal::TerminalNotifier>,
     ctx: SpawnCtx,
+    sessions_dir: PathBuf,
+    session_cwd: String,
+    last_heartbeat: Instant,
     input: InputReader,
     warn_rx: flume::Receiver<String>,
     warn_tx: flume::Sender<String>,
@@ -497,6 +516,7 @@ impl<'t> EventLoop<'t> {
             timeouts,
             exit_on_done,
             command_registry,
+            session_picker,
             keymap_reader,
             hint_reader,
             ui_action_rx,
@@ -546,6 +566,7 @@ impl<'t> EventLoop<'t> {
         }));
         let bg = spawn_model_fetch(&model_slot, timeouts, Arc::clone(&model_policy));
         let storage_writer = Arc::new(StorageWriter::new(storage.clone(), bg.warn_tx.clone()));
+        let sessions_dir = storage.ensure_subdir(SESSIONS_DIR)?;
 
         let notifier = terminal::TerminalNotifier::new(ui_config.notifications);
         let model_completion = Arc::new(ModelArgSource::new(Arc::clone(&bg.available)));
@@ -594,6 +615,11 @@ impl<'t> EventLoop<'t> {
         if runtimes.is_empty() {
             return Err(eyre!("event loop needs at least one session"));
         }
+        for rt in &runtimes {
+            if let Err(e) = claim_lock(&sessions_dir, &rt.id()) {
+                warn!(id = %rt.id(), error = %e, "session lock claim failed");
+            }
+        }
         let focused = focused.min(runtimes.len() - 1);
         let app = &mut runtimes[focused].app;
         app.exit_on_done = exit_on_done;
@@ -608,14 +634,19 @@ impl<'t> EventLoop<'t> {
             app.flash(w);
         }
 
+        let session_cwd = runtimes[focused].app.state.session.cwd.clone();
         Ok(Self {
             terminal,
             sessions: runtimes,
             focused,
+            session_picker,
             last_focused: None,
             terminal_focused: false,
             notifier,
             ctx,
+            sessions_dir,
+            session_cwd,
+            last_heartbeat: Instant::now(),
             input: InputReader::spawn(),
             warn_rx: bg.warn_rx,
             warn_tx: bg.warn_tx,
@@ -637,7 +668,12 @@ impl<'t> EventLoop<'t> {
             };
             let actions = self.focused_app().handle_submit(sub);
             self.dispatch(self.focused, actions);
+        } else if self.session_picker {
+            self.focused_app().open_session_picker();
         }
+        // Populate the inline quota readout without waiting for `/usage` or
+        // Ctrl+R; provider/model changes below trigger their own refresh.
+        self.refresh_usage(self.focused);
         // The first frame always paints. After that only a poller, an event or
         // an animation tick owes another.
         let mut dirty = Dirty::YES;
@@ -764,6 +800,24 @@ impl<'t> EventLoop<'t> {
     /// looking at would lose the output.
     fn tick(&mut self) -> Dirty {
         let mut dirty = Dirty::NO;
+        let now = Instant::now();
+        if now.duration_since(self.last_heartbeat) >= session_lock::HEARTBEAT_INTERVAL {
+            self.last_heartbeat = now;
+            let sessions_dir = self.sessions_dir.clone();
+            let ids: Vec<MakiId> = self.sessions.iter().map(|rt| rt.id()).collect();
+            smol::unblock(move || {
+                for id in &ids {
+                    match session_lock::heartbeat(&sessions_dir, id) {
+                        Ok(session_lock::LockBeat::Lost) => {
+                            warn!(id = %id, "session lock lost to another process")
+                        }
+                        Err(e) => warn!(id = %id, error = %e, "session lock heartbeat failed"),
+                        Ok(_) => {}
+                    }
+                }
+            })
+            .detach();
+        }
         let mut login_actions: Vec<(usize, Vec<Action>)> = Vec::new();
         for (i, rt) in self.sessions.iter_mut().enumerate() {
             if i == self.focused {
@@ -1036,16 +1090,26 @@ impl<'t> EventLoop<'t> {
         dirty
     }
 
-    /// `List` replies from a background task (the scan can be slow); every
-    /// other request is answered synchronously by the event loop, which owns
-    /// the live runtimes.
+    /// `List` and `ListAll` reply from a background task (the scan can be
+    /// slow); every other request is answered synchronously by the event
+    /// loop, which owns the live runtimes.
     fn handle_session_request(&mut self, req: SessionRequest, reply_tx: flume::Sender<UiReply>) {
         match req {
             SessionRequest::List => {
                 let storage = self.ctx.storage.clone();
+                let cwd = self.session_cwd.clone();
                 smol::unblock(move || {
-                    let cwd = std::env::current_dir().unwrap_or_default();
-                    let reply = AppSession::list(&cwd.to_string_lossy(), &storage)
+                    let reply = AppSession::list(&cwd, &storage)
+                        .map_err(|e| e.to_string())
+                        .and_then(|list| serde_json::to_value(list).map_err(|e| e.to_string()));
+                    let _ = reply_tx.send(reply);
+                })
+                .detach();
+            }
+            SessionRequest::ListAll => {
+                let storage = self.ctx.storage.clone();
+                smol::unblock(move || {
+                    let reply = AppSession::list_all(&storage)
                         .map_err(|e| e.to_string())
                         .and_then(|list| serde_json::to_value(list).map_err(|e| e.to_string()));
                     let _ = reply_tx.send(reply);
@@ -1104,8 +1168,7 @@ impl<'t> EventLoop<'t> {
             SessionRequest::New { prompt, focus } => {
                 let session = {
                     let slot = self.ctx.model_slot.load();
-                    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-                    AppSession::new(&slot.model.spec(), &cwd.to_string_lossy())
+                    AppSession::new(&slot.model.spec(), &self.session_cwd)
                 };
                 let idx = self.push_runtime(self.ctx.spawn_runtime(session));
                 let id = self.sessions[idx].id();
@@ -1243,6 +1306,12 @@ impl<'t> EventLoop<'t> {
     fn remove_runtime(&mut self, idx: usize) -> SessionRuntime {
         debug_assert_ne!(idx, self.focused);
         let rt = self.sessions.remove(idx);
+        let id = rt.id();
+        let sessions_dir = self.sessions_dir.clone();
+        smol::unblock(move || {
+            session_lock::release(&sessions_dir, &id);
+        })
+        .detach();
         if idx < self.focused {
             self.focused -= 1;
         }
@@ -1250,26 +1319,54 @@ impl<'t> EventLoop<'t> {
     }
 
     fn push_runtime(&mut self, rt: SessionRuntime) -> usize {
+        let id = rt.id();
+        let sessions_dir = self.sessions_dir.clone();
+        smol::unblock(move || {
+            if let Err(e) = claim_lock(&sessions_dir, &id) {
+                warn!(id = %id, error = %e, "session lock claim failed");
+            }
+        })
+        .detach();
         self.sessions.push(rt);
         self.sessions.len() - 1
     }
 
     /// Focus a live session, or bring a stored one up: in place when the
     /// focused session is a blank idle one (nothing worth keeping), otherwise
-    /// as a new runtime so the session you came from stays live.
+    /// as a new runtime so the session you came from stays live. A stored
+    /// session from another directory, or one held open by a live process
+    /// elsewhere, is rejected.
     fn focus_session(&mut self, id: MakiId) -> Result<(), String> {
         if let Some(i) = self.position(id) {
             self.focused = i;
             return Ok(());
         }
+        let session = AppSession::load(id, &self.ctx.storage)
+            .map_err(|e| format!("Failed to load session: {e}"))?;
+        let cwd = self.session_cwd.clone();
+        let open_elsewhere = session_lock::open_elsewhere(&self.sessions_dir, &id);
+        if let Some(block) = session_lock::resume_block(&session.cwd, &cwd, open_elsewhere) {
+            return Err(block.to_string());
+        }
         let focused = &mut self.sessions[self.focused];
         if SessionStatus::of(&focused.app) == SessionStatus::Idle && !focused.app.has_content() {
-            let actions = focused.app.load_session(id);
+            let old_id = focused.id();
+            let actions = focused.app.load_loaded_session(session);
+            let sessions_dir = self.sessions_dir.clone();
+            smol::unblock(move || {
+                session_lock::release(&sessions_dir, &old_id);
+            })
+            .detach();
+            let sessions_dir = self.sessions_dir.clone();
+            smol::unblock(move || {
+                if let Err(e) = session_lock::heartbeat(&sessions_dir, &id) {
+                    warn!(id = %id, error = %e, "session lock claim failed");
+                }
+            })
+            .detach();
             self.dispatch(self.focused, actions);
             return Ok(());
         }
-        let session = AppSession::load(id, &self.ctx.storage)
-            .map_err(|e| format!("Failed to load session: {e}"))?;
         let idx = self.push_runtime(self.ctx.spawn_runtime(session));
         self.focused = idx;
         Ok(())
@@ -1440,6 +1537,7 @@ impl<'t> EventLoop<'t> {
                         model: new_model,
                         provider: Arc::from(new_provider),
                     }));
+                    self.refresh_usage_into(Arc::clone(&self.sessions[idx].app.usage_slot));
                 }
                 self.respawn_agent(idx, loaded.messages);
             }
@@ -1538,6 +1636,7 @@ impl<'t> EventLoop<'t> {
             model: new_model,
             provider: Arc::from(new_provider),
         }));
+        self.refresh_usage(self.focused);
         Ok(())
     }
 
@@ -1558,8 +1657,12 @@ impl<'t> EventLoop<'t> {
     }
 
     fn refresh_usage(&mut self, idx: usize) {
-        let provider = Arc::clone(&self.ctx.model_slot.load().provider);
         let slot = Arc::clone(&self.sessions[idx].app.usage_slot);
+        self.refresh_usage_into(slot);
+    }
+
+    fn refresh_usage_into(&self, slot: Arc<ArcSwapOption<UsageFetchState>>) {
+        let provider = Arc::clone(&self.ctx.model_slot.load().provider);
         slot.store(Some(Arc::new(UsageFetchState::Loading)));
         smol::spawn(async move {
             let state = match provider.fetch_usage().await {
@@ -1583,6 +1686,7 @@ impl<'t> EventLoop<'t> {
                     model,
                     provider: Arc::from(provider),
                 }));
+                self.refresh_usage(self.focused);
             }
         } else if let Some(builtin) = maki_config::providers::builtin_provider(&slug)
             && let Err(e) = self.change_model(self.focused, builtin.default_model)
@@ -1600,6 +1704,9 @@ impl<'t> EventLoop<'t> {
             elapsed
         };
         let exit = self.sessions[self.focused].app.exit_request;
+        for rt in &self.sessions {
+            session_lock::release(&self.sessions_dir, &rt.id());
+        }
         if let Some(ref h) = self.ctx.mcp_handle {
             mcp::kill_process_groups(&h.reader().load().pids);
         }

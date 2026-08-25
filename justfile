@@ -1,6 +1,9 @@
 default:
     @just --list
 
+install-hooks:
+    git config core.hooksPath .githooks
+
 build *ARGS:
     cargo build {{ARGS}}
 

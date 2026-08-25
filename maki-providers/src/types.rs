@@ -788,11 +788,58 @@ pub struct ProviderUsage {
     pub limits: Vec<UsageLimit>,
 }
 
+/// The kind of quota window a limit refers to, normalized across providers so
+/// the UI renders one vocabulary instead of each provider's native wording.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UsageWindow {
+    /// A rolling window of N hours (e.g. the 5-hour request lane).
+    Hours(u64),
+    /// A window bounded by whole days (daily or an N-day ticket).
+    Days(u64),
+    /// The weekly/7-day window, optionally scoped to a model/tier.
+    Weekly { model: Option<String> },
+    /// A monetary credit / usage allowance.
+    Credits,
+    /// A subscription reset period, not a token quantity.
+    Subscription,
+    /// A kind with no shared semantics; renders verbatim provider text.
+    Other(String),
+}
+
+impl UsageWindow {
+    /// The full wording shown in the usage modal.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Hours(n) => format!("{n}-hour usage"),
+            Self::Days(1) => "Daily usage".into(),
+            Self::Days(n) => format!("{n}-day usage"),
+            Self::Weekly { model: None } => "Weekly usage".into(),
+            Self::Weekly { model: Some(m) } => format!("Current week ({m})"),
+            Self::Credits => "Usage credits".into(),
+            Self::Subscription => "Subscription".into(),
+            Self::Other(text) => text.clone(),
+        }
+    }
+
+    /// A terse lane code for the compact one-line readout.
+    pub fn short(&self) -> String {
+        match self {
+            Self::Hours(n) => format!("{n}h"),
+            Self::Days(1) => "d".into(),
+            Self::Days(n) => format!("{n}d"),
+            Self::Weekly { .. } => "w".into(),
+            Self::Credits => "cr".into(),
+            Self::Subscription => "sub".into(),
+            Self::Other(text) => text.clone(),
+        }
+    }
+}
+
 /// A single quota window (e.g. a 5-hour or weekly token quota).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageLimit {
-    /// Human-readable label for the window, provided by the provider.
-    pub label: String,
+    /// Which quota window/quota kind this limit describes.
+    pub kind: UsageWindow,
     /// Usage percentage within the window, 0-100.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percentage: Option<u32>,

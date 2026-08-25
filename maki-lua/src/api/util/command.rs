@@ -342,6 +342,7 @@ pub type SessionReply = Result<serde_json::Value, String>;
 
 pub enum SessionRequest {
     List,
+    ListAll,
     Live,
     Current,
     New { prompt: Option<String>, focus: bool },

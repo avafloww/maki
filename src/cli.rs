@@ -45,13 +45,13 @@ pub struct Cli {
     #[arg(long)]
     pub verbose: bool,
 
-    /// Resume the most recent session in this directory
-    #[arg(short = 'c', long = "continue")]
-    pub continue_session: bool,
+    /// Continue the most recent session in this directory
+    #[arg(short = 'l', long = "last")]
+    pub last_session: bool,
 
-    /// Resume a specific session by its ID
-    #[arg(short = 's', long, alias = "resume")]
-    pub session: Option<String>,
+    /// Continue a session by ID. With no ID (TUI only), open the session picker for this directory
+    #[arg(short = 'c', long = "continue", num_args = 0..=1, value_name = "ID")]
+    pub continue_session: Option<Option<String>>,
 
     /// Output format for --print mode
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
@@ -210,6 +210,11 @@ pub enum Command {
     },
     /// List all available models
     Models,
+    /// List stored sessions as JSON
+    Sessions {
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the index tool on a file to see how it looks like
     Index { path: String },
     /// Manage MCP server authentication
@@ -343,5 +348,54 @@ mod tests {
     #[test]
     fn normalize_tool_name_multi_edit_rejects_snake_variant() {
         assert!(normalize_tool_name("MultiEdit").is_err());
+    }
+
+    #[test]
+    fn no_continue_flags_parse_as_absent() {
+        let cli = Cli::parse_from(["maki"]);
+        assert_eq!(cli.continue_session, None);
+        assert!(!cli.last_session);
+    }
+
+    #[test_case(&["maki", "-c"]; "short_bare")]
+    #[test_case(&["maki", "--continue"]; "long_bare")]
+    fn bare_continue_parses_as_picker_request(args: &[&str]) {
+        let cli = Cli::parse_from(args);
+        assert_eq!(cli.continue_session, Some(None));
+        assert!(!cli.last_session);
+    }
+
+    #[test_case(&["maki", "-c", "abc"]; "short")]
+    #[test_case(&["maki", "--continue", "abc"]; "long")]
+    fn valued_continue_parses_the_id(args: &[&str]) {
+        let cli = Cli::parse_from(args);
+        assert_eq!(cli.continue_session, Some(Some("abc".into())));
+        assert!(!cli.last_session);
+    }
+
+    #[test_case(&["maki", "-l"]; "short")]
+    #[test_case(&["maki", "--last"]; "long")]
+    fn last_flag_parsing(args: &[&str]) {
+        let cli = Cli::parse_from(args);
+        assert!(cli.last_session);
+        assert_eq!(cli.continue_session, None);
+    }
+
+    #[test]
+    fn bare_continue_does_not_swallow_a_following_flag() {
+        let cli = Cli::parse_from(["maki", "-c", "--yolo"]);
+        assert_eq!(cli.continue_session, Some(None));
+        assert!(cli.yolo);
+    }
+
+    #[test_case(&["maki", "--resume"]; "resume")]
+    #[test_case(&["maki", "--session"]; "session")]
+    #[test_case(&["maki", "--continue-last"]; "continue_last")]
+    #[test_case(&["maki", "-s"]; "short_s")]
+    fn legacy_resume_flags_are_rejected(args: &[&str]) {
+        assert!(
+            Cli::try_parse_from(args).is_err(),
+            "{args:?} must be rejected"
+        );
     }
 }

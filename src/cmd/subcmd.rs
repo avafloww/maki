@@ -23,6 +23,10 @@ use maki_storage::auth::{
     delete_provider_credentials, load_provider_credentials, load_tokens, save_provider_credentials,
 };
 use maki_storage::model::persist_model;
+use maki_ui::AppSession;
+
+const SESSIONS_JSON_ONLY_ERR: &str =
+    "the sessions command only supports --json; use `maki sessions --json`";
 
 pub fn auth_login(provider: Option<&str>, storage: &StateDir) -> Result<()> {
     match provider {
@@ -568,6 +572,15 @@ fn load_effective_config(host: &PluginHost, no_plugins: bool, cwd: &Path) -> Res
         .context("invalid config")
 }
 
+pub fn sessions(storage: &StateDir, json: bool) -> Result<()> {
+    if !json {
+        bail!(SESSIONS_JSON_ONLY_ERR);
+    }
+    let list = AppSession::list_all(storage).context("list sessions")?;
+    println!("{}", serde_json::to_string_pretty(&list)?);
+    Ok(())
+}
+
 pub fn index(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
@@ -730,4 +743,56 @@ pub fn prompt(
 
     print!("{output}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use maki_storage::sessions::SessionSummary;
+    use std::collections::BTreeSet;
+
+    const SESSION_ID_A: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const SESSION_ID_B: &str = "550e8400-e29b-41d4-a716-446655440001";
+
+    fn summary(id: &str, title: &str, updated_at: u64, cwd: &str) -> SessionSummary {
+        SessionSummary {
+            id: id.parse().unwrap(),
+            title: title.into(),
+            updated_at,
+            cwd: cwd.into(),
+            open_elsewhere: false,
+        }
+    }
+
+    #[test]
+    fn sessions_plain_text_is_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = StateDir::from_path(dir.path().to_path_buf());
+        let err = sessions(&storage, false).expect_err("plain text output is an error");
+        assert_eq!(err.to_string(), SESSIONS_JSON_ONLY_ERR);
+    }
+
+    #[test]
+    fn sessions_json_pins_the_serialized_fields() {
+        let list = vec![
+            summary(SESSION_ID_A, "title a", 100, "/a"),
+            summary(SESSION_ID_B, "title b", 200, "/b"),
+        ];
+        let value = serde_json::to_value(&list).unwrap();
+        let arr = value.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        for entry in arr {
+            let obj = entry.as_object().unwrap();
+            let keys: BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+            let expected: BTreeSet<_> = ["cwd", "id", "open_elsewhere", "title", "updated_at"]
+                .into_iter()
+                .collect();
+            assert_eq!(keys, expected);
+            assert!(obj["id"].is_string());
+            assert!(obj["title"].is_string());
+            assert!(obj["updated_at"].is_u64());
+            assert!(obj["cwd"].is_string());
+            assert!(!obj["open_elsewhere"].as_bool().unwrap());
+        }
+    }
 }

@@ -337,6 +337,7 @@ pub struct App {
     pub(super) rewind_picker: RewindPicker,
     pub(super) help_modal: HelpModal,
     pub(super) usage_modal: UsageModal,
+    usage_readout_watch: Watch<UsageFetchState>,
     pub(super) btw_modal: BtwModal,
     pub(super) float_mgr: FloatManager,
     pub(super) search_modal: SearchModal,
@@ -438,6 +439,7 @@ impl App {
             rewind_picker: RewindPicker::new(),
             help_modal: HelpModal::new(),
             usage_modal: UsageModal::new(),
+            usage_readout_watch: Watch::default(),
             btw_modal: BtwModal::new(typewriter),
             float_mgr: FloatManager::new(),
             search_modal: SearchModal::new(),
@@ -736,7 +738,11 @@ impl App {
                 started_at: (chat_index > 0).then_some(chat.started_at()).flatten(),
             })
             .collect();
-        entries[1..].sort_by_key(|e| e.is_finished());
+        entries[1..].sort_by(|a, b| {
+            a.is_finished()
+                .cmp(&b.is_finished())
+                .then_with(|| b.started_at.cmp(&a.started_at))
+        });
         entries
     }
 
@@ -2025,6 +2031,20 @@ impl App {
         }
     }
 
+    /// Opens the `/sessions` picker for this directory (bare `maki -c`
+    /// before the agent starts). Fire-and-forget, same path as the Ctrl+P
+    /// binding.
+    pub(crate) fn open_session_picker(&self) {
+        if let Ok(command) = self.command_runtime.registry.resolve(SESSIONS_COMMAND) {
+            let _ = smol::block_on(self.command_runtime.registry.dispatch_command(
+                command,
+                "",
+                0,
+                self.command_target,
+            ));
+        }
+    }
+
     fn execute_mcp(&mut self, prompt: &McpPromptRequest) -> RouteOutcome {
         let prompt_ref = maki_agent::McpPromptRef {
             qualified_name: prompt.qualified_name.clone(),
@@ -2254,6 +2274,7 @@ impl App {
             | self.mcp_picker.refresh()
             | self.model_picker.refresh()
             | self.usage_modal.poll(&self.usage_slot)
+            | self.usage_readout_watch.poll(self.usage_slot.load_full())
             | self.hints.poll(self.hint_reader.load_full())
             | self.tick_file_picker()
             | self.tick_file_completion()

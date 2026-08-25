@@ -20,7 +20,9 @@ use maki_agent::{
 use maki_config::{PermissionsConfig, UiConfig};
 use maki_lua::test_support::{HintWriterHandle, hint_writer_pair};
 use maki_lua::{BuiltinAction, CommandArgumentItem, HintReader, KeymapReader};
-use maki_providers::{ContentBlock, Effort, Message, Role, TokenUsage};
+use maki_providers::{
+    ContentBlock, Effort, Message, ProviderUsage, Role, TokenUsage, UsageLimit, UsageWindow,
+};
 use maki_storage::sessions::{StoredMode, StoredSubagent, StoredThinking};
 use ratatui::layout::Rect;
 use std::env;
@@ -1084,7 +1086,7 @@ fn load_session_clears_plan() {
     let id = app.state.session.id;
     app.state.mode = Mode::Build;
     app.state.plan = PlanState::Ready(PathBuf::from("old-plan.md"));
-    app.load_session(id);
+    app.load_loaded_session(AppSession::load(id, &app.storage).unwrap());
     assert_eq!(app.state.mode, Mode::Build);
     assert_eq!(app.state.plan.path(), None);
 }
@@ -1630,6 +1632,32 @@ fn task_entries_sorted_running_first() {
 }
 
 #[test]
+fn task_entries_sort_alive_then_most_recent() {
+    let mut app = app_with_subagent_id("task1");
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "y".into() },
+        "task2",
+        Some("build"),
+    ));
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "z".into() },
+        "task3",
+        Some("test"),
+    ));
+
+    finish_subagent(&mut app, "task3", false);
+
+    let entries = app.task_entries();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.chat_index)
+            .collect::<Vec<_>>(),
+        vec![0, 2, 1, 3]
+    );
+}
+
+#[test]
 fn task_entry_shows_context_and_ago() {
     let mut app = app_with_subagent();
     app.chats[1].context_size = 5000;
@@ -1676,6 +1704,59 @@ fn rendered_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
                 .collect()
         })
         .collect()
+}
+
+#[test]
+fn usage_readout_draws_in_status_bar() {
+    let mut app = test_app();
+    let usage = ProviderUsage {
+        plan: None,
+        limits: vec![
+            UsageLimit {
+                kind: UsageWindow::Hours(5),
+                percentage: Some(30),
+                reset_at: None,
+                detail: None,
+            },
+            UsageLimit {
+                kind: UsageWindow::Weekly { model: None },
+                percentage: Some(50),
+                reset_at: None,
+                detail: None,
+            },
+        ],
+    };
+    app.usage_slot
+        .store(Some(Arc::new(UsageFetchState::Ready(usage))));
+    let rows = rendered_rows(&mut app, 80, 24);
+    let text = rows.join("\n");
+    assert!(
+        text.contains("5h30% w50%"),
+        "usage readout missing from rendered bottom region:\n{text}"
+    );
+}
+
+#[test]
+fn usage_readout_blank_for_non_ready_states() {
+    let app = test_app();
+    app.usage_slot
+        .store(Some(Arc::new(UsageFetchState::Loading)));
+    assert!(
+        app.usage_readout().is_none(),
+        "Loading must not paint a readout"
+    );
+    app.usage_slot
+        .store(Some(Arc::new(UsageFetchState::Unsupported)));
+    assert!(
+        app.usage_readout().is_none(),
+        "Unsupported must not paint a readout"
+    );
+    app.usage_slot
+        .store(Some(Arc::new(UsageFetchState::Error("boom".into()))));
+    assert!(
+        app.usage_readout().is_none(),
+        "Error must not paint a readout"
+    );
 }
 
 #[test]
@@ -1858,7 +1939,8 @@ fn open_task_picker_inserts_new_child_without_changing_selection() {
         Some("build"),
     ));
 
-    assert_eq!(app.task_picker.item(2).unwrap().name, "build");
+    assert_eq!(app.task_picker.item(1).unwrap().name, "build");
+    assert_eq!(app.task_picker.item(2).unwrap().name, "research");
     assert_eq!(app.task_picker.selected_item().unwrap().chat_index, 1);
 }
 
@@ -3610,6 +3692,35 @@ fn run_cmdline_forwards_depth_to_lua_command() {
     assert_eq!(
         probe.try_recv_command(),
         Some(("/Sessions".to_string(), String::new(), 3))
+    );
+}
+
+/// The bare `-c` startup path must reach the picker with no arg, so the
+/// picker lists this directory's sessions only.
+#[test]
+fn open_session_picker_sends_no_arg_to_lua() {
+    let dir = StateDir::from_path(env::temp_dir());
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    let (registry, _producer) = lua_registry(TestLuaCommand {
+        handle: handle.clone(),
+        name: Arc::from("/sessions"),
+        plugin: Arc::from("sessions"),
+        max_args: Some(1),
+        completion: false,
+    });
+    let app = build_app_with_full(
+        dir.clone(),
+        Arc::new(test_writer(dir)),
+        registry,
+        handle,
+        UiConfig::default(),
+    );
+
+    app.open_session_picker();
+
+    assert_eq!(
+        probe.try_recv_command(),
+        Some(("/sessions".to_string(), String::new(), 0))
     );
 }
 
@@ -5518,7 +5629,7 @@ fn load_session_persists_the_new_session_and_leaks_no_history_into_it() {
     app.checkpoint();
     let (live_id, sent_revision) = (app.state.session.id, app.state.session.revision());
 
-    app.load_session(stored.id);
+    app.load_loaded_session(AppSession::load(stored.id, &dir).unwrap());
     assert_eq!(app.state.session.id, stored.id);
     // Walk the loaded session up to the revision already sent for the live one,
     // so the checkpoint below lands on the exact collision.

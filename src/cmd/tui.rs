@@ -6,7 +6,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use color_eyre::Result;
-use color_eyre::eyre::Context;
+use color_eyre::eyre::{Context, bail};
+use crossterm::style::Stylize;
 
 use maki_agent::command::{self, CustomCommand};
 use maki_agent::tools::ToolRegistry;
@@ -15,7 +16,8 @@ use maki_lua::PluginHost;
 use maki_providers::model::Model;
 use maki_storage::StateDir;
 use maki_storage::id::MakiId;
-use maki_storage::sessions::StoredThinking;
+use maki_storage::session_lock;
+use maki_storage::sessions::{SESSIONS_DIR, StoredThinking};
 use maki_ui::{AppSession, RunOutcome};
 
 use crate::cli::{Cli, normalize_tool_name};
@@ -24,6 +26,7 @@ use crate::setup;
 const FALLBACK_MODEL_SPEC: &str = "anthropic/claude-sonnet-4-20250514";
 const CONFIG_FALLBACK_WARNING: &str = "config reload failed, using previous config";
 const MODEL_FALLBACK_WARNING: &str = "model resolution failed, keeping previous model";
+const PICKER_NEEDS_TUI_ERR: &str = "continuing without a session ID opens the session picker, which needs the TUI; run `makima sessions --json` to list session IDs";
 
 /// One generation of the app: everything torn down and rebuilt on `/reload`.
 /// Dropping it joins the Lua thread via `PluginHost::drop`.
@@ -196,21 +199,33 @@ fn build_stack(
 }
 
 fn resolve_session(
-    continue_session: bool,
+    last_session: bool,
     session_id: Option<&str>,
     model: &str,
     cwd: &str,
     storage: &StateDir,
 ) -> Result<AppSession> {
+    let sessions_dir = storage.ensure_subdir(SESSIONS_DIR)?;
     if let Some(raw) = session_id {
         let id: MakiId = raw
             .parse()
             .map_err(|e| color_eyre::eyre::eyre!("invalid session id {raw:?}: {e}"))?;
-        return AppSession::load(id, storage).map_err(|e| color_eyre::eyre::eyre!("{e}"));
+        let session = AppSession::load(id, storage).map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
+        let locked = session_lock::open_elsewhere(&sessions_dir, &session.id);
+        if let Some(block) = session_lock::resume_block(&session.cwd, cwd, locked) {
+            return Err(color_eyre::eyre::eyre!("session {id}: {block}"));
+        }
+        return Ok(session);
     }
-    if continue_session {
+    if last_session {
         match AppSession::latest(cwd, storage) {
-            Ok(Some(session)) => return Ok(session),
+            Ok(Some(session)) => {
+                let locked = session_lock::open_elsewhere(&sessions_dir, &session.id);
+                if let Some(block) = session_lock::resume_block(&session.cwd, cwd, locked) {
+                    return Err(color_eyre::eyre::eyre!("session {}: {block}", session.id));
+                }
+                return Ok(session);
+            }
             Ok(None) => {
                 tracing::info!("no previous session found for this directory, starting new");
             }
@@ -234,7 +249,31 @@ fn read_initial_prompt(cli_prompt: Option<String>) -> Result<Option<String>> {
     }
 }
 
+/// A bare `-c` (no ID) asks for the session picker; a valued flag
+/// continues by ID and an absent flag starts fresh.
+fn session_picker_requested(cli: &Cli) -> bool {
+    matches!(cli.continue_session, Some(None))
+}
+
+/// Exit hint offering both resume options; the flags and the session ID
+/// are cyan-highlighted only when stderr is a TTY, so piped output stays
+/// plain text.
+fn exit_resume_hint(id: &str, colored: bool) -> String {
+    if !colored {
+        return format!("Resume session:\n\n  makima -c {id}\n  makima -l");
+    }
+    format!(
+        "Resume session:\n\n  makima {} {}\n  makima {}",
+        "-c".cyan(),
+        id.cyan(),
+        "-l".cyan()
+    )
+}
+
 pub fn run(mut cli: Cli) -> Result<()> {
+    if cli.print && session_picker_requested(&cli) {
+        bail!(PICKER_NEEDS_TUI_ERR);
+    }
     let storage = StateDir::resolve().context("resolve data directory")?;
     maki_providers::model_registry::load_from_storage(&storage);
 
@@ -298,9 +337,11 @@ pub fn run(mut cli: Cli) -> Result<()> {
     }
 
     let cwd_str = cwd.to_string_lossy().into_owned();
+    let session_id = cli.continue_session.as_ref().and_then(|o| o.as_deref());
+    let mut session_picker = session_picker_requested(&cli);
     let mut tabs = vec![resolve_session(
-        cli.continue_session,
-        cli.session.as_deref(),
+        cli.last_session && !session_picker,
+        session_id,
         &stack.model.spec(),
         &cwd_str,
         &storage,
@@ -356,6 +397,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
                 timeouts: stack.timeouts(),
                 exit_on_done: cli.exit_on_done,
                 command_registry: stack.plugin_host.command_registry(),
+                session_picker,
                 keymap_reader: stack.plugin_host.keymap_reader(),
                 hint_reader: stack.plugin_host.hint_reader(),
                 ui_action_rx: stack.plugin_host.ui_action_rx(),
@@ -371,7 +413,8 @@ pub fn run(mut cli: Cli) -> Result<()> {
         match outcome {
             RunOutcome::Exit { session_id, code } => {
                 if let Some(session_id) = session_id {
-                    eprintln!("Resume session:\n\n  makima -s {session_id}");
+                    let colored = io::stderr().is_terminal();
+                    eprintln!("{}", exit_resume_hint(&session_id.to_string(), colored));
                 }
                 let started = Instant::now();
                 drop(stack);
@@ -391,6 +434,9 @@ pub fn run(mut cli: Cli) -> Result<()> {
                 tabs: reloaded,
                 focused: f,
             } => {
+                // The picker is a one-shot startup request; a later
+                // `/reload` must reopen a fresh tab instead of re-prompting.
+                session_picker = false;
                 let started = Instant::now();
                 let last_good = (stack.config.clone(), stack.model.clone());
                 // Shut the old host down first so nothing can repopulate
@@ -443,6 +489,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use test_case::test_case;
 
     /// `second_saw_first` requires both joins: `defer` joining the first
     /// closure before spawning the second, and `Drop` joining the second
@@ -569,6 +616,117 @@ mod tests {
             .expect("builtins load on the live host under --no-plugins");
 
         plugin_host.begin_shutdown();
+    }
+
+    /// Bare `-c` (no ID) is the only shape that opens the picker;
+    /// an absent flag must never trip it.
+    #[test]
+    fn session_picker_requested_requires_bare_resume() {
+        use clap::Parser;
+
+        assert!(!session_picker_requested(&Cli::parse_from(["maki"])));
+        assert!(session_picker_requested(&Cli::parse_from(["maki", "-c"])));
+        assert!(session_picker_requested(&Cli::parse_from([
+            "maki",
+            "--continue"
+        ])));
+        assert!(!session_picker_requested(&Cli::parse_from([
+            "maki", "-c", "abc"
+        ])));
+    }
+
+    #[test]
+    fn print_mode_bare_continue_errors() {
+        use clap::Parser;
+
+        let err = run(Cli::parse_from(["maki", "--print", "-c"]))
+            .expect_err("bare -c under --print fails before any stack work");
+        assert!(err.to_string().contains(PICKER_NEEDS_TUI_ERR));
+    }
+
+    const OTHER_CWD: &str = "/elsewhere";
+    const THIS_CWD: &str = "/here";
+    /// A pid no live process on this machine has.
+    const FAKE_PID: u32 = u32::MAX - 1;
+
+    #[test]
+    fn resolve_session_rejects_session_from_other_cwd() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().unwrap();
+        let storage = StateDir::from_path(tmp.path().to_path_buf());
+        let mut session = AppSession::new("test-model", OTHER_CWD);
+        session.save(&storage).unwrap();
+        let err = resolve_session(
+            false,
+            Some(&session.id.to_string()),
+            "test-model",
+            THIS_CWD,
+            &storage,
+        )
+        .expect_err("a session stored under another cwd must be rejected");
+        assert!(err.to_string().contains(OTHER_CWD));
+    }
+
+    #[test_case(true; "valued_continue")]
+    #[test_case(false; "last")]
+    fn resolve_session_rejects_session_open_elsewhere(valued: bool) {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().unwrap();
+        let storage = StateDir::from_path(tmp.path().to_path_buf());
+        let mut session = AppSession::new("test-model", THIS_CWD);
+        session.save(&storage).unwrap();
+        let sessions_dir = storage.ensure_subdir(SESSIONS_DIR).unwrap();
+        let (last, id_arg) = match valued {
+            true => (false, Some(session.id.to_string())),
+            false => (true, None),
+        };
+
+        let loaded = resolve_session(last, id_arg.as_deref(), "test-model", THIS_CWD, &storage)
+            .expect("an unlocked session loads");
+        assert_eq!(loaded.id, session.id);
+
+        fs::write(
+            session_lock::lock_path(&sessions_dir, &session.id),
+            FAKE_PID.to_string(),
+        )
+        .unwrap();
+        let err = resolve_session(last, id_arg.as_deref(), "test-model", THIS_CWD, &storage)
+            .expect_err("a session locked by another instance must be rejected");
+        assert!(err.to_string().contains(session_lock::OPEN_ELSEWHERE_MSG));
+    }
+
+    #[test]
+    fn exit_resume_hint_plain_mentions_both_flags() {
+        let hint = exit_resume_hint("abc", false);
+        assert!(hint.contains("makima -c abc"));
+        assert!(hint.contains("makima -l"));
+        assert!(!hint.contains("\u{1b}["));
+    }
+
+    #[test]
+    fn exit_resume_hint_colored_highlights_flags_and_id() {
+        let hint = exit_resume_hint("abc", true);
+        assert!(hint.contains("\u{1b}["));
+        assert_eq!(strip_ansi(&hint), exit_resume_hint("abc", false));
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 
     /// Negative control for the test above: without `--no-plugins`, the

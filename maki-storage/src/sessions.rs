@@ -24,7 +24,7 @@ use crate::id::{MakiId, MakiIdParseError};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::{StateDir, StorageError, atomic_write, now_epoch};
+use crate::{StateDir, StorageError, atomic_write, now_epoch, session_lock};
 
 const SESSION_VERSION: u32 = 1;
 const LOG_FORMAT_VERSION: u32 = 2;
@@ -78,6 +78,8 @@ pub enum SessionError {
     },
     #[error("session log diverged ({reason}); rewrite required")]
     LogDiverged { reason: &'static str },
+    #[error("session is open in another terminal; close it there first")]
+    OpenElsewhere,
 }
 
 /// Per-model token breakdown entry. Mirrors the four usage counters tracked by
@@ -239,6 +241,8 @@ pub struct SessionSummary {
     pub id: MakiId,
     pub title: String,
     pub updated_at: u64,
+    pub cwd: String,
+    pub open_elsewhere: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1199,7 +1203,7 @@ fn file_signature(path: &Path) -> Option<(u64, u64)> {
     Some((meta.len(), mtime_ms))
 }
 
-fn scan_headers(cwd: &str, dir: &Path) -> Result<Vec<SessionSummary>, StorageError> {
+fn scan_headers(cwd: Option<&str>, dir: &Path) -> Result<Vec<SessionSummary>, StorageError> {
     let mut cache = load_scan_cache(dir);
     let mut fresh = ScanCache::new();
     let mut dirty = false;
@@ -1228,12 +1232,16 @@ fn scan_headers(cwd: &str, dir: &Path) -> Result<Vec<SessionSummary>, StorageErr
             }
         };
         if let Some(h) = &entry.header
-            && h.cwd == cwd
+            && cwd.is_none_or(|c| crate::paths::dirs_equal(&h.cwd, c))
         {
             out.push(SessionSummary {
                 id: h.id,
                 title: normalize_title(&h.title),
                 updated_at: h.updated_at,
+                cwd: h.cwd.clone(),
+                // Recomputed from the lock file on every scan: the summary
+                // cache must not pin a stale open-elsewhere flag.
+                open_elsewhere: session_lock::open_elsewhere(dir, &h.id),
             });
         }
         fresh.insert(name.to_owned(), entry);
@@ -1673,7 +1681,18 @@ where
     }
 
     pub fn list_in(cwd: &str, dir: &Path) -> Result<Vec<SessionSummary>, SessionError> {
-        let mut summaries = scan_headers(cwd, dir)?;
+        let mut summaries = scan_headers(Some(cwd), dir)?;
+        summaries.sort_unstable_by_key(|s| Reverse(s.updated_at));
+        Ok(summaries)
+    }
+
+    pub fn list_all(dir: &StateDir) -> Result<Vec<SessionSummary>, SessionError> {
+        let sessions_dir = dir.ensure_subdir(SESSIONS_DIR)?;
+        Self::list_all_in(&sessions_dir)
+    }
+
+    pub fn list_all_in(dir: &Path) -> Result<Vec<SessionSummary>, SessionError> {
+        let mut summaries = scan_headers(None, dir)?;
         summaries.sort_unstable_by_key(|s| Reverse(s.updated_at));
         Ok(summaries)
     }
@@ -1700,7 +1719,7 @@ where
             }
         }
 
-        scan_headers(cwd, dir)?
+        scan_headers(Some(cwd), dir)?
             .into_iter()
             .max_by_key(|s| s.updated_at)
             .map(|s| Self::load_from(s.id, dir).map(Some))
@@ -1719,6 +1738,9 @@ where
     }
 
     pub fn delete_from(id: MakiId, dir: &Path) -> Result<(), SessionError> {
+        if session_lock::open_elsewhere(dir, &id) {
+            return Err(SessionError::OpenElsewhere);
+        }
         let mut removed = try_remove(&jsonl_path(dir, id))?;
         removed |= remove_legacy_files(dir, id)?;
         // Backups, not the session: failing to sweep them must not fail a
@@ -1729,6 +1751,7 @@ where
         {
             warn!(error = %e, session_id = %id, "session archives remain after delete");
         }
+        session_lock::release(dir, &id);
         if !removed {
             return Err(StorageError::NotFound(id.to_string()).into());
         }
@@ -1755,6 +1778,7 @@ mod tests {
     use super::{Prefs, read_prefs, write_prefs};
     use crate::StateDir;
     use crate::id::MakiId;
+    use crate::session_lock;
     use serde_json::Value;
     use std::collections::HashMap;
     use std::fs::{self, OpenOptions};
@@ -1774,6 +1798,8 @@ mod tests {
     /// Two of these already break the byte budget.
     const FAKE_ARCHIVE_BYTES: u64 = ARCHIVE_MAX_BYTES / 2;
     const EXISTING_ARCHIVE_SEQ: u64 = 7;
+    /// A pid no live process on this machine has.
+    const FAKE_LOCK_PID: u32 = u32::MAX - 1;
 
     impl TitleSource for Value {
         fn first_user_text(&self) -> Option<&str> {
@@ -2519,6 +2545,61 @@ mod tests {
         let list = TestSession::list_in("/project-a", dir).unwrap();
         assert_eq!(list.len(), 2);
         assert!(list.iter().all(|s| s.id != s2.id));
+        assert!(list.iter().all(|s| s.cwd == "/project-a"));
+    }
+
+    #[test]
+    fn list_all_in_returns_every_cwd_with_directory() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut s1: TestSession = Session::new("m", "/a");
+        s1.updated_at = 100;
+        SessionLog::rewrite(dir, &s1).unwrap();
+        let mut s2: TestSession = Session::new("m", "/b");
+        s2.updated_at = 200;
+        SessionLog::rewrite(dir, &s2).unwrap();
+
+        let list = TestSession::list_all_in(dir).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, s2.id);
+        assert_eq!(list[0].cwd, "/b");
+        assert_eq!(list[1].id, s1.id);
+        assert_eq!(list[1].cwd, "/a");
+    }
+
+    #[test]
+    fn list_in_flags_open_elsewhere() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut s: TestSession = Session::new("m", "/project");
+        s.save_to(dir).unwrap();
+
+        let list = TestSession::list_in("/project", dir).unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(!list[0].open_elsewhere, "no lock yet");
+
+        fs::write(
+            session_lock::lock_path(dir, &s.id),
+            FAKE_LOCK_PID.to_string(),
+        )
+        .unwrap();
+        let list = TestSession::list_in("/project", dir).unwrap();
+        assert!(list[0].open_elsewhere, "fresh foreign lock");
+        let list = TestSession::list_all_in(dir).unwrap();
+        assert!(list[0].open_elsewhere);
+    }
+
+    #[test]
+    fn delete_from_removes_the_lock_file() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut s: TestSession = Session::new("m", "/project");
+        s.save_to(dir).unwrap();
+        session_lock::heartbeat(dir, &s.id).unwrap();
+        assert!(session_lock::lock_path(dir, &s.id).exists());
+
+        TestSession::delete_from(s.id, dir).unwrap();
+        assert!(!session_lock::lock_path(dir, &s.id).exists());
     }
 
     /// Rewrites the scan-cache title of `id` without touching the session

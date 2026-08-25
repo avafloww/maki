@@ -26,14 +26,28 @@ async fn roundtrip(
 }
 
 /// Lists sessions stored for the current project. Answered from a
-/// background scan, so a slow disk never blocks the UI.
+/// background scan, so a slow disk never blocks the UI. `open_elsewhere` is
+/// true while another makima instance has the session open.
 ///
-/// @return (table|nil, string|nil) Array of `{id, title, updated_at}`, or nil and an error.
+/// @return (table|nil, string|nil) Array of `{id, title, updated_at, cwd, open_elsewhere}`, or nil and an error.
 /// @example
 /// local stored, err = maki.session.list()
 #[lua_fn]
 async fn list(lua: Lua, #[ctx] tx: Option<flume::Sender<UiAction>>) -> LuaResult<Pair<Value>> {
     roundtrip(lua, tx, SessionRequest::List).await
+}
+
+/// Lists stored sessions across every project directory, most recently
+/// updated first. Answered from a background scan, so a slow disk never
+/// blocks the UI. `open_elsewhere` is true while another makima instance has
+/// the session open.
+///
+/// @return (table|nil, string|nil) Array of `{id, title, updated_at, cwd, open_elsewhere}`, or nil and an error.
+/// @example
+/// local stored, err = maki.session.list_all()
+#[lua_fn]
+async fn list_all(lua: Lua, #[ctx] tx: Option<flume::Sender<UiAction>>) -> LuaResult<Pair<Value>> {
+    roundtrip(lua, tx, SessionRequest::ListAll).await
 }
 
 /// Lists the sessions currently running in this UI. Status is "working",
@@ -58,7 +72,8 @@ async fn current(lua: Lua, #[ctx] tx: Option<flume::Sender<UiAction>>) -> LuaRes
     roundtrip(lua, tx, SessionRequest::Current).await
 }
 
-/// Switches the UI to the session with {id}.
+/// Switches the UI to the session with {id}. The session must belong to
+/// the current directory and must not be open in another terminal.
 ///
 /// @param id string Session id, as returned by `list()` or `live()`.
 /// @return (boolean|nil, string|nil) true on success, or nil and an error.
@@ -227,7 +242,7 @@ lua_table! {
     /// attached"` without a UI. `notify` instead targets a live agent mailbox
     /// directly, so it also works under ACP and SDK frontends.
     "maki.session" => pub(crate) fn create_session_table(tx: Option<flume::Sender<UiAction>>),
-    DOCS [list(tx), live(tx), current(tx), focus(tx), delete(tx), new(tx), prompt(tx), notify(), set_title(tx), thinking(tx), set_thinking(tx)]
+    DOCS [list(tx), list_all(tx), live(tx), current(tx), focus(tx), delete(tx), new(tx), prompt(tx), notify(), set_title(tx), thinking(tx), set_thinking(tx)]
 }
 
 #[cfg(test)]

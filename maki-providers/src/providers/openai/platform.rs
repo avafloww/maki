@@ -11,7 +11,7 @@ use crate::model::Model;
 use crate::provider::{BoxFuture, Provider};
 use crate::{
     AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse, UsageLimit,
-    dialect,
+    UsageWindow, dialect,
 };
 
 use super::auth;
@@ -216,25 +216,21 @@ fn usage_percentage(percentage: f64) -> Option<u32> {
         .then(|| percentage.round().clamp(0.0, 100.0) as u32)
 }
 
-fn usage_label(seconds: u64) -> String {
+fn usage_window(seconds: u64) -> UsageWindow {
     if seconds == SECONDS_PER_WEEK {
-        return "Weekly usage".into();
+        UsageWindow::Weekly { model: None }
+    } else if seconds.is_multiple_of(SECONDS_PER_DAY) {
+        UsageWindow::Days(seconds / SECONDS_PER_DAY)
+    } else if seconds.is_multiple_of(SECONDS_PER_HOUR) {
+        UsageWindow::Hours(seconds / SECONDS_PER_HOUR)
+    } else {
+        UsageWindow::Other(format!("{seconds}-second usage"))
     }
-    if seconds == SECONDS_PER_DAY {
-        return "Daily usage".into();
-    }
-    if seconds.is_multiple_of(SECONDS_PER_DAY) {
-        return format!("{}-day usage", seconds / SECONDS_PER_DAY);
-    }
-    if seconds.is_multiple_of(SECONDS_PER_HOUR) {
-        return format!("{}-hour usage", seconds / SECONDS_PER_HOUR);
-    }
-    format!("{seconds}-second usage")
 }
 
 fn usage_limit(window: CodexUsageWindow) -> Option<UsageLimit> {
     Some(UsageLimit {
-        label: usage_label(window.limit_window_seconds?),
+        kind: usage_window(window.limit_window_seconds?),
         percentage: usage_percentage(window.used_percent?),
         reset_at: window
             .reset_at
@@ -434,13 +430,13 @@ mod tests {
             usage.limits,
             vec![
                 UsageLimit {
-                    label: "5-hour usage".into(),
+                    kind: UsageWindow::Hours(5),
                     percentage: Some(13),
                     reset_at: Some(1_760_000_000_000),
                     detail: None,
                 },
                 UsageLimit {
-                    label: "Weekly usage".into(),
+                    kind: UsageWindow::Weekly { model: None },
                     percentage: Some(100),
                     reset_at: Some(1_760_100_000_000),
                     detail: None,
@@ -461,7 +457,7 @@ mod tests {
         assert_eq!(
             usage.limits,
             vec![UsageLimit {
-                label: "Daily usage".into(),
+                kind: UsageWindow::Days(1),
                 percentage: Some(0),
                 reset_at: None,
                 detail: None,
