@@ -707,7 +707,11 @@ impl App {
                 started_at: (chat_index > 0).then_some(chat.started_at()).flatten(),
             })
             .collect();
-        entries[1..].sort_by_key(|e| e.is_finished());
+        entries[1..].sort_by(|a, b| {
+            a.is_finished()
+                .cmp(&b.is_finished())
+                .then_with(|| b.started_at.cmp(&a.started_at))
+        });
         entries
     }
 

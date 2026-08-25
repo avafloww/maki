@@ -1401,6 +1401,29 @@ fn task_entries_sorted_running_first() {
 }
 
 #[test]
+fn task_entries_sort_alive_then_most_recent() {
+    let mut app = app_with_subagent_id("task1");
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "y".into() },
+        "task2",
+        Some("build"),
+    ));
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "z".into() },
+        "task3",
+        Some("test"),
+    ));
+
+    finish_subagent(&mut app, "task3", false);
+
+    let entries = app.task_entries();
+    assert_eq!(
+        entries.iter().map(|entry| entry.chat_index).collect::<Vec<_>>(),
+        vec![0, 2, 1, 3]
+    );
+}
+
+#[test]
 fn task_entry_shows_context_and_ago() {
     let mut app = app_with_subagent();
     app.chats[1].context_size = 5000;
