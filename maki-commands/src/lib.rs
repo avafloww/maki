@@ -517,6 +517,8 @@ impl CommandRegistry {
         let Some(parsed) = ParsedInput::parse(input) else {
             return Box::pin(async { Ok(InputDispatch::NotCommand) });
         };
+        // Only resolved commands consume dispatch budget: anything else stays
+        // ordinary model text regardless of depth.
         let Ok(command) = self.resolve(parsed.name) else {
             return Box::pin(async { Ok(InputDispatch::UnknownCommandInput) });
         };
@@ -1057,50 +1059,48 @@ pub enum CommandClassification {
 pub struct InvocationLifecycle(Arc<dyn ClassifyInvocation>);
 
 struct ClassificationState {
-    classification: Mutex<Option<CommandClassification>>,
-    waker: Mutex<Option<Waker>>,
+    inner: Mutex<ClassificationInner>,
+}
+
+struct ClassificationInner {
+    classification: Option<CommandClassification>,
+    waker: Option<Waker>,
 }
 
 impl ClassifyInvocation for ClassificationState {
     fn transition(&self, classification: CommandClassification) -> bool {
-        let mut current = self
-            .classification
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if current.is_some() {
-            return false;
-        }
-        *current = Some(classification);
-        drop(current);
-        if let Some(waker) = self
-            .waker
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take()
-        {
+        let waker = {
+            let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            if inner.classification.is_some() {
+                return false;
+            }
+            inner.classification = Some(classification);
+            inner.waker.take()
+        };
+        if let Some(waker) = waker {
             waker.wake();
         }
         true
     }
 
     fn poll_classification(&self, waker: &Waker) -> Poll<CommandClassification> {
-        if let Some(classification) = self
-            .classification
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
-        {
-            return Poll::Ready(classification);
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        match inner.classification.clone() {
+            Some(classification) => Poll::Ready(classification),
+            None => {
+                inner.waker = Some(waker.clone());
+                Poll::Pending
+            }
         }
-        *self.waker.lock().unwrap_or_else(|error| error.into_inner()) = Some(waker.clone());
-        Poll::Pending
     }
 }
 
 fn classification_channel() -> (InvocationLifecycle, CommandFuture<CommandClassification>) {
     let lifecycle = InvocationLifecycle(Arc::new(ClassificationState {
-        classification: Mutex::new(None),
-        waker: Mutex::new(None),
+        inner: Mutex::new(ClassificationInner {
+            classification: None,
+            waker: None,
+        }),
     }));
     let classification = lifecycle.classification();
     (lifecycle, classification)
@@ -1619,12 +1619,42 @@ pub enum CompletionError {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
     use super::{
-        ArgumentArity, BUILTIN_COMMANDS, CancellationToken, CommandBehavior, CommandCompletion,
-        CommandDocs, CommandFuture, CommandInvocation, CommandSpec, CompletionContext,
-        CompletionItem, Registration,
+        ArgumentArity, BUILTIN_COMMANDS, CancellationToken, CommandBehavior, CommandClassification,
+        CommandCompletion, CommandDocs, CommandFuture, CommandInvocation, CommandSpec,
+        CompletionContext, CompletionItem, InvocationLifecycle, Registration,
     };
+
+    struct WakeCounter(AtomicUsize);
+
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn transition_wakes_registered_poller_exactly_once() {
+        let lifecycle = InvocationLifecycle::detached();
+        let mut classification = lifecycle.classification();
+        let counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let waker = Waker::from(counter.clone());
+        let mut context = Context::from_waker(&waker);
+        assert!(classification.as_mut().poll(&mut context).is_pending());
+
+        assert!(lifecycle.transition(CommandClassification::Completed));
+        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            classification.as_mut().poll(&mut context),
+            Poll::Ready(CommandClassification::Completed)
+        ));
+        assert!(!lifecycle.transition(CommandClassification::Failed(
+            super::CommandError::Producer(Arc::from("late")),
+        )));
+    }
 
     struct Behavior;
 
@@ -2791,5 +2821,37 @@ mod tests {
         ))
         .unwrap_err();
         assert_eq!(error, super::CommandError::MaximumDepth);
+    }
+
+    #[test]
+    fn depth_limit_boundary_allows_max_depth() {
+        let registry = super::CommandRegistry::new();
+        let producer = registry.create_producer(super::ProducerPrecedence::Builtin);
+        producer
+            .replace(vec![registration("/run", &[], ArgumentArity::ANY)])
+            .unwrap();
+        let target = registry.create_target();
+        let dispatch = futures_lite::future::block_on(registry.dispatch_input(
+            "/run",
+            super::MAX_COMMAND_DEPTH,
+            target,
+        ))
+        .unwrap();
+        assert!(matches!(dispatch, super::InputDispatch::Dispatched(_)));
+    }
+
+    #[test]
+    fn unknown_commands_fall_through_at_any_depth() {
+        let registry = super::CommandRegistry::new();
+        let target = registry.create_target();
+        for depth in [0, super::MAX_COMMAND_DEPTH, super::MAX_COMMAND_DEPTH + 1] {
+            let dispatch =
+                futures_lite::future::block_on(registry.dispatch_input("/nope", depth, target))
+                    .unwrap();
+            assert!(
+                matches!(dispatch, super::InputDispatch::UnknownCommandInput),
+                "depth {depth} did not fall through"
+            );
+        }
     }
 }
