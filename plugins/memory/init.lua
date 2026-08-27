@@ -127,7 +127,7 @@ local function cmd_write(path, content, tags, dir, ctx)
   end
   local full = helpers.encode_frontmatter(normalized) .. content
   maki.fs.mkdir(dir, { parents = true })
-  local ok, write_err = maki.fs.write(file_path, full)
+  local ok, write_err = maki.fs.atomic_write(file_path, full)
   if not ok then
     return nil, "write error: " .. tostring(write_err)
   end

@@ -287,6 +287,7 @@ impl AgentLoop {
                 audience: ToolAudience::MAIN,
                 question_mode: QuestionMode::Tui,
                 model_policy: Arc::clone(&self.model_policy),
+                file_write_locks: Arc::new(maki_agent::tools::FileWriteLocks::new()),
             },
             AgentRunParams {
                 history: &mut self.history,

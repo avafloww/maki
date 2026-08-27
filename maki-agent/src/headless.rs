@@ -239,6 +239,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                     audience: ToolAudience::MAIN,
                     question_mode: crate::tools::QuestionMode::Headless,
                     model_policy: Arc::clone(&params.model_policy),
+                    file_write_locks: Arc::new(crate::tools::FileWriteLocks::new()),
                 },
                 AgentRunParams {
                     history: &mut history,
@@ -476,6 +477,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                         audience: ToolAudience::MAIN,
                         question_mode: params.question_mode,
                         model_policy: Arc::clone(&params.model_policy),
+                        file_write_locks: Arc::new(crate::tools::FileWriteLocks::new()),
                     },
                     AgentRunParams {
                         history: &mut history,

@@ -624,6 +624,7 @@ async fn session(
             audience,
             question_mode: agent_ctx.question_mode,
             model_policy: Arc::clone(&agent_ctx.model_policy),
+            file_write_locks: Arc::clone(&agent_ctx.file_write_locks),
         },
         system: system.unwrap_or_default(),
         tools: tools_json,
